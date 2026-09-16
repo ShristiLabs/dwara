@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI routing decisions (DW-076): which provider/model serves one request, and in what order to fail over."><title>dwara_core::ai::routing - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module routing</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module routing</a></h2><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>routing</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/routing.rs.html#1-126">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI routing decisions (DW-076): which provider/model serves one
+request, and in what order to fail over.</p>
+<p>Pure functions over the compiled <a href="../struct.AiRuntime.html" title="struct dwara_core::ai::AiRuntime"><code>AiRuntime</code></a>
+structures — no I/O, no clocks, no shared state. The dataplane’s AI
+action calls <a href="../struct.AiRuntime.html#method.route" title="method dwara_core::ai::AiRuntime::route"><code>route</code></a> once per request
+and walks the returned candidates; this module owns the two
+decision kinds:</p>
+<ul>
+<li><strong>Failover chain</strong> (an alias with <code>failover:</code>): candidates are
+<code>[primary, alternates...]</code> in config order. The action tries each
+in turn on 429/5xx/transport errors and STOPS at the first
+non-retryable outcome. Same-provider retries are not the chain’s
+job — the provider’s upstream breaker owns those.</li>
+<li><strong>Canary split</strong> (an alias with <code>canary:</code>): ONE candidate is
+picked deterministically by a weighted hash of the pick key (the
+request id), using the same slot semantics as the dataplane’s
+traffic splitting: cumulative bounds over weights, <code>hash % total</code>
+selects the slot, and the entry whose bound first exceeds the
+slot wins. Deterministic means re-sends with the same request id
+land on the same version, and ratios hold per request (converging
+statistically over distinct ids).</li>
+</ul>
+<p>The hash is an explicit 64-bit FNV-1a rather than
+<code>std::collections::hash_map::DefaultHasher</code>: the pick must be stable
+across toolchain versions (it is arithmetic on the bytes, not a
+seeded SipHash) because canary attribution compares series across
+process restarts. This mirrors why <code>dataplane::balance::key_hash</code>
+exists — but duplicated here in four lines rather than importing
+upward from <code>dataplane</code>, which the dependency direction forbids.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.pick_hash.html" title="fn dwara_core::ai::routing::pick_hash">pick_<wbr>hash</a></dt><dd>Toolchain-stable 64-bit FNV-1a over UTF-8 bytes. Deterministic for
+a given input forever; good enough distribution for slot picks.</dd><dt><a class="fn" href="fn.weighted_pick.html" title="fn dwara_core::ai::routing::weighted_pick">weighted_<wbr>pick</a></dt><dd>The deterministic weighted pick over <code>(weight, T)</code> entries: the
+entry whose cumulative weight bound first exceeds
+<code>pick_hash(key) % total</code>. Mirrors <code>dataplane::split</code>’s slot walk
+over at most a handful of entries (validation bounds canary lists),
+so a linear scan is cheaper than any index. <code>total</code> must be &gt; 0
+(validation guarantees it: weights are &gt;= 1 and the list
+non-empty).</dd><dt><a class="fn" href="fn.weighted_pick_with_index.html" title="fn dwara_core::ai::routing::weighted_pick_with_index">weighted_<wbr>pick_<wbr>with_<wbr>index</a></dt><dd>DW-091: like <a href="fn.weighted_pick.html" title="fn dwara_core::ai::routing::weighted_pick"><code>weighted_pick</code></a> but also returns the picked entry’s
+INDEX (0 = baseline, 1 = canary for a 2-version canary split).
+The auto-canary controller needs the index to record the outcome
+on the correct side. Same hash and slot arithmetic.</dd></dl></section></div></main></body></html>

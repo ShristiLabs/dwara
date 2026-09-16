@@ -1,0 +1,98 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Admin API (DW-022, feature analysis 4.18; decision 6: mTLS-only)."><title>dwara_admin - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="dwara_admin" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate dwara_admin</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../dwara_admin/index.html">dwara_<wbr>admin</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>dwara_<wbr>admin</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/dwara_admin/lib.rs.html#1-3817">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Admin API (DW-022, feature analysis 4.18; decision 6: mTLS-only).</p>
+<p>A small, separate hyper server surface for operators:</p>
+<ul>
+<li><code>GET /config</code> — the CURRENT published gateway config as normalized
+YAML, with <code>x-dwara-config-generation</code> / <code>x-dwara-config-hash</code>
+headers identifying the generation. SECRET REDACTION (DW-045): the
+returned document is the TYPED-redacted copy
+(<a href="../dwara_core/config/struct.Gateway.html#method.redacted" title="method dwara_core::config::Gateway::redacted"><code>Gateway::redacted</code></a>) —
+inline <code>api_key</code> values become unresolvable
+<code>${redacted:sha256:&lt;prefix&gt;}</code> placeholders (a short sha256 prefix so
+operators can still compare which key a generation carries), and
+<code>${...}</code> references echo as references (an env-var name or file
+path is not secret bytes; the config file already carries it). No
+secret VALUE is ever returned, by construction. Consequence, by
+design: a GET-then-edit-then-PATCH round trip that carries a
+placeholder back is REJECTED by validation (400 naming the field)
+instead of silently installing placeholder bytes as a live key —
+re-enter the secret or switch the field to a reference.</li>
+<li><code>PATCH /config</code> — FULL-document YAML replacement (v1 has no partial
+merge: silent-merge of unknown subtrees is a footgun, so a PATCH
+body must be the complete config). The body is parsed, validated,
+and compiled as a dry run FIRST; on any issue the response is 400
+carrying EVERY problem (the same error envelope style as the
+dataplane). On success the new config is written ATOMICALLY to the
+config file (temp file + rename, so the file watcher and restarts
+observe exactly what was published) and then published to the
+running dataplane. Documented consequence: the gateway’s config
+watcher also observes the rename; because the content is identical
+to what was just published, the watcher’s reload is a no-op (the
+generation does not advance again).</li>
+<li><code>GET /health</code> — gateway readiness, config generation, and
+per-upstream per-endpoint health labels.</li>
+<li><code>GET /stats</code> — cheap live state only: state-store schema version
+(when a store is attached), per-upstream breaker states, the
+active-requests gauge, the config generation, and the response
+cache’s live-entry estimate and purge count (DW-037).</li>
+<li><code>GET /plugins</code> — the plugin status surface (DW-158): per plugin,
+its kind and source (local <code>.wasm</code> path / registry URL /
+registered native name), SHA-256 digest, lifecycle state with
+error and crash count, effective limits, declared phases, and the
+routes referencing it — the operator’s answer to “which plugins
+are loaded, and which routes fail closed if one is not”.</li>
+<li><code>POST /cache/purge</code> — response-cache invalidation (DW-037 +
+DP-04): body <code>{"route": "&lt;name&gt;"}</code>, <code>{"all": true}</code>,
+<code>{"tag": "&lt;tag&gt;"}</code> (DP-04, purge by upstream <code>Cache-Tags</code>), or
+<code>{"url": "&lt;path[?query]&gt;", "prefix": false}</code> (DP-04, purge by
+exact or prefix-matched request URL); the response names what was
+invalidated. The route/all arms are an O(1) cache-epoch advance,
+never a store enumeration — sub-100 ms at any store size by
+construction; the tag/url arms delete specific keys through the
+<code>CacheStore</code> seam using in-memory indexes populated at store time.</li>
+<li><code>GET /mcp/sessions</code> — list active MCP sessions (DW-087).</li>
+<li><code>DELETE /mcp/sessions/:id</code> — teardown an MCP session (DW-087).</li>
+<li><code>GET /mcp/tools</code> — list configured MCP tools (DW-087).</li>
+<li><code>GET /mcp/calls</code> — query MCP tool call analytics (DW-087).</li>
+<li><code>GET /analytics/live</code> — live in-process sketch snapshot (DW-092):
+sub-second-freshness per-route rolling window with request/error
+counts and p50/p95/p99 latency.</li>
+<li><code>GET /analytics/forecast</code> — ML traffic forecast for the next
+window (DW-092): EWMA-trend-adjusted seasonal prediction.</li>
+<li><code>GET /analytics/anomalies</code> — current window’s anomaly status
+(DW-092): seasonal-baseline comparison of requests, error rate,
+and latency.</li>
+</ul>
+<p>AUTHENTICATION IS THE TLS LAYER (decision 6): the admin listener
+REQUIRES a client certificate chaining to the configured CA; there is
+deliberately no token layer in v1 — possession of a valid client
+certificate IS the authorization. The one escape hatch is
+<a href="enum.ListenMode.html#method.dev" title="associated function dwara_admin::ListenMode::dev"><code>ListenMode::dev</code></a> (loopback-only plaintext, gated by the binary on
+<code>DWARA_ADMIN_DEV=1</code>), which must never be enabled outside a
+developer machine.</p>
+<p>The admin listener has its own accept loop and graceful shutdown;
+its bind set is fixed at startup (config changes to <code>admin.bind</code>
+take effect on restart). The accept loop runs under the same
+bounded panic-respawn supervision as the gateway listeners (#130,
+via dwara-core’s shared supervisor from #120): a panicked accept
+incarnation is respawned on the same socket up to a fixed budget,
+after which the admin listener is given up on with a loud ERROR log
+instead of dying silently for the rest of the process lifetime.</p>
+<p>Hardening posture (DW-023): the admin listener shares the
+dataplane’s parser/amplification bounds and its pre-parse smuggling
+guard (the same <code>dwara_core::hardening::HttpHardening</code> is applied to
+its connection builder), with ONE deliberate asymmetry: request
+bodies are NOT wrapped in the slow-body gap wrapper
+(<code>hardening::InboundBody</code>). The admin surface is mTLS-only (decision
+6 — every client holds a CA-chained certificate), and its bodies are
+small JSON/YAML documents already capped DURING streaming by
+<code>MAX_PATCH_BODY</code>’s <code>Limited</code> wrapper, so the per-connection
+body-inactivity defense of the data plane would add nothing the TLS
+requirement and the mid-stream cap do not already pin; body-stall
+protection remains a data-plane concern.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AdminContext.html" title="struct dwara_admin::AdminContext">Admin<wbr>Context</a></dt><dd>Everything the admin handlers need: the published-config state, the
+dataplane (for refresh/health/stats), the config file path (for
+atomic writes), the write lock serializing PATCHes, the process
+start instant (for <code>/runtime_info</code> uptime, DW-072), and optionally
+the workspace manager (SCALE-05, #184, ent only).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AdminBuildError.html" title="enum dwara_admin::AdminBuildError">Admin<wbr>Build<wbr>Error</a></dt><dd>Error building the admin listener.</dd><dt><a class="enum" href="enum.ListenMode.html" title="enum dwara_admin::ListenMode">Listen<wbr>Mode</a></dt><dd>How the admin listener accepts connections.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.serve.html" title="fn dwara_admin::serve">serve</a></dt><dd>Serve the admin API on an already-bound listener until <code>shutdown</code>
+fires, then drain gracefully (in-flight requests complete; anything
+still draining when the process exits is closed by process exit).</dd></dl></section></div></main></body></html>

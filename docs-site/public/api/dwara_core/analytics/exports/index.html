@@ -1,0 +1,111 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Scheduled usage-report exports (DW-120)."><title>dwara_core::analytics::exports - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module exports</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module exports</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#reconciliation-with-the-query-api-the-acceptance-contract" title="Reconciliation with the query API (the acceptance contract)">Reconciliation with the query API (the acceptance contract)</a></li><li><a href="#scheduling" title="Scheduling">Scheduling</a></li><li><a href="#quota-columns-and-window-alignment" title="Quota columns and window alignment">Quota columns and window alignment</a></li><li><a href="#retention-and-partial-windows" title="Retention and partial windows">Retention and partial windows</a></li><li><a href="#output-shape" title="Output shape">Output shape</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>analytics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a></div><h1>Module <span>exports</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/exports.rs.html#1-1071">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Scheduled usage-report exports (DW-120).</p>
+<p>DW-043 made the analytics store QUERYABLE live; this module makes
+it REPORTABLE durably: a background worker closes each UTC calendar
+window of the configured kind (hourly/daily/monthly) and writes the
+per-consumer usage statement — period totals of requests, errors,
+error rate, rate-limited and shed counts, plus the quota budget
+figures a billing pipeline consumes — as one deterministic file per
+configured format (CSV and JSON in v1; Parquet is deferred to the
+DW-156 backlog) into a configured directory. Distinct from the
+query API on purpose: this is durable, scheduled OUTPUT, not an ad
+hoc query.</p>
+<h2 id="reconciliation-with-the-query-api-the-acceptance-contract"><a class="doc-anchor" href="#reconciliation-with-the-query-api-the-acceptance-contract">§</a>Reconciliation with the query API (the acceptance contract)</h2>
+<p>The statement’s analytics numbers ARE the structured query
+endpoint’s numbers: <a href="fn.run_export.html" title="fn dwara_core::analytics::exports::run_export"><code>run_export</code></a> builds them by calling
+<a href="../query/fn.structured.html" title="fn dwara_core::analytics::query::structured"><code>query::structured</code></a> itself (grouped by <code>consumer</code>, plus one
+ungrouped totals row) over the same <code>rollup_fixed</code> tables through
+the same aggregation helpers. Equality with <code>POST /analytics/query</code> for the same period holds BY CONSTRUCTION — and
+is pinned by a test that parses the written JSON file and compares
+it against an independent <code>structured()</code> call. The per-statement
+consumer cap is 10_000 (the grouped query’s limit).</p>
+<h2 id="scheduling"><a class="doc-anchor" href="#scheduling">§</a>Scheduling</h2>
+<p>The worker (spawned by the dataplane via
+<code>DataPlane::spawn_export_worker</code> in <code>dataplane::proxy</code>) ticks
+on the same interval-plus-shutdown-watch machinery as the rollup
+cascade, reads the CURRENT config generation each tick (a reload
+can add/remove exports without a restart), and exports every
+closed window that has no successful run record yet — oldest
+first, so a restart backfills missed windows. A window is due once
+its close is at least
+<a href="constant.EXPORT_DELAY_MS.html" title="constant dwara_core::analytics::exports::EXPORT_DELAY_MS"><code>EXPORT_DELAY_MS</code></a> in the past (writer flush + rollup grace +
+cascade headroom); the delay keeps the statement as complete as
+the store can make it. <a href="fn.run_export.html" title="fn dwara_core::analytics::exports::run_export"><code>run_export</code></a> also forces one <code>maintain()</code>
+pass first, so even a manual trigger reads settled rollups.</p>
+<h2 id="quota-columns-and-window-alignment"><a class="doc-anchor" href="#quota-columns-and-window-alignment">§</a>Quota columns and window alignment</h2>
+<p>The quota figures come from the STATE store’s <code>quota_counters</code>
+(DW-033) — a domain this module cannot import (see
+<code>scripts/check_deps.py</code>), so callers ABOVE both domains (the
+dataplane worker, the admin trigger endpoint) read the counters
+and hand them in as plain <a href="struct.QuotaFigures.html" title="struct dwara_core::analytics::exports::QuotaFigures"><code>QuotaFigures</code></a> per consumer name. The
+alignment rule: a budget’s figures appear only when its quota
+window FULLY CONTAINS the export window — a daily export carries
+the same-UTC-day <code>daily</code> counter (exact period consumption) and
+the month-to-date <code>monthly</code> counter; a monthly export carries only
+the <code>monthly</code> counter (the daily budget’s per-day rows do not sum
+to the month by construction and are omitted, never fabricated).
+The monthly column reads the store’s LIVE month-to-date counter,
+so a backfilled or re-exported window can carry a different
+<code>quota_monthly_used</code> than the original run: analytics columns are
+deterministic, quota columns are generation-time snapshots
+(<a href="struct.QuotaBudget.html" title="struct dwara_core::analytics::exports::QuotaBudget"><code>QuotaBudget</code></a>’s <code>window_start_epoch_s</code>/<code>reset_epoch_s</code> bound
+what <code>used</code> covers).</p>
+<h2 id="retention-and-partial-windows"><a class="doc-anchor" href="#retention-and-partial-windows">§</a>Retention and partial windows</h2>
+<p>Rollup retention deletes old windows (DW-043); a window older than
+the chosen granularity’s retention may be undercounted without the
+store being able to know. Such runs are written with
+<code>partial: true</code> in the file header and run record — real data,
+flagged — and the scheduler never AUTO-exports windows past the
+horizon (only a manual trigger can, still flagged). Quiet windows
+(no traffic) are not loss: the statement’s counts are exact
+whenever <code>partial</code> is false.</p>
+<h2 id="output-shape"><a class="doc-anchor" href="#output-shape">§</a>Output shape</h2>
+<p>Files are named <code>dwara-usage-{window}-{utc-stamp}.{ext}</code> (stamp
+<code>YYYY-MM-DDThHZ</code> hourly, <code>YYYY-MM-DD</code> daily, <code>YYYY-MM-</code> trimmed to
+<code>YYYY-MM</code> monthly) and written atomically and DURABLY (temp
+file, then fsync, rename, and a directory fsync — all inside the
+destination directory): a re-export of the same window simply
+overwrites — output is idempotent, the rollup recompute
+philosophy. CSV is RFC 4180 (CRLF rows, quoted fields containing
+commas/quotes/CR/LF, doubled quotes); absent quota cells are EMPTY
+strings (zero means configured-and-zero-used). JSON is pretty and
+self-describing (window bounds, generation time, partial flag,
+totals, per-consumer rows).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ExportRun.html" title="struct dwara_core::analytics::exports::ExportRun">Export<wbr>Run</a></dt><dd>One export attempt’s ledger row (the <code>export_runs</code> table and the
+admin list endpoint’s shape).</dd><dt><a class="struct" href="struct.ManualRunBody.html" title="struct dwara_core::analytics::exports::ManualRunBody">Manual<wbr>RunBody</a></dt><dd>The manual trigger’s request body (DW-120 admin endpoint): which
+window kind to export and optionally which aligned window start.</dd><dt><a class="struct" href="struct.QuotaBudget.html" title="struct dwara_core::analytics::exports::QuotaBudget">Quota<wbr>Budget</a></dt><dd>One budget’s figures as carried in a statement (plain DTO: the
+state-store types stay in the state domain, which this module
+cannot import).</dd><dt><a class="struct" href="struct.QuotaFigures.html" title="struct dwara_core::analytics::exports::QuotaFigures">Quota<wbr>Figures</a></dt><dd>A consumer’s quota figures for one export window (see the module
+docs’ alignment rule: only budgets whose window fully contains the
+export window appear).</dd><dt><a class="struct" href="struct.SpendByModel.html" title="struct dwara_core::analytics::exports::SpendByModel">Spend<wbr>ByModel</a></dt><dd>One per-model spend breakdown row (DW-079): the JSON statement’s
+<code>spend_by_model</code> array member. Aggregated from the <code>ai_spend</code> table
+grouped by model over the export window.</dd><dt><a class="struct" href="struct.StatementRow.html" title="struct dwara_core::analytics::exports::StatementRow">Statement<wbr>Row</a></dt><dd>One per-consumer statement row (the JSON member shape; the CSV
+writer flattens the same fields in a fixed column order).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ExportFormat.html" title="enum dwara_core::analytics::exports::ExportFormat">Export<wbr>Format</a></dt><dd>One output format (DW-120). Parquet is deliberately absent (lean
+dependency rule; see the DW-156 backlog issue).</dd><dt><a class="enum" href="enum.WindowKind.html" title="enum dwara_core::analytics::exports::WindowKind">Window<wbr>Kind</a></dt><dd>The export window kinds (DW-120): fixed UTC calendar windows, the
+closed set behind <code>analytics.exports.window</code>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.EXPORT_DELAY_MS.html" title="constant dwara_core::analytics::exports::EXPORT_DELAY_MS">EXPORT_<wbr>DELAY_<wbr>MS</a></dt><dd>How long after a window’s close before the scheduler will export
+it: the writer’s flush tick plus the rollup grace plus cascade
+headroom, with margin. Not a correctness knob — a manual trigger
+bypasses it.</dd><dt><a class="constant" href="constant.EXPORT_TICK_MS.html" title="constant dwara_core::analytics::exports::EXPORT_TICK_MS">EXPORT_<wbr>TICK_<wbr>MS</a></dt><dd>The scheduler worker’s tick (same cadence class as the rollup
+cascade’s 30 s; the per-tick work is one cheap SQL probe).</dd><dt><a class="constant" href="constant.FAILURE_RETRY_MS.html" title="constant dwara_core::analytics::exports::FAILURE_RETRY_MS">FAILURE_<wbr>RETRY_<wbr>MS</a></dt><dd>How long a FAILED window stays skipped before the scheduler
+retries it: without this, a persistent failure (unwritable
+directory, unusable store) would re-burn a full export attempt on
+every 30 s tick, forever. Time-based, not attempt-count-based —
+no schema change.</dd><dt><a class="constant" href="constant.MAX_CATCHUP_WINDOWS.html" title="constant dwara_core::analytics::exports::MAX_CATCHUP_WINDOWS">MAX_<wbr>CATCHUP_<wbr>WINDOWS</a></dt><dd>Backfill bound per tick: after a long downtime the oldest-first
+catch-up drains at most this many windows per tick (one query +
+file writes each), keeping any single tick’s work bounded.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.effective_formats.html" title="fn dwara_core::analytics::exports::effective_formats">effective_<wbr>formats</a></dt><dd>The effective formats: the configured list, or both when the list
+is omitted or empty (the config default and the validation rule
+agree — an empty list MEANS both, it is never an error).</dd><dt><a class="fn" href="fn.effective_window.html" title="fn dwara_core::analytics::exports::effective_window">effective_<wbr>window</a></dt><dd>The effective exports schedule from the config block: window kind
+(default daily) and formats (default both).</dd><dt><a class="fn" href="fn.last_closed_window.html" title="fn dwara_core::analytics::exports::last_closed_window">last_<wbr>closed_<wbr>window</a></dt><dd>The most recent CLOSED window of a kind (the manual trigger’s
+default): the window containing <code>now</code> is still open by
+construction, so the answer is always the previous one — including
+at the exact boundary instant, where the previous window has just
+closed.</dd><dt><a class="fn" href="fn.list_runs.html" title="fn dwara_core::analytics::exports::list_runs">list_<wbr>runs</a></dt><dd>List run records, newest first (the admin GET endpoint’s read).</dd><dt><a class="fn" href="fn.run_due.html" title="fn dwara_core::analytics::exports::run_due">run_due</a></dt><dd>The scheduler’s per-tick entry (DW-120): export every closed,
+settled window of the configured kind that has no successful run
+record yet — oldest first, bounded by <a href="constant.MAX_CATCHUP_WINDOWS.html" title="constant dwara_core::analytics::exports::MAX_CATCHUP_WINDOWS"><code>MAX_CATCHUP_WINDOWS</code></a> per
+tick and by the query granularity’s retention horizon (windows
+past it would be <code>partial</code>; a manual trigger can still force
+them). Failed runs are retried on later ticks, at most once per
+<a href="constant.FAILURE_RETRY_MS.html" title="constant dwara_core::analytics::exports::FAILURE_RETRY_MS"><code>FAILURE_RETRY_MS</code></a> window (the backoff).</dd><dt><a class="fn" href="fn.run_export.html" title="fn dwara_core::analytics::exports::run_export">run_<wbr>export</a></dt><dd>Export one window: settle rollups, read the statement through the
+query API’s own aggregation, write one file per format, and upsert
+the run record. <code>quota_at</code> supplies the quota figures for the
+window (period bounds in epoch SECONDS). Never panics on I/O: a
+failed run is recorded <code>failed</code> with the error string.</dd></dl></section></div></main></body></html>

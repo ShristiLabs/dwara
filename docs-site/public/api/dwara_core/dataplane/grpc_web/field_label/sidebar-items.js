@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["OPTIONAL","REPEATED","REQUIRED"],"enum":["Label"]};

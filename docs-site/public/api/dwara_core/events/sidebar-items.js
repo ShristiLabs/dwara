@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EVENT_CHANNEL_CAPACITY"],"enum":["EventKind"],"fn":["generate_instance_id","refresh_event_gauges"],"mod":["stream","webhook"],"struct":["Emitter","EndpointEvents","Event","EventBus","EventPayload","UpstreamEmitter"],"trait":["EventDurability"]};

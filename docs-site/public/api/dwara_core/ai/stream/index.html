@@ -1,0 +1,37 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Streaming translation (DW-077): provider SSE in, OpenAI SSE out, frame by frame."><title>dwara_core::ai::stream - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stream</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stream</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#client-facing-stream-shape" title="Client-facing stream shape">Client-facing stream shape</a></li><li><a href="#token-counting-the-locked-decision" title="Token counting (the locked decision)">Token counting (the locked decision)</a></li><li><a href="#mid-stream-aborts" title="Mid-stream aborts">Mid-stream aborts</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>stream</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/stream.rs.html#1-321">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Streaming translation (DW-077): provider SSE in, OpenAI SSE out,
+frame by frame.</p>
+<p>The <a href="struct.StreamTranslator.html" title="struct dwara_core::ai::stream::StreamTranslator"><code>StreamTranslator</code></a> is the pure half of the streaming path:
+feed it the provider’s response BYTES as they arrive and it returns
+the client-facing SSE TEXT to forward for exactly those bytes —
+nothing is held: a complete provider frame becomes complete client
+frames in the same poll, and a partial frame stays in the
+<a href="../sse/struct.SseDecoder.html" title="struct dwara_core::ai::sse::SseDecoder"><code>SseDecoder</code></a> buffer (bounded by the provider’s own frame size)
+until its terminator arrives.</p>
+<p>The dataplane’s <code>AiStreamBody</code> (see <code>dataplane/ai_proxy.rs</code>) drives
+this translator over the upstream body and owns the metrics hooks.</p>
+<h2 id="client-facing-stream-shape"><a class="doc-anchor" href="#client-facing-stream-shape">§</a>Client-facing stream shape</h2>
+<p>The client is OpenAI-shaped regardless of provider dialect:</p>
+<ul>
+<li>each provider delta becomes one <code>data: {chat.completion.chunk}</code>
+frame (via <a href="../openai_compat/fn.stream_event_to_openai_chunk.html" title="fn dwara_core::ai::openai_compat::stream_event_to_openai_chunk"><code>openai_compat::stream_event_to_openai_chunk</code></a>),</li>
+<li>provider <code>Usage</code> events are ACCUMULATED (not forwarded inline) —
+they merge across the stream (Anthropic reports input tokens at
+<code>message_start</code> and output tokens at <code>message_delta</code>) —</li>
+<li>at stream end the accumulated usage (if any) is emitted as ONE
+terminal <code>choices: []</code> usage chunk (the <code>stream_options. include_usage</code> shape), and the gateway ALWAYS writes its own
+<code>data: [DONE]</code> terminator (the provider’s own terminator is
+swallowed, even OpenAI’s, so the terminal ordering is uniform:
+deltas, usage, DONE).</li>
+</ul>
+<h2 id="token-counting-the-locked-decision"><a class="doc-anchor" href="#token-counting-the-locked-decision">§</a>Token counting (the locked decision)</h2>
+<p>Token counts are PROVIDER-REPORTED ONLY. The translator accumulates
+the usage events the provider emits mid-stream; there is no local
+estimation, and chunk counts / text lengths are never presented as
+token estimates.</p>
+<h2 id="mid-stream-aborts"><a class="doc-anchor" href="#mid-stream-aborts">§</a>Mid-stream aborts</h2>
+<p><a href="struct.StreamTranslator.html#method.abort_tail" title="method dwara_core::ai::stream::StreamTranslator::abort_tail"><code>StreamTranslator::abort_tail</code></a> produces the terminal frames for a
+provider stream that died after frames were already forwarded: an
+OpenAI-shaped error chunk then <code>data: [DONE]</code> — the stream ends
+cleanly for the client instead of a connection reset, and the
+already-forwarded content stands.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.StreamTranslator.html" title="struct dwara_core::ai::stream::StreamTranslator">Stream<wbr>Translator</a></dt><dd>Pure streaming translator state (DW-077).</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.ClientFrame.html" title="type dwara_core::ai::stream::ClientFrame">Client<wbr>Frame</a></dt><dd>One translated client frame (raw SSE text, terminator included).</dd></dl></section></div></main></body></html>

@@ -1,0 +1,116 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Gateway server binary."><title>dwara - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="dwara" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate dwara</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../dwara/index.html">dwara</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#modules">Crate Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>dwara</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/dwara/main.rs.html#1-1843">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Gateway server binary.</p>
+<p>M1 role: bind listeners, proxy traffic off the published config
+snapshot (DW-009), keep that snapshot hot (DW-006), and terminate or
+pass through TLS (DW-007). Every request is served by
+<a href="../dwara_core/dataplane/proxy/fn.handle.html" title="fn dwara_core::dataplane::proxy::handle"><code>dwara_core::proxy::handle</code></a> against the generation pair (snapshot +
+upstream registry) current at request time; a reload swaps the pair
+under the accept loop without ever interrupting accept, and in-flight
+requests keep their old pair alive until they complete.</p>
+<p>Runtime controls (environment):</p>
+<ul>
+<li><code>DWARA_BIND</code>: when set, overrides the config listeners with a
+single cleartext HTTP listener on that address (test/dev escape
+hatch; e.g. <code>127.0.0.1:8080</code>). When unset, the gateway binds every
+listener defined by the config snapshot.</li>
+<li><code>DWARA_CONFIG</code>: path to the gateway YAML config, default <code>./dwara.yaml</code>.
+Startup fails (exit code 1) if the file cannot be read or does not
+validate; every validation issue is printed.</li>
+<li><code>DWARA_STATE_DB</code>: path to a SQLite state store (DW-018). When set,
+the gateway opens/creates the store at startup and seeds consumers
+and credentials from the config into it (hashed at seed time; see
+<code>store::sync_consumers_from_config</code>). When unset (the default), the
+gateway runs purely on config — credentials hashed in memory at
+startup. The authenticator (DW-019) consults the store when it is
+set and config credentials otherwise.</li>
+<li><code>DWARA_SHUTDOWN_TIMEOUT_SECS</code>: graceful-drain budget on SIGTERM/SIGINT,
+default 10. In-flight requests that exceed the budget are dropped when
+the process exits.</li>
+<li><code>DWARA_WORKER_THREADS</code> (#273): number of tokio async worker threads,
+default <code>available_parallelism()</code>. Set to a lower value in containers
+with cgroup CPU limits to avoid oversubscription.</li>
+<li><code>DWARA_MAX_BLOCKING_THREADS</code> (#273): size of the blocking thread pool,
+default 512. Raise if <code>spawn_blocking</code> is used heavily.</li>
+<li><code>DWARA_ACCEPTORS_PER_LISTENER</code> (#271): number of concurrent acceptor
+tasks per listener, default 1. Set to the number of CPU cores to
+parallelize connection acceptance and keep all tokio workers fed.</li>
+<li><code>DWARA_POOL_SHARDS</code>: number of hyper-util client pool shards per
+upstream, default 1. Set to the number of tokio workers to reduce
+pool-lock contention under high concurrency (each shard has its own
+<code>Mutex&lt;PoolInner&gt;</code>). The connection cap is shared across shards via
+<code>Arc</code>, so the total cap is not multiplied.</li>
+<li><code>DWARA_LOG</code> (DW-021): RUST_LOG-syntax filter for the tracing
+subscriber, default <code>dwara=info</code>. Output is JSON on STDOUT (spans,
+structured logs, and the per-request <code>dwara::access</code> access-log
+lines).</li>
+<li><code>DWARA_ACCESS_LOG_SAMPLE</code> (DW-021): fraction of non-error access
+lines emitted, 0.0-1.0, default 1.0; 5xx responses are always
+logged (see dwara-core’s observability docs).</li>
+<li><code>DWARA_OTLP_ENDPOINT</code> (DW-021, #126): base OTLP collector endpoint
+(e.g. <code>http://collector:4318</code>; <code>/v1/traces</code> is appended). Compiled
+into every build (no cargo feature; the opentelemetry stack is an
+unconditional dependency). With the variable set, the root/phase
+spans export over http/protobuf and are flushed (bounded) on the
+SIGTERM/SIGINT drain path; the variable unset = one INFO line and
+no exporter.</li>
+<li><code>DWARA_ADMIN_DEV</code> (DW-022): “1” serves the admin API as PLAINTEXT
+on 127.0.0.1 — DEV ONLY, refuses to start for a non-loopback
+admin bind, and must never be set in production (mTLS is the
+admin surface’s only authentication). Default: unset = mTLS-only.
+See the <code>dwara-admin</code> crate docs for the endpoint set.</li>
+<li><code>DWARA_CREDENTIAL_PEPPER</code> (#124): per-deployment SECRET that peppers
+every NEW stored API-key/Basic hash (<code>hmac-sha256:&lt;hex&gt;</code>), so a
+state-DB leak alone cannot verify guesses. Resolved at startup
+through the SecretSource extension seam (EnvSecretSource for the
+OSS edition; a managed backend may be swapped in separately).
+Unset = legacy-only mode (legacy <code>sha256:</code> entries keep verifying;
+peppered entries fail closed with one ERROR log). An EMPTY value is
+treated as unset. A SET-but-unreadable value refuses startup. The
+value is never logged.</li>
+<li>Protocol hardening (DW-023, feature analysis 4.20): every serving
+surface (data-plane listeners AND the admin listener) applies the
+knob set documented in dwara-core’s <code>hardening</code> module — HTTP/1
+header-count / read-buffer caps and the slowloris header-read
+timeout (<code>DWARA_HTTP1_MAX_HEADERS</code>, <code>DWARA_HTTP1_MAX_BUF_KIB</code>,
+<code>DWARA_HTTP1_HEADER_TIMEOUT_MS</code>), HTTP/2 stream/window/send-buffer
+caps (<code>DWARA_H2_MAX_CONCURRENT_STREAMS</code>, <code>DWARA_H2_STREAM_WINDOW_KIB</code>,
+<code>DWARA_H2_CONNECTION_WINDOW_KIB</code>, <code>DWARA_H2_MAX_SEND_BUF_KIB</code>), and
+the inbound request-body inactivity gap
+(<code>DWARA_REQUEST_BODY_TIMEOUT_MS</code>, 0 disables). CL+TE smuggling needs
+no knob: hyper 1.x rejects such requests and the gateway rebuilds
+every forwarded request from parsed parts (never raw passthrough);
+both properties are pinned by dwara-bin’s protocol-hardening tests.</li>
+</ul>
+<p>Shutdown: SIGTERM/SIGINT stop accepting on every listener, each
+listener flushes its kernel backlog (established connections are
+served), HTTP connections drain via hyper graceful shutdown, and
+in-flight passthrough and L4 splices drain via the process-wide
+SpliceDrain (#175, REL-04): the process waits for in-flight byte
+relays to complete up to the shutdown deadline. The gateway does NOT
+terminate TLS in passthrough mode, so it cannot emit a TLS
+close_notify alert (no session keys); the drain is a bounded wait for
+the peer to close or the bidirectional copy to return. Whatever
+remains at the deadline is force-closed by process exit.
+With the <code>otlp</code> feature, the exporter flush is the LAST bounded step
+before exit (see the DWARA_OTLP_ENDPOINT bullet).</p>
+<p>Zero-downtime upgrade (DW-049): SIGUSR2 spawns a new copy of the
+binary. Both the old and new processes bind the same ports with
+<code>SO_REUSEPORT</code> (the kernel load-balances accepts); the new process
+signals READY over a Unix domain socket once it is accepting, the old
+process then runs the SAME drain sequence as SIGTERM and exits. The
+hand-off has no refused connections and no reset connections (the new
+process is already accepting before the old stops). A failed upgrade
+(spawn error or READY timeout) logs and keeps the old process running.
+Operator trigger: <code>dwara upgrade</code> (CLI) sends SIGUSR2 to the PID in
+the PID file. Relevant env vars: <code>DWARA_PID_FILE</code> (PID file path),
+<code>DWARA_UPGRADE_BINARY</code> (new binary path; default current exe),
+<code>DWARA_UPGRADE_READY_TIMEOUT_SECS</code> (READY wait budget, default 30).</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="h3/index.html" title="mod dwara::h3">h3</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>HTTP/3 (QUIC) ingress listener (DW-088).</dd><dt><a class="mod" href="listener_manager/index.html" title="mod dwara::listener_manager">listener_<wbr>manager</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Listener hot-reload (SCALE-03, #182).</dd><dt><a class="mod" href="listeners/index.html" title="mod dwara::listeners">listeners</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Listener binding and serving.</dd><dt><a class="mod" href="otlp/index.html" title="mod dwara::otlp">otlp</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>OTLP trace export (#126): ships the DW-021 span tree (root <code>request</code>
+span + <code>authn</code>/<code>authz</code>/<code>ratelimit</code>/<code>admission</code>/<code>upstream_pick</code>/
+<code>upstream_attempt</code> phase spans) to an OTLP collector over http/protobuf.</dd><dt><a class="mod" href="reload/index.html" title="mod dwara::reload">reload</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Hot reload: config snapshot and TLS certificate reloads.</dd><dt><a class="mod" href="upgrade/index.html" title="mod dwara::upgrade">upgrade</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Zero-downtime binary upgrade (DW-049).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_BIND.html" title="constant dwara::DEFAULT_BIND">DEFAULT_<wbr>BIND</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="constant" href="constant.DEFAULT_BIND_PORT.html" title="constant dwara::DEFAULT_BIND_PORT">DEFAULT_<wbr>BIND_<wbr>PORT</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="constant" href="constant.DEFAULT_CONFIG_PATH.html" title="constant dwara::DEFAULT_CONFIG_PATH">DEFAULT_<wbr>CONFIG_<wbr>PATH</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="constant" href="constant.DEFAULT_SHUTDOWN_TIMEOUT_SECS.html" title="constant dwara::DEFAULT_SHUTDOWN_TIMEOUT_SECS">DEFAULT_<wbr>SHUTDOWN_<wbr>TIMEOUT_<wbr>SECS</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="constant" href="constant.RELOAD_DEBOUNCE.html" title="constant dwara::RELOAD_DEBOUNCE">RELOAD_<wbr>DEBOUNCE</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Coalescing window for watcher events: editors and atomic saves emit a
+burst (write + rename + remove); we wait out the burst, drain the queue,
+then do exactly one reload.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.async_main.html" title="fn dwara::async_main">async_<wbr>main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.build_license_gate.html" title="fn dwara::build_license_gate">build_<wbr>license_<wbr>gate</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Build the enterprise license gate from the config’s <code>license</code> block
+(DW-032). Returns a <code>LicenseGate</code> reflecting the verification
+outcome. Startup behavior:</dd><dt><a class="fn" href="fn.build_runtime.html" title="fn dwara::build_runtime">build_<wbr>runtime</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Build the tokio runtime from env vars (#273).</dd><dt><a class="fn" href="fn.config_dir.html" title="fn dwara::config_dir">config_<wbr>dir</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.configured_listeners.html" title="fn dwara::configured_listeners">configured_<wbr>listeners</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Derive the configured listener set, respecting <code>DWARA_BIND</code> (which
+overrides the config’s listeners with a single cleartext listener).
+Used both at startup and on reload so the listener manager always
+diffs the same set (SCALE-03, #182).</dd><dt><a class="fn" href="fn.main.html" title="fn dwara::main">main</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.shutdown_timeout.html" title="fn dwara::shutdown_timeout">shutdown_<wbr>timeout</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl></section></div></main></body></html>

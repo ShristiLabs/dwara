@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BREAKER_WINDOW_MS","HALF_OPEN_RETRY_AFTER_MS"],"enum":["BreakerDecision","BreakerState"],"struct":["Breaker","BreakerParams"]};

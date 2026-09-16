@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ChatRole","ContentPart","FinishReason","ResponseFormat","StreamEvent","ToolChoice"],"struct":["ChatMessage","ChatRequest","ChatResponse","Choice","StreamDelta","ToolCall","ToolCallDelta","ToolSpec","Usage"]};

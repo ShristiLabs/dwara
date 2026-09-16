@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SidecarMode","SidecarRedirectMode"],"struct":["SidecarConfig","SidecarController"]};

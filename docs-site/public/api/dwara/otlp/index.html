@@ -1,0 +1,135 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OTLP trace export (#126): ships the DW-021 span tree (root `request` span + `authn`/`authz`/`ratelimit`/`admission`/`upstream_pick`/ `upstream_attempt` phase spans) to an OTLP collector over http/protobuf."><title>dwara::otlp - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module otlp</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara/index.html">dwara</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module otlp</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-exporter-http-client" title="The exporter HTTP client">The exporter HTTP client</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara</a></div><h1>Module <span>otlp</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara/otlp.rs.html#1-1738">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OTLP trace export (#126): ships the DW-021 span tree (root <code>request</code>
+span + <code>authn</code>/<code>authz</code>/<code>ratelimit</code>/<code>admission</code>/<code>upstream_pick</code>/
+<code>upstream_attempt</code> phase spans) to an OTLP collector over http/protobuf.</p>
+<p>Compiled ONLY behind the default-off <code>otlp</code> cargo feature: the
+opentelemetry stack is real megabytes on the musl release binary
+against the DW-026 25MB budget, so the default build keeps
+<code>DWARA_OTLP_ENDPOINT</code> reserved-but-inert (dwara-core::observability
+documents the original decision; this module is the deferred half).</p>
+<p>Wiring shape (installed by <code>main</code> at startup, BEFORE the subscriber):</p>
+<ol>
+<li><a href="struct.Otlp.html#method.from_env" title="associated function dwara::otlp::Otlp::from_env"><code>Otlp::from_env</code></a> resolves <code>DWARA_OTLP_ENDPOINT</code>. Unset or empty =
+no-op (the tracing layer is <code>None</code>; one INFO line after init).</li>
+<li>The endpoint is a BASE url (OTLP convention, e.g.
+<code>http://collector:4318</code>); <code>traces_endpoint</code> appends <code>/v1/traces</code>
+(a programmatic endpoint is used verbatim by opentelemetry-otlp).</li>
+<li><a href="struct.Otlp.html#method.layer" title="method dwara::otlp::Otlp::layer"><code>Otlp::layer</code></a> bridges the existing <code>tracing</code> spans into the
+provider via <code>tracing-opentelemetry</code> (the era-appropriate bridge —
+<code>opentelemetry-appender-tracing</code> is logs-only since 0.28). The
+spans themselves are unchanged: the same <code>tracing</code> callsites
+dwara-core already emits; the layer only observes them.</li>
+<li>A batch span processor (its own dedicated thread) exports finished
+spans; on SIGTERM/SIGINT <code>main</code> calls <a href="struct.Otlp.html#method.shutdown" title="method dwara::otlp::Otlp::shutdown"><code>Otlp::shutdown</code></a> inside
+the existing graceful-drain budget, bounded.</li>
+</ol>
+<h3 id="the-exporter-http-client"><a class="doc-anchor" href="#the-exporter-http-client">§</a>The exporter HTTP client</h3>
+<p><a href="struct.StdHttpClient.html" title="struct dwara::otlp::StdHttpClient"><code>StdHttpClient</code></a> is a std-only blocking HTTP/1.1 client implementing
+<code>opentelemetry-http</code>’s <code>HttpClient</code> trait, handed to the exporter via
+<code>with_http_client</code>. Neither of upstream’s bundled clients fits this
+binary: the reqwest clients add a second HTTP/TLS stack (hundreds of
+KB against the size budget this feature exists to respect), and the
+hyper client requires a tokio context that the SDK batch thread (a
+plain OS thread driving the async exporter with
+<code>futures_executor::block_on</code>) does not have — polling it there panics
+on <code>tokio::time</code>. A blocking client is exactly right on that thread.
+Plain <code>http://</code> endpoints only (the deployment shape is a
+loopback/sidecar collector); upstream’s own hyper default connector
+ships no TLS either. An <code>https://</code> endpoint fails fast at startup.</p>
+<p>v1 scope, deliberately deferred: nothing behind the client saves a
+batch the collector never accepted — opentelemetry_sdk 0.32’s batch
+span processors (both variants) log a failed batch and DROP it.
+Since #133 the client itself retries retryable outcomes INSIDE one
+export call: the transient status set (429/502/503/504) and
+transport failures are retried up to <a href="constant.MAX_EXPORT_ATTEMPTS.html" title="constant dwara::otlp::MAX_EXPORT_ATTEMPTS"><code>MAX_EXPORT_ATTEMPTS</code></a> total
+attempts with exponential backoff, honoring a seconds-form
+<code>Retry-After</code> when the collector sends one (the HTTP-date form is
+deliberately uninterpreted and falls back to the computed backoff);
+every attempt shares the ONE total export deadline, so retries
+cannot stretch a batch past <a href="constant.EXPORT_TIMEOUT.html" title="constant dwara::otlp::EXPORT_TIMEOUT"><code>EXPORT_TIMEOUT</code></a> any more than a slow
+collector could. Consequence, accepted: a transport failure AFTER
+the request was fully written may re-send a batch the collector
+already ingested — at-least-once delivery with possible duplicate
+spans, the standard telemetry-export trade (the alternative drops
+committed batches on a response-read hiccup). Still deferred:
+non-UTF-8 exporter header values serialize as empty rather than
+erroring.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Otlp.html" title="struct dwara::otlp::Otlp">Otlp</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Startup wiring handle: the provider (when live) plus the deferred
+status line. <code>main</code> builds this BEFORE the subscriber (the layer must
+exist at init) and logs the status AFTER (so the line lands in the
+JSON pipeline like every other startup log).</dd><dt><a class="struct" href="struct.OtlpMetrics.html" title="struct dwara::otlp::OtlpMetrics">Otlp<wbr>Metrics</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A handle to the periodic metrics export task (DW-073). The task
+gathers prometheus metric families from the observability registry,
+converts them to OTLP protobuf, and POSTs to the collector’s
+<code>/v1/metrics</code> endpoint on a fixed interval. The task is detached;
+<code>shutdown</code> cancels it and performs one final flush.</dd><dt><a class="struct" href="struct.StdHttpClient.html" title="struct dwara::otlp::StdHttpClient">StdHttp<wbr>Client</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A std-only blocking HTTP/1.1 client for the OTLP exporter (#126).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Attempt.html" title="enum dwara::otlp::Attempt">Attempt</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>One exchange attempt’s outcome classification (#133).</dd><dt><a class="enum" href="enum.Status.html" title="enum dwara::otlp::Status">Status</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BACKOFF_BASE_ENV.html" title="constant dwara::otlp::BACKOFF_BASE_ENV">BACKOFF_<wbr>BASE_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): env var override for the retry backoff base in
+milliseconds. Default 100ms.</dd><dt><a class="constant" href="constant.BACKOFF_CAP_ENV.html" title="constant dwara::otlp::BACKOFF_CAP_ENV">BACKOFF_<wbr>CAP_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): env var override for the retry backoff cap in
+milliseconds. Default 1000ms (1s).</dd><dt><a class="constant" href="constant.DEFAULT_METRICS_EXPORT_INTERVAL.html" title="constant dwara::otlp::DEFAULT_METRICS_EXPORT_INTERVAL">DEFAULT_<wbr>METRICS_<wbr>EXPORT_<wbr>INTERVAL</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Default export interval for the periodic metrics exporter.</dd><dt><a class="constant" href="constant.ENDPOINT_ENV.html" title="constant dwara::otlp::ENDPOINT_ENV">ENDPOINT_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Env var holding the OTLP collector base endpoint (see module docs).</dd><dt><a class="constant" href="constant.EXPORT_TIMEOUT.html" title="constant dwara::otlp::EXPORT_TIMEOUT">EXPORT_<wbr>TIMEOUT</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>TOTAL budget for ONE export POST (the otel spec treats the exporter
+timeout as one aggregate budget, not per-op): every connect attempt
+and all socket I/O shrink against the remaining time. DNS
+resolution is the one unbounded step (std <code>to_socket_addrs</code> takes
+no timeout); the deadline bounds everything after it. Matches
+opentelemetry-otlp’s own 10s default. Batch-thread only; never
+request-path.</dd><dt><a class="constant" href="constant.EXPORT_TIMEOUT_ENV.html" title="constant dwara::otlp::EXPORT_TIMEOUT_ENV">EXPORT_<wbr>TIMEOUT_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): env var override for the export timeout (seconds).
+The total budget for one export POST (connect + send + receive +
+retries). Default 10s (matches the otel spec).</dd><dt><a class="constant" href="constant.MAX_ATTEMPTS_ENV.html" title="constant dwara::otlp::MAX_ATTEMPTS_ENV">MAX_<wbr>ATTEMPTS_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): env var override for the max export attempts. The
+initial attempt plus retries. Default 3.</dd><dt><a class="constant" href="constant.MAX_EXPORT_ATTEMPTS.html" title="constant dwara::otlp::MAX_EXPORT_ATTEMPTS">MAX_<wbr>EXPORT_<wbr>ATTEMPTS</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Total attempts for one export exchange when the collector answers
+transiently (429/502/503/504) or the transport fails: the initial
+attempt plus two retries. Bounded so a down collector cannot occupy
+the batch thread indefinitely; every attempt shares the one total
+export deadline (#133).</dd><dt><a class="constant" href="constant.MAX_RESPONSE_BODY_BYTES.html" title="constant dwara::otlp::MAX_RESPONSE_BODY_BYTES">MAX_<wbr>RESPONSE_<wbr>BODY_<wbr>BYTES</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Response-body read bound (collectors answer with a tiny or empty
+protobuf body; anything larger is not going to be parsed usefully).</dd><dt><a class="constant" href="constant.MAX_RESPONSE_HEAD_BYTES.html" title="constant dwara::otlp::MAX_RESPONSE_HEAD_BYTES">MAX_<wbr>RESPONSE_<wbr>HEAD_<wbr>BYTES</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Response-header read bound while locating the blank line (bytes).</dd><dt><a class="constant" href="constant.METRICS_INTERVAL_ENV.html" title="constant dwara::otlp::METRICS_INTERVAL_ENV">METRICS_<wbr>INTERVAL_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Env var override for the metrics export interval (seconds). Tests
+use a short interval; production keeps the 15s default.</dd><dt><a class="constant" href="constant.METRICS_PATH.html" title="constant dwara::otlp::METRICS_PATH">METRICS_<wbr>PATH</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The OTLP signal path for metrics.</dd><dt><a class="constant" href="constant.METRICS_QUEUE_DEPTH_ENV.html" title="constant dwara::otlp::METRICS_QUEUE_DEPTH_ENV">METRICS_<wbr>QUEUE_<wbr>DEPTH_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): env var override for the max retry queue depth. When
+greater than 0, failed metrics exports are buffered in a bounded
+in-memory queue and retried on subsequent ticks. Default 0 = no
+queueing (v1 behavior: a failed tick is dropped, the next tick
+starts fresh).</dd><dt><a class="constant" href="constant.RETRY_BACKOFF_BASE.html" title="constant dwara::otlp::RETRY_BACKOFF_BASE">RETRY_<wbr>BACKOFF_<wbr>BASE</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>First backoff between export attempts, doubling per retry up to
+<a href="constant.RETRY_BACKOFF_CAP.html" title="constant dwara::otlp::RETRY_BACKOFF_CAP"><code>RETRY_BACKOFF_CAP</code></a>; a seconds-form <code>Retry-After</code> replaces the
+computed value for that wait (still bounded by the total deadline).</dd><dt><a class="constant" href="constant.RETRY_BACKOFF_CAP.html" title="constant dwara::otlp::RETRY_BACKOFF_CAP">RETRY_<wbr>BACKOFF_<wbr>CAP</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="constant" href="constant.SERVICE_NAME.html" title="constant dwara::otlp::SERVICE_NAME">SERVICE_<wbr>NAME</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd><code>service.name</code> resource attribute identifying the gateway to the
+collector.</dd><dt><a class="constant" href="constant.TRACER_NAME.html" title="constant dwara::otlp::TRACER_NAME">TRACER_<wbr>NAME</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Instrumentation-scope name stamped on every exported span.</dd><dt><a class="constant" href="constant.TRACE_PATH.html" title="constant dwara::otlp::TRACE_PATH">TRACE_<wbr>PATH</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The OTLP signal path for traces (spec: exporter.md#endpoint-urls-for-
+otlphttp).</dd><dt><a class="constant" href="constant.WRITE_CHUNK.html" title="constant dwara::otlp::WRITE_CHUNK">WRITE_<wbr>CHUNK</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Write granularity for request serialization (#133): the total
+deadline is re-checked between chunks, so a peer making steady
+minimal TCP-window progress inside one send — which would never
+trip a single armed write timeout — still cannot stretch the write
+past the export budget.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_provider.html" title="fn dwara::otlp::build_provider">build_<wbr>provider</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Build the exporter + provider for one endpoint. Also installs the
+global provider (context propagation callers read the global; our own
+export path uses the typed handle directly).</dd><dt><a class="fn" href="fn.convert_labels.html" title="fn dwara::otlp::convert_labels">convert_<wbr>labels</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Convert prometheus label pairs to OTLP KeyValue attributes.</dd><dt><a class="fn" href="fn.encode_metrics_otlp.html" title="fn dwara::otlp::encode_metrics_otlp">encode_<wbr>metrics_<wbr>otlp</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Encode prometheus MetricFamilies into OTLP protobuf
+(ExportMetricsServiceRequest). This is a minimal encoder that
+handles the three metric types dwara uses: counter (Sum with
+is_monotonic=true), gauge (Gauge), and histogram (Histogram).</dd><dt><a class="fn" href="fn.export_metrics_tick.html" title="fn dwara::otlp::export_metrics_tick">export_<wbr>metrics_<wbr>tick</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>One metrics export tick: gather, convert, POST. REL-09 (#220):
+when a retry queue is configured, failed exports are buffered and
+retried before the current tick’s payload. The queue is bounded;
+when full, the oldest entry is dropped.</dd><dt><a class="fn" href="fn.export_timeout.html" title="fn dwara::otlp::export_timeout">export_<wbr>timeout</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): resolve the export timeout from the env override or
+the default. An invalid value falls back to the default (with a
+warn).</dd><dt><a class="fn" href="fn.is_retryable_status.html" title="fn dwara::otlp::is_retryable_status">is_<wbr>retryable_<wbr>status</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The transient status set the client retries (#133): out of quota
+(429, where Retry-After is defined) and briefly unavailable
+(502/503/504). Deliberately narrow: 500 is a collector BUG a retry
+cannot fix, and 4xx family answers are this batch’s fault.</dd><dt><a class="fn" href="fn.max_export_attempts.html" title="fn dwara::otlp::max_export_attempts">max_<wbr>export_<wbr>attempts</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): resolve the max export attempts from the env override
+or the default. An invalid value falls back to the default.</dd><dt><a class="fn" href="fn.metrics_endpoint.html" title="fn dwara::otlp::metrics_endpoint">metrics_<wbr>endpoint</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Resolve the operator-supplied BASE endpoint into the full metrics URL.</dd><dt><a class="fn" href="fn.metrics_export_interval.html" title="fn dwara::otlp::metrics_export_interval">metrics_<wbr>export_<wbr>interval</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Resolve the metrics export interval from the env override or the
+default. An invalid value falls back to the default (with a warn).</dd><dt><a class="fn" href="fn.metrics_queue_depth.html" title="fn dwara::otlp::metrics_queue_depth">metrics_<wbr>queue_<wbr>depth</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): resolve the metrics retry queue depth from the env
+override. Default 0 = no queueing (v1 behavior).</dd><dt><a class="fn" href="fn.now_nanos.html" title="fn dwara::otlp::now_nanos">now_<wbr>nanos</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Current time in Unix nanoseconds.</dd><dt><a class="fn" href="fn.post_otlp.html" title="fn dwara::otlp::post_otlp">post_<wbr>otlp</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>POST an OTLP protobuf body to the given URL using the std-only HTTP
+client (the same client the trace exporter uses, but async-wrapped
+for the tokio context the metrics task runs in).</dd><dt><a class="fn" href="fn.read_body.html" title="fn dwara::otlp::read_body">read_<wbr>body</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Parse the head and read the body (already-buffered prefix carried in).</dd><dt><a class="fn" href="fn.read_bounded.html" title="fn dwara::otlp::read_bounded">read_<wbr>bounded</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Read once off <code>stream</code>, bounded by the remaining export budget: std
+applies a socket read timeout per read call, so re-arming it here
+keeps the TOTAL bounded — a slow-drip collector cannot stretch one
+export past the deadline.</dd><dt><a class="fn" href="fn.read_response.html" title="fn dwara::otlp::read_response">read_<wbr>response</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Read one HTTP/1.1 response off <code>stream</code>: status line, headers, then
+the body per Content-Length / chunked / close-delimited framing.
+Every read is bounded against the export <code>deadline</code>.</dd><dt><a class="fn" href="fn.remaining.html" title="fn dwara::otlp::remaining">remaining</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Time left against the total export deadline; <code>Err</code> once the budget
+is spent. Every timed op in <a href="struct.StdHttpClient.html#method.post" title="method dwara::otlp::StdHttpClient::post"><code>StdHttpClient::post</code></a> checks this
+before running so no exchange can outlive <code>timeout</code> in aggregate
+(name resolution is the untimed exception; std takes no timeout
+there).</dd><dt><a class="fn" href="fn.resolve_host.html" title="fn dwara::otlp::resolve_host">resolve_<wbr>host</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Host string for std name resolution: <code>http::Uri::host()</code> keeps IPv6
+literal brackets (<code>[::1]</code>), which <code>ToSocketAddrs</code> rejects — strip
+them for RESOLUTION only (the Host header below keeps the bracketed
+uri form verbatim, as the HTTP grammar requires).</dd><dt><a class="fn" href="fn.retry_after_seconds.html" title="fn dwara::otlp::retry_after_seconds">retry_<wbr>after_<wbr>seconds</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Seconds-form <code>Retry-After</code> only (#133): decimal seconds. The
+HTTP-date form is deliberately uninterpreted (a sidecar collector
+answers in seconds; parsing IMF-fixdate would buy nothing here) —
+absent or unparseable falls back to the computed backoff.</dd><dt><a class="fn" href="fn.retry_backoff_base.html" title="fn dwara::otlp::retry_backoff_base">retry_<wbr>backoff_<wbr>base</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): resolve the retry backoff base from the env override
+or the default. An invalid value falls back to the default.</dd><dt><a class="fn" href="fn.retry_backoff_cap.html" title="fn dwara::otlp::retry_backoff_cap">retry_<wbr>backoff_<wbr>cap</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>REL-09 (#220): resolve the retry backoff cap from the env override
+or the default. An invalid value falls back to the default.</dd><dt><a class="fn" href="fn.traces_endpoint.html" title="fn dwara::otlp::traces_endpoint">traces_<wbr>endpoint</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Resolve the operator-supplied BASE endpoint into the full trace URL.
+A programmatically-set endpoint is used VERBATIM by opentelemetry-otlp
+(only <code>OTEL_EXPORTER_OTLP_*</code> env vars get the signal path appended),
+so the path is appended here; an endpoint that already ends with it
+(a full trace URL) is respected as-is.</dd><dt><a class="fn" href="fn.write_all_bounded.html" title="fn dwara::otlp::write_all_bounded">write_<wbr>all_<wbr>bounded</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Write the whole buffer in <a href="constant.WRITE_CHUNK.html" title="constant dwara::otlp::WRITE_CHUNK"><code>WRITE_CHUNK</code></a>-bounded sends, re-arming
+the write timeout and re-checking the total deadline between sends
+(#133): a peer dribbling steady minimal TCP-window progress inside
+one send would never trip a single armed timeout, so the loop is
+what bounds the write against the export deadline.</dd></dl></section></div></main></body></html>

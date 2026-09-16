@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["McpTransport","Permission"],"fn":["encode_sse_error","encode_sse_response"],"struct":["AgentIdentity","McpServer","MockToolHandler","ToolCallRequest","ToolCallResponse","ToolDefinition"],"trait":["ToolHandler"]};

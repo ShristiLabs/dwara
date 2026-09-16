@@ -1,0 +1,30 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The Anthropic messages adapter (DW-075)."><title>dwara_core::ai::adapters::anthropic - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module anthropic</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module anthropic</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai::<wbr>adapters</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">dwara_core</a>::<wbr><a href="../../index.html">ai</a>::<wbr><a href="../index.html">adapters</a></div><h1>Module <span>anthropic</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/dwara_core/ai/adapters/anthropic.rs.html#1-557">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The Anthropic messages adapter (DW-075).</p>
+<p>Speaks the Anthropic messages API (<code>POST /v1/messages</code>). The
+translation is the deepest of the three dialects:</p>
+<ul>
+<li>System messages lift to the top-level <code>system</code> field (joined with
+a blank line when several appear).</li>
+<li>Tool RESULTS (OpenAI <code>role: tool</code> messages) become USER turns
+carrying a <code>tool_result</code> content block; assistant tool calls
+become <code>tool_use</code> blocks whose <code>input</code> is the parsed arguments
+object.</li>
+<li><code>max_tokens</code> is REQUIRED by Anthropic and absent from many OpenAI
+client calls: the adapter substitutes
+<a href="constant.DEFAULT_MAX_TOKENS.html" title="constant dwara_core::ai::adapters::anthropic::DEFAULT_MAX_TOKENS"><code>DEFAULT_MAX_TOKENS</code></a> and says so in the module docs — the
+provider refuses an unbounded generation, so a floor is the only
+way to honor the request at all.</li>
+<li>Finish reasons map <code>end_turn</code>/<code>stop_sequence</code> -&gt; stop,
+<code>max_tokens</code> -&gt; length, <code>tool_use</code> -&gt; tool calls,
+<code>refusal</code> -&gt; content filter.</li>
+<li>Usage maps <code>input_tokens</code>/<code>output_tokens</code> to
+prompt/completion; <code>total</code> is derived (sum) because Anthropic
+does not send one.</li>
+</ul>
+<p>Streaming (verified in tests, wired at the gateway in DW-077): the
+messages-API SSE stream (<code>message_start</code> -&gt; <code>content_block_*</code> -&gt;
+<code>message_delta</code> -&gt; <code>message_stop</code>) translates event-by-event; tool
+argument fragments arrive as <code>input_json_delta.partial_json</code> and
+are re-expressed as OpenAI-style argument-fragment deltas.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AnthropicAdapter.html" title="struct dwara_core::ai::adapters::anthropic::AnthropicAdapter">Anthropic<wbr>Adapter</a></dt><dd>The Anthropic messages adapter. Stateless singleton.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_MAX_TOKENS.html" title="constant dwara_core::ai::adapters::anthropic::DEFAULT_MAX_TOKENS">DEFAULT_<wbr>MAX_<wbr>TOKENS</a></dt><dd>The <code>max_tokens</code> the adapter substitutes when the client did not
+send one. Anthropic requires the field; OpenAI clients usually omit
+it. 4096 is a conservative default that no provider rejects.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,249 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/dwara-core/src/ai/sse.rs`."><title>sse.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">dwara_core/ai/</div>sse.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Hand-rolled SSE framing (DW-075).
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! The locked M4 dependency decision is in-house framing: the
+<a href=#4 id=4 data-nosnippet>4</a>//! `text/event-stream` wire format is small enough (a line grammar over
+<a href=#5 id=5 data-nosnippet>5</a>//! a byte stream) that pulling an SSE crate — and the transitive
+<a href=#6 id=6 data-nosnippet>6</a>//! futures-stack it would drag into the AI domain — buys nothing. This
+<a href=#7 id=7 data-nosnippet>7</a>//! decoder implements the parts the provider dialects actually use:
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! - events are separated by a blank line (`\n\n` or `\r\n\r\n`),
+<a href=#10 id=10 data-nosnippet>10</a>//! - `data:` lines carry the payload (multiple `data:` lines in one
+<a href=#11 id=11 data-nosnippet>11</a>//!   event join with `\n`, per the WHATWG spec),
+<a href=#12 id=12 data-nosnippet>12</a>//! - `event:` names the event (Anthropic sends `event: message_start`
+<a href=#13 id=13 data-nosnippet>13</a>//!   alongside the data payload),
+<a href=#14 id=14 data-nosnippet>14</a>//! - `id:` and `retry:` lines are ignored, and `:`-prefixed comment
+<a href=#15 id=15 data-nosnippet>15</a>//!   lines are ignored,
+<a href=#16 id=16 data-nosnippet>16</a>//! - leading whitespace after the field name is stripped once.
+<a href=#17 id=17 data-nosnippet>17</a>//!
+<a href=#18 id=18 data-nosnippet>18</a>//! What it deliberately does NOT do: charset negotiation,
+<a href=#19 id=19 data-nosnippet>19</a>//! `Last-Event-ID` resumption (providers do not support it), or BOM
+<a href=#20 id=20 data-nosnippet>20</a>//! sniffing — none of the shipped dialects use any of that.
+<a href=#21 id=21 data-nosnippet>21</a>
+<a href=#22 id=22 data-nosnippet>22</a>/// One decoded SSE event: its optional name and its data payload.
+<a href=#23 id=23 data-nosnippet>23</a></span><span class="attr">#[derive(Debug, Clone, PartialEq, Eq)]
+<a href=#24 id=24 data-nosnippet>24</a></span><span class="kw">pub struct </span>SseFrame {
+<a href=#25 id=25 data-nosnippet>25</a>    <span class="kw">pub </span>event: <span class="prelude-ty">Option</span>&lt;String&gt;,
+<a href=#26 id=26 data-nosnippet>26</a>    <span class="kw">pub </span>data: String,
+<a href=#27 id=27 data-nosnippet>27</a>}
+<a href=#28 id=28 data-nosnippet>28</a>
+<a href=#29 id=29 data-nosnippet>29</a><span class="doccomment">/// An incremental SSE decoder: feed it raw bytes as they arrive, take
+<a href=#30 id=30 data-nosnippet>30</a>/// complete frames back. Call [`SseDecoder::finish`] at stream end to
+<a href=#31 id=31 data-nosnippet>31</a>/// recover a final frame not terminated by a blank line (tolerant
+<a href=#32 id=32 data-nosnippet>32</a>/// providers exist; a well-formed stream yields nothing there).
+<a href=#33 id=33 data-nosnippet>33</a></span><span class="attr">#[derive(Debug, Default)]
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">pub struct </span>SseDecoder {
+<a href=#35 id=35 data-nosnippet>35</a>    buf: String,
+<a href=#36 id=36 data-nosnippet>36</a>}
+<a href=#37 id=37 data-nosnippet>37</a>
+<a href=#38 id=38 data-nosnippet>38</a><span class="kw">impl </span>SseDecoder {
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="kw">pub fn </span>new() -&gt; <span class="self">Self </span>{
+<a href=#40 id=40 data-nosnippet>40</a>        SseDecoder { buf: String::new() }
+<a href=#41 id=41 data-nosnippet>41</a>    }
+<a href=#42 id=42 data-nosnippet>42</a>
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="doccomment">/// Feed raw bytes; returns every frame completed by this chunk.
+<a href=#44 id=44 data-nosnippet>44</a>    </span><span class="kw">pub fn </span>push(<span class="kw-2">&amp;mut </span><span class="self">self</span>, bytes: <span class="kw-2">&amp;</span>[u8]) -&gt; Vec&lt;SseFrame&gt; {
+<a href=#45 id=45 data-nosnippet>45</a>        <span class="comment">// Provider streams are ASCII JSON; lossy conversion only ever
+<a href=#46 id=46 data-nosnippet>46</a>        // replaces bytes on a malformed (non-UTF-8) stream, where the
+<a href=#47 id=47 data-nosnippet>47</a>        // JSON parse downstream fails loudly anyway.
+<a href=#48 id=48 data-nosnippet>48</a>        </span><span class="self">self</span>.buf.push_str(<span class="kw-2">&amp;</span>String::from_utf8_lossy(bytes));
+<a href=#49 id=49 data-nosnippet>49</a>        <span class="self">self</span>.drain()
+<a href=#50 id=50 data-nosnippet>50</a>    }
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="doccomment">/// Flush any buffered partial frame at stream end.
+<a href=#53 id=53 data-nosnippet>53</a>    </span><span class="kw">pub fn </span>finish(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Vec&lt;SseFrame&gt; {
+<a href=#54 id=54 data-nosnippet>54</a>        <span class="kw">let </span>rest = std::mem::take(<span class="kw-2">&amp;mut </span><span class="self">self</span>.buf);
+<a href=#55 id=55 data-nosnippet>55</a>        <span class="kw">if </span>rest.trim().is_empty() {
+<a href=#56 id=56 data-nosnippet>56</a>            Vec::new()
+<a href=#57 id=57 data-nosnippet>57</a>        } <span class="kw">else </span>{
+<a href=#58 id=58 data-nosnippet>58</a>            parse_frame(<span class="kw-2">&amp;</span>rest).into_iter().collect()
+<a href=#59 id=59 data-nosnippet>59</a>        }
+<a href=#60 id=60 data-nosnippet>60</a>    }
+<a href=#61 id=61 data-nosnippet>61</a>
+<a href=#62 id=62 data-nosnippet>62</a>    <span class="doccomment">/// Split every COMPLETE frame (terminated by a blank line) off the
+<a href=#63 id=63 data-nosnippet>63</a>    /// buffer.
+<a href=#64 id=64 data-nosnippet>64</a>    </span><span class="kw">fn </span>drain(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; Vec&lt;SseFrame&gt; {
+<a href=#65 id=65 data-nosnippet>65</a>        <span class="kw">let </span><span class="kw-2">mut </span>frames = Vec::new();
+<a href=#66 id=66 data-nosnippet>66</a>        <span class="kw">while let </span><span class="prelude-val">Some</span>((text_end, term_len)) = find_event_end(<span class="kw-2">&amp;</span><span class="self">self</span>.buf) {
+<a href=#67 id=67 data-nosnippet>67</a>            <span class="kw">let </span>frame_text = <span class="self">self</span>.buf[..text_end].to_string();
+<a href=#68 id=68 data-nosnippet>68</a>            <span class="self">self</span>.buf.drain(..text_end + term_len);
+<a href=#69 id=69 data-nosnippet>69</a>            <span class="comment">// A blank separator with no event text (or a comment-only
+<a href=#70 id=70 data-nosnippet>70</a>            // keepalive block) produces no frame.
+<a href=#71 id=71 data-nosnippet>71</a>            </span><span class="kw">if let </span><span class="prelude-val">Some</span>(frame) = parse_frame(<span class="kw-2">&amp;</span>frame_text) {
+<a href=#72 id=72 data-nosnippet>72</a>                frames.push(frame);
+<a href=#73 id=73 data-nosnippet>73</a>            }
+<a href=#74 id=74 data-nosnippet>74</a>        }
+<a href=#75 id=75 data-nosnippet>75</a>        frames
+<a href=#76 id=76 data-nosnippet>76</a>    }
+<a href=#77 id=77 data-nosnippet>77</a>}
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="doccomment">/// Find the first COMPLETE event terminator in `s`.
+<a href=#80 id=80 data-nosnippet>80</a>///
+<a href=#81 id=81 data-nosnippet>81</a>/// Returns `(event_text_end, terminator_len)`: the event text is
+<a href=#82 id=82 data-nosnippet>82</a>/// `s[..event_text_end]` and the terminator is the `terminator_len`
+<a href=#83 id=83 data-nosnippet>83</a>/// bytes starting there. Recognized blank-line spellings (a data line
+<a href=#84 id=84 data-nosnippet>84</a>/// ending plus an empty line, in any LF/CRLF mix):
+<a href=#85 id=85 data-nosnippet>85</a>///
+<a href=#86 id=86 data-nosnippet>86</a>/// - `\n\n` — event text ends at the first `\n`, width 2.
+<a href=#87 id=87 data-nosnippet>87</a>/// - `\r\n\r\n` — event text ends before the first `\r`, width 4.
+<a href=#88 id=88 data-nosnippet>88</a>/// - `\n\r\n` — an LF-ended data line followed by a CRLF blank line:
+<a href=#89 id=89 data-nosnippet>89</a>///   event text ends at the `\n`, width 3.
+<a href=#90 id=90 data-nosnippet>90</a>///
+<a href=#91 id=91 data-nosnippet>91</a>/// A buffer that ends mid-terminator (`... \n\r`, possibly the first
+<a href=#92 id=92 data-nosnippet>92</a>/// half of a `\r\n\r\n` or `\n\r\n`) matches NOTHING: the caller must
+<a href=#93 id=93 data-nosnippet>93</a>/// wait for more bytes rather than split on a partial terminator.
+<a href=#94 id=94 data-nosnippet>94</a></span><span class="kw">fn </span>find_event_end(s: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;(usize, usize)&gt; {
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="kw">let </span>b = s.as_bytes();
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..b.len() {
+<a href=#97 id=97 data-nosnippet>97</a>        <span class="kw">if </span>b[i] != <span class="string">b'\n' </span>{
+<a href=#98 id=98 data-nosnippet>98</a>            <span class="kw">continue</span>;
+<a href=#99 id=99 data-nosnippet>99</a>        }
+<a href=#100 id=100 data-nosnippet>100</a>        <span class="comment">// "\n\n": the event text ends at i.
+<a href=#101 id=101 data-nosnippet>101</a>        </span><span class="kw">if </span>i + <span class="number">1 </span>&lt; b.len() &amp;&amp; b[i + <span class="number">1</span>] == <span class="string">b'\n' </span>{
+<a href=#102 id=102 data-nosnippet>102</a>            <span class="kw">return </span><span class="prelude-val">Some</span>((i, <span class="number">2</span>));
+<a href=#103 id=103 data-nosnippet>103</a>        }
+<a href=#104 id=104 data-nosnippet>104</a>        <span class="comment">// A "\r\n" blank line follows. Where the event text ends
+<a href=#105 id=105 data-nosnippet>105</a>        // depends on how the DATA line ended: "\r\n\r\n" puts a "\r"
+<a href=#106 id=106 data-nosnippet>106</a>        // just before i (it belongs to the terminator); "\n\r\n" does
+<a href=#107 id=107 data-nosnippet>107</a>        // not.
+<a href=#108 id=108 data-nosnippet>108</a>        </span><span class="kw">if </span>i + <span class="number">2 </span>&lt; b.len() &amp;&amp; b[i + <span class="number">1</span>] == <span class="string">b'\r' </span>&amp;&amp; b[i + <span class="number">2</span>] == <span class="string">b'\n' </span>{
+<a href=#109 id=109 data-nosnippet>109</a>            <span class="kw">return if </span>i &gt;= <span class="number">1 </span>&amp;&amp; b[i - <span class="number">1</span>] == <span class="string">b'\r' </span>{
+<a href=#110 id=110 data-nosnippet>110</a>                <span class="prelude-val">Some</span>((i - <span class="number">1</span>, <span class="number">4</span>))
+<a href=#111 id=111 data-nosnippet>111</a>            } <span class="kw">else </span>{
+<a href=#112 id=112 data-nosnippet>112</a>                <span class="prelude-val">Some</span>((i, <span class="number">3</span>))
+<a href=#113 id=113 data-nosnippet>113</a>            };
+<a href=#114 id=114 data-nosnippet>114</a>        }
+<a href=#115 id=115 data-nosnippet>115</a>    }
+<a href=#116 id=116 data-nosnippet>116</a>    <span class="prelude-val">None
+<a href=#117 id=117 data-nosnippet>117</a></span>}
+<a href=#118 id=118 data-nosnippet>118</a>
+<a href=#119 id=119 data-nosnippet>119</a><span class="doccomment">/// Parse one event's text into a frame. Comment-only events (keepalive
+<a href=#120 id=120 data-nosnippet>120</a>/// `:` pings) return None — they carry no data.
+<a href=#121 id=121 data-nosnippet>121</a></span><span class="kw">fn </span>parse_frame(text: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;SseFrame&gt; {
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">let </span><span class="kw-2">mut </span>event = <span class="prelude-val">None</span>;
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="kw">let </span><span class="kw-2">mut </span>data_lines: Vec&lt;String&gt; = Vec::new();
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="kw">for </span>line <span class="kw">in </span>text.split(<span class="string">'\n'</span>) {
+<a href=#125 id=125 data-nosnippet>125</a>        <span class="kw">let </span>line = line.strip_suffix(<span class="string">'\r'</span>).unwrap_or(line);
+<a href=#126 id=126 data-nosnippet>126</a>        <span class="kw">if </span>line.is_empty() || line.starts_with(<span class="string">':'</span>) {
+<a href=#127 id=127 data-nosnippet>127</a>            <span class="kw">continue</span>;
+<a href=#128 id=128 data-nosnippet>128</a>        }
+<a href=#129 id=129 data-nosnippet>129</a>        <span class="kw">let </span>(name, value) = <span class="kw">match </span>line.split_once(<span class="string">':'</span>) {
+<a href=#130 id=130 data-nosnippet>130</a>            <span class="prelude-val">Some</span>((n, v)) =&gt; (n, v.strip_prefix(<span class="string">' '</span>).unwrap_or(v)),
+<a href=#131 id=131 data-nosnippet>131</a>            <span class="prelude-val">None </span>=&gt; (line, <span class="string">""</span>),
+<a href=#132 id=132 data-nosnippet>132</a>        };
+<a href=#133 id=133 data-nosnippet>133</a>        <span class="kw">match </span>name {
+<a href=#134 id=134 data-nosnippet>134</a>            <span class="string">"data" </span>=&gt; data_lines.push(value.to_string()),
+<a href=#135 id=135 data-nosnippet>135</a>            <span class="string">"event" </span>=&gt; event = <span class="prelude-val">Some</span>(value.to_string()),
+<a href=#136 id=136 data-nosnippet>136</a>            <span class="kw">_ </span>=&gt; {}
+<a href=#137 id=137 data-nosnippet>137</a>        }
+<a href=#138 id=138 data-nosnippet>138</a>    }
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="kw">if </span>data_lines.is_empty() {
+<a href=#140 id=140 data-nosnippet>140</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#141 id=141 data-nosnippet>141</a>    }
+<a href=#142 id=142 data-nosnippet>142</a>    <span class="prelude-val">Some</span>(SseFrame {
+<a href=#143 id=143 data-nosnippet>143</a>        event,
+<a href=#144 id=144 data-nosnippet>144</a>        data: data_lines.join(<span class="string">"\n"</span>),
+<a href=#145 id=145 data-nosnippet>145</a>    })
+<a href=#146 id=146 data-nosnippet>146</a>}
+<a href=#147 id=147 data-nosnippet>147</a>
+<a href=#148 id=148 data-nosnippet>148</a><span class="attr">#[cfg(test)]
+<a href=#149 id=149 data-nosnippet>149</a></span><span class="kw">mod </span>tests {
+<a href=#150 id=150 data-nosnippet>150</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a>    <span class="comment">// White-box: the decoder's frame grammar is private behavior not
+<a href=#153 id=153 data-nosnippet>153</a>    // yet exercised through a public caller (the gateway streaming
+<a href=#154 id=154 data-nosnippet>154</a>    // path is DW-077); these stay here with that justification and are
+<a href=#155 id=155 data-nosnippet>155</a>    // additionally replayed through adapter stream tests in
+<a href=#156 id=156 data-nosnippet>156</a>    // tests/ai_adapters.rs.
+<a href=#157 id=157 data-nosnippet>157</a>
+<a href=#158 id=158 data-nosnippet>158</a>    </span><span class="kw">fn </span>datas(dec: <span class="kw-2">&amp;mut </span>SseDecoder, chunk: <span class="kw-2">&amp;</span>str) -&gt; Vec&lt;String&gt; {
+<a href=#159 id=159 data-nosnippet>159</a>        dec.push(chunk.as_bytes())
+<a href=#160 id=160 data-nosnippet>160</a>            .into_iter()
+<a href=#161 id=161 data-nosnippet>161</a>            .map(|f| f.data)
+<a href=#162 id=162 data-nosnippet>162</a>            .collect()
+<a href=#163 id=163 data-nosnippet>163</a>    }
+<a href=#164 id=164 data-nosnippet>164</a>
+<a href=#165 id=165 data-nosnippet>165</a>    <span class="attr">#[test]
+<a href=#166 id=166 data-nosnippet>166</a>    </span><span class="kw">fn </span>splits_two_events_in_one_chunk() {
+<a href=#167 id=167 data-nosnippet>167</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#168 id=168 data-nosnippet>168</a>        <span class="kw">let </span>out = datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"event: x\ndata: one\n\ndata: two\n\n"</span>);
+<a href=#169 id=169 data-nosnippet>169</a>        <span class="macro">assert_eq!</span>(out, <span class="macro">vec!</span>[<span class="string">"one"</span>.to_string(), <span class="string">"two"</span>.to_string()]);
+<a href=#170 id=170 data-nosnippet>170</a>    }
+<a href=#171 id=171 data-nosnippet>171</a>
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="attr">#[test]
+<a href=#173 id=173 data-nosnippet>173</a>    </span><span class="kw">fn </span>assembles_event_split_across_chunks() {
+<a href=#174 id=174 data-nosnippet>174</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#175 id=175 data-nosnippet>175</a>        <span class="macro">assert!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"data: par"</span>).is_empty());
+<a href=#176 id=176 data-nosnippet>176</a>        <span class="macro">assert!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"tial\n"</span>).is_empty());
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="macro">assert_eq!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"\n"</span>), <span class="macro">vec!</span>[<span class="string">"partial"</span>.to_string()]);
+<a href=#178 id=178 data-nosnippet>178</a>    }
+<a href=#179 id=179 data-nosnippet>179</a>
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="attr">#[test]
+<a href=#181 id=181 data-nosnippet>181</a>    </span><span class="kw">fn </span>crlf_line_endings_and_comments() {
+<a href=#182 id=182 data-nosnippet>182</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="kw">let </span>out = dec.push(<span class="string">b": keepalive\r\n\r\nevent: m\r\ndata: {\"a\":1}\r\n\r\n"</span>);
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="macro">assert_eq!</span>(out.len(), <span class="number">1</span>);
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="macro">assert_eq!</span>(out[<span class="number">0</span>].event.as_deref(), <span class="prelude-val">Some</span>(<span class="string">"m"</span>));
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="macro">assert_eq!</span>(out[<span class="number">0</span>].data, <span class="string">"{\"a\":1}"</span>);
+<a href=#187 id=187 data-nosnippet>187</a>    }
+<a href=#188 id=188 data-nosnippet>188</a>
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="attr">#[test]
+<a href=#190 id=190 data-nosnippet>190</a>    </span><span class="kw">fn </span>waits_on_partial_crlf_terminator() {
+<a href=#191 id=191 data-nosnippet>191</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#192 id=192 data-nosnippet>192</a>        <span class="comment">// "...\n\r" could be the first half of an "\r\n\r\n"
+<a href=#193 id=193 data-nosnippet>193</a>        // terminator — must NOT emit yet.
+<a href=#194 id=194 data-nosnippet>194</a>        </span><span class="macro">assert!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"data: x\n\r"</span>).is_empty());
+<a href=#195 id=195 data-nosnippet>195</a>        <span class="macro">assert_eq!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"\n"</span>), <span class="macro">vec!</span>[<span class="string">"x"</span>.to_string()]);
+<a href=#196 id=196 data-nosnippet>196</a>    }
+<a href=#197 id=197 data-nosnippet>197</a>
+<a href=#198 id=198 data-nosnippet>198</a>    <span class="attr">#[test]
+<a href=#199 id=199 data-nosnippet>199</a>    </span><span class="kw">fn </span>multiple_data_lines_join_with_newline() {
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="macro">assert_eq!</span>(
+<a href=#202 id=202 data-nosnippet>202</a>            datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"data: a\ndata: b\n\n"</span>),
+<a href=#203 id=203 data-nosnippet>203</a>            <span class="macro">vec!</span>[<span class="string">"a\nb"</span>.to_string()]
+<a href=#204 id=204 data-nosnippet>204</a>        );
+<a href=#205 id=205 data-nosnippet>205</a>    }
+<a href=#206 id=206 data-nosnippet>206</a>
+<a href=#207 id=207 data-nosnippet>207</a>    <span class="attr">#[test]
+<a href=#208 id=208 data-nosnippet>208</a>    </span><span class="kw">fn </span>finish_recovers_unterminated_frame() {
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="macro">assert!</span>(datas(<span class="kw-2">&amp;mut </span>dec, <span class="string">"data: tail"</span>).is_empty());
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="kw">let </span>out = dec.finish();
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="macro">assert_eq!</span>(out.len(), <span class="number">1</span>);
+<a href=#213 id=213 data-nosnippet>213</a>        <span class="macro">assert_eq!</span>(out[<span class="number">0</span>].data, <span class="string">"tail"</span>);
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>}
+<a href=#216 id=216 data-nosnippet>216</a>
+<a href=#217 id=217 data-nosnippet>217</a><span class="attr">#[cfg(test)]
+<a href=#218 id=218 data-nosnippet>218</a></span><span class="kw">mod </span>dw077_regressions {
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#220 id=220 data-nosnippet>220</a>
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="comment">// Regression (found building the DW-077 e2e suite): a frame split
+<a href=#222 id=222 data-nosnippet>222</a>    // MID-JSON across body writes must assemble — the buffer is pure
+<a href=#223 id=223 data-nosnippet>223</a>    // bytes to the decoder and JSON structure is irrelevant to it.
+<a href=#224 id=224 data-nosnippet>224</a>
+<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="attr">#[test]
+<a href=#226 id=226 data-nosnippet>226</a>    </span><span class="kw">fn </span>frame_split_mid_json_assembles() {
+<a href=#227 id=227 data-nosnippet>227</a>        <span class="kw">let </span><span class="kw-2">mut </span>dec = SseDecoder::new();
+<a href=#228 id=228 data-nosnippet>228</a>        <span class="macro">assert!</span>(dec.push(<span class="string">b"data: {\"delta\":{\"content\":\"Hel"</span>).is_empty());
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="kw">let </span>out = dec.push(
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="string">b"lo\"}}
+<a href=#231 id=231 data-nosnippet>231</a>
+<a href=#232 id=232 data-nosnippet>232</a>"</span>,
+<a href=#233 id=233 data-nosnippet>233</a>        );
+<a href=#234 id=234 data-nosnippet>234</a>        <span class="macro">assert_eq!</span>(out.len(), <span class="number">1</span>, <span class="string">"frames: {out:?}"</span>);
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="macro">assert_eq!</span>(out[<span class="number">0</span>].data, <span class="string">"{\"delta\":{\"content\":\"Hello\"}}"</span>);
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="attr">#[test]
+<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">fn </span>two_choice_frame_yields_two_events() {
+<a href=#240 id=240 data-nosnippet>240</a>        <span class="comment">// The multi-choice chunk shape providers send: one provider
+<a href=#241 id=241 data-nosnippet>241</a>        // frame can carry several deltas.
+<a href=#242 id=242 data-nosnippet>242</a>        </span><span class="kw">let </span>payload = <span class="string">"{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello \"}},{\"index\":0,\"delta\":{\"content\":\"wor\"}}]}"</span>;
+<a href=#243 id=243 data-nosnippet>243</a>        <span class="kw">let </span>v: serde_json::Value = serde_json::from_str(payload).expect(<span class="string">"valid json"</span>);
+<a href=#244 id=244 data-nosnippet>244</a>        <span class="kw">let </span>adapter = <span class="kw">crate</span>::ai::adapter::adapter_for(<span class="kw">crate</span>::config::ai::AiProviderKind::Openai);
+<a href=#245 id=245 data-nosnippet>245</a>        <span class="kw">let </span>events = adapter.parse_stream_event(<span class="kw-2">&amp;</span>v).expect(<span class="string">"parses"</span>);
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="macro">assert_eq!</span>(events.len(), <span class="number">2</span>, <span class="string">"events: {events:?}"</span>);
+<a href=#247 id=247 data-nosnippet>247</a>    }
+<a href=#248 id=248 data-nosnippet>248</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,68 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="GraphQL awareness (DW-099): query depth/complexity limits and persisted-query enforcement for routes that front a GraphQL server."><title>dwara_core::dataplane::graphql - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module graphql</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module graphql</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design" title="Design">Design</a></li><li><a href="#request-path-position" title="Request-path position">Request-path position</a></li><li><a href="#cost-model" title="Cost model">Cost model</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>graphql</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/graphql.rs.html#1-800">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>GraphQL awareness (DW-099): query depth/complexity limits and
+persisted-query enforcement for routes that front a GraphQL server.</p>
+<h3 id="design"><a class="doc-anchor" href="#design">§</a>Design</h3>
+<p>GraphQL endpoints are uniquely abuse-prone: a single small request can
+express an arbitrarily deep or wide query that amplifies into
+expensive upstream work. This module provides a request-phase check
+that rejects abusive queries BEFORE any resource is spent on auth or
+rate limiting, exactly like the WAF-lite (DW-051) and anomaly
+(DW-090) phases it sits beside.</p>
+<p>Two defenses, both feature-gated behind the <code>graphql</code> cargo feature:</p>
+<ol>
+<li>
+<p><strong>Depth/complexity limits</strong>: a bounded hand-rolled scanner walks
+the query string counting nesting depth (max brace nesting) and
+field count (complexity). No external GraphQL parser is pulled in
+– the scanner only needs to count braces and field separators,
+not fully parse the query, which avoids any new dependency (and
+the deny.toml review it would require). The scanner is bounded:
+a parse-depth cap prevents deeply nested brace DoS against the
+scanner itself, and a body-size cap rejects oversized bodies
+before any parsing begins.</p>
+</li>
+<li>
+<p><strong>Persisted queries</strong> (Apollo APQ variant + GET-by-hash): when
+enabled, the gateway enforces that every request either carries a
+known query hash (the SHA-256 of the query text, sent as the
+<code>x-query-hash</code> extension field or the <code>?query_hash=</code> query
+parameter) or is exempted by a config-supplied allowlist. A hash
+not in the configured store is rejected with 400
+<code>graphql_persisted_query_required</code>. The store is config-supplied
+(a map of hash -&gt; query text); an external store is a future
+extension point.</p>
+</li>
+</ol>
+<h3 id="request-path-position"><a class="doc-anchor" href="#request-path-position">§</a>Request-path position</h3>
+<p>The GraphQL check runs AFTER the WAF-lite filter and anomaly scoring
+and BEFORE the route limits (DW-027): it is a content-shape filter
+that rejects abusive queries before any resource is spent on auth or
+rate limiting. It inspects the ORIGINAL request body (before
+transforms). Only routes with a <code>graphql</code> block AND the <code>graphql</code>
+cargo feature compiled in are inspected; routes without the block are
+never checked, and when the feature is off the block is accepted but
+inert (the config schema is always present, the runtime check is
+feature-gated).</p>
+<h3 id="cost-model"><a class="doc-anchor" href="#cost-model">§</a>Cost model</h3>
+<p>Complexity is the sum of per-field costs. A config-supplied
+<code>cost_per_field</code> map gives named fields explicit costs; any field not
+in the map falls back to <code>complexity_coefficient</code> (default 1). The
+total is <code>sum(field_cost)</code> where <code>field_cost = cost_per_field[name]</code>
+if present, else <code>complexity_coefficient</code>. Depth is the maximum
+brace-nesting level reached in the query (the top-level operation
+body is depth 1).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GraphQLChecker.html" title="struct dwara_core::dataplane::graphql::GraphQLChecker">GraphQL<wbr>Checker</a></dt><dd>A compiled GraphQL check for one route, built from the route’s
+<a href="../../config/struct.RouteGraphql.html" title="struct dwara_core::config::RouteGraphql"><code>RouteGraphql</code></a> config block. Cheap to construct (clones the config
+values); held by the request path for the duration of one check.</dd><dt><a class="struct" href="struct.GraphqlBody.html" title="struct dwara_core::dataplane::graphql::GraphqlBody">Graphql<wbr>Body</a></dt><dd>A body that replays the bytes collected by the GraphQL check (so
+the body is not consumed by the check and can be forwarded to the
+upstream). This mirrors the WAF body-replay pattern (DW-051): the
+check buffers up to <code>max_body_bytes</code> and the reconstructed body is
+forwarded to the rest of the request path.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.GraphQLBodyError.html" title="enum dwara_core::dataplane::graphql::GraphQLBodyError">GraphQL<wbr>Body<wbr>Error</a></dt><dd>Error returned when the body cannot be read for the GraphQL check.</dd><dt><a class="enum" href="enum.GraphQLCheckResult.html" title="enum dwara_core::dataplane::graphql::GraphQLCheckResult">GraphQL<wbr>Check<wbr>Result</a></dt><dd>The outcome of a GraphQL check.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_GRAPHQL_MAX_BODY_BYTES.html" title="constant dwara_core::dataplane::graphql::DEFAULT_GRAPHQL_MAX_BODY_BYTES">DEFAULT_<wbr>GRAPHQL_<wbr>MAX_<wbr>BODY_<wbr>BYTES</a></dt><dd>Maximum body size the checker will buffer before parsing (default
+1 MiB). Oversized bodies are rejected with 413 before any parsing,
+so a hostile client cannot pin memory or CPU with a huge payload.</dd><dt><a class="constant" href="constant.PARSE_DEPTH_CAP.html" title="constant dwara_core::dataplane::graphql::PARSE_DEPTH_CAP">PARSE_<wbr>DEPTH_<wbr>CAP</a></dt><dd>Maximum brace-nesting depth the scanner will track before aborting
+(parser-DoS cap). A query this deep is either hostile or malformed;
+the scanner stops counting and the check fails closed (denied as
+depth exceeded). This is NOT the user-configured <code>depth_limit</code> –
+it is a hard internal bound on the scanner itself.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.scan_depth_complexity.html" title="fn dwara_core::dataplane::graphql::scan_depth_complexity">scan_<wbr>depth_<wbr>complexity</a></dt><dd>Scan a GraphQL query string for depth and complexity. This is a
+bounded hand-rolled scanner – it does NOT fully parse GraphQL. It
+counts:</dd><dt><a class="fn" href="fn.sha256_hex.html" title="fn dwara_core::dataplane::graphql::sha256_hex">sha256_<wbr>hex</a></dt><dd>Compute the SHA-256 hash of a byte slice and return it as a
+lowercase hex string (the APQ hash format).</dd></dl></section></div></main></body></html>

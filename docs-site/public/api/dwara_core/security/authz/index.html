@@ -1,0 +1,82 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request authorization (DW-020, feature analysis sections 4.7 and 4.15)."><title>dwara_core::security::authz - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module authz</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module authz</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#semantics-frozen" title="Semantics (frozen)">Semantics (frozen)</a></li><li><a href="#precedence-chain-done-when-of-dw-020" title="Precedence chain (done-when of DW-020)">Precedence chain (done-when of DW-020)</a></li><li><a href="#failure-posture" title="Failure posture">Failure posture</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>authz</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/authz.rs.html#1-469">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request authorization (DW-020, feature analysis sections 4.7 and 4.15).</p>
+<p>Authorization answers “is this caller ALLOWED here?” after
+authentication (DW-019) has answered “who is this caller?”. One
+route’s rules live in <a href="../../config/struct.Authz.html" title="struct dwara_core::config::Authz"><code>crate::config::Authz</code></a>; this module
+evaluates them against the request’s identity, consumer groups, and
+EFFECTIVE client IP.</p>
+<h2 id="semantics-frozen"><a class="doc-anchor" href="#semantics-frozen">§</a>Semantics (frozen)</h2>
+<ul>
+<li><strong>403 vs 401</strong>: a DENIED authenticated (or anonymous-but-
+IP-gated) request answers 403 “forbidden”; an anonymous request on
+a route whose authorization carries identity rules answers 401
+(authentication is implied by identity rules). The one
+anonymous-permitting case is an <code>ip_acl</code>-ONLY <a href="../../config/struct.Authz.html" title="struct dwara_core::config::Authz"><code>Authz</code></a> — IP allow
+can grant anonymous access (documented exception; an operator
+writing <code>ip_acl</code> and nothing else wants an IP gate, not a login
+wall). <code>auth_required</code> on the route still independently forces
+authentication regardless of authorization.</li>
+<li><strong>Within one Authz, deny wins</strong>: <code>denied_consumers</code> /
+<code>denied_groups</code> beat <code>allowed_*</code> at the same level; in the IP ACL
+the deny list is checked before the allow list.</li>
+<li><strong>IP ACL against the EFFECTIVE client IP</strong>: the
+<code>X-Forwarded-For</code>-resolved client when the direct peer is inside
+<code>gateway.trusted_proxies</code> (the DW-009 chain — see
+<a href="fn.effective_client_ip.html" title="fn dwara_core::security::authz::effective_client_ip"><code>effective_client_ip</code></a>), otherwise the direct peer. A spoofed XFF
+from an untrusted peer never influences the decision.</li>
+<li><strong>Scopes</strong>: every <code>required_scopes</code> entry must appear in the JWT
+<code>scope</code> claim, which may be a space-separated string
+(<code>"read write"</code>) or an array of strings (flattened by <code>authn</code> to
+the space-separated form). API-key/Basic identities carry no
+claims and never satisfy scope rules.</li>
+<li><strong>Claims</strong>: <code>required_claims</code> is exact string equality on the
+stringified claim value; a listed claim absent from the token
+fails the match. Only string- and number-valued claims are
+captured on the identity (<code>authn</code> drops bool/null/object
+claims), so such a claim can never satisfy a <code>required_claims</code>
+entry. ALL comparisons — consumers, groups, scopes, claims —
+are case-sensitive.</li>
+</ul>
+<h2 id="precedence-chain-done-when-of-dw-020"><a class="doc-anchor" href="#precedence-chain-done-when-of-dw-020">§</a>Precedence chain (done-when of DW-020)</h2>
+<p>Rules attach at five levels with the frozen gateway precedence
+consumer &gt; route &gt; service &gt; listener &gt; global. <a href="fn.authorize.html" title="fn dwara_core::security::authz::authorize"><code>authorize</code></a>
+resolves the chain through <a href="struct.AuthzChain.html" title="struct dwara_core::security::authz::AuthzChain"><code>AuthzChain</code></a>:</p>
+<ol>
+<li>A <strong>deny at ANY level wins</strong> — a consumer-level deny beats a
+route-level allow, and vice versa. Denials are absolute.</li>
+<li>Otherwise the <strong>most specific level with rules governs</strong>: its own
+evaluation is the verdict (allow or deny under its rules), and
+less-specific levels are not consulted. A level without an
+<a href="../../config/struct.Authz.html" title="struct dwara_core::config::Authz"><code>Authz</code></a> (or with an empty one) is transparent.</li>
+</ol>
+<p>Live links (#123): every level has a config attachment —
+<code>consumers[].authorization</code> (applies once authentication identifies
+the consumer), <code>routes[].authorization</code>, <code>services[].authorization</code>,
+<code>listeners[].authorization</code> (the accepting listener), and the
+gateway-level <code>authorization</code> (global). Authorization runs on
+requests that resolved a route, per the documented request-path
+order; unrouted 404s never reach the chain.</p>
+<p><strong>Dry run (DW-041):</strong> any attachment may set <code>dry_run: true</code> — its
+denials are then evaluated, logged, and counted by the caller
+instead of enforced. The resolver (<a href="fn.resolve.html" title="fn dwara_core::security::authz::resolve"><code>resolve</code></a>) walks PAST a dry
+deny and stops only at a live one, so a live deny at ANY level still
+enforces: monitor mode observes what a block would reject without
+ever making enforcement more permissive.</p>
+<h2 id="failure-posture"><a class="doc-anchor" href="#failure-posture">§</a>Failure posture</h2>
+<p>Authorization failures are logged server-side only (via the
+decision’s <code>reason</code> when warranted); clients receive a generic 403
+body with no rule detail (which list matched, which claim was absent
+— none of it is their business).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AuthzChain.html" title="struct dwara_core::security::authz::AuthzChain">Authz<wbr>Chain</a></dt><dd>The five authorization levels in frozen precedence order (most
+specific first). Levels without an <a href="../../config/struct.Authz.html" title="struct dwara_core::config::Authz"><code>Authz</code></a> attachment today pass
+<code>None</code>; the chain structure is the DW-020 done-when — links activate
+as their config fields land.</dd><dt><a class="struct" href="struct.AuthzContext.html" title="struct dwara_core::security::authz::AuthzContext">Authz<wbr>Context</a></dt><dd>Everything one authorization evaluation needs to know about the
+request.</dd><dt><a class="struct" href="struct.Resolved.html" title="struct dwara_core::security::authz::Resolved">Resolved</a></dt><dd>One resolved chain evaluation (DW-041): the enforcement verdict plus,
+when a <code>dry_run</code> attachment would have denied, the observation the
+caller logs and counts instead of enforcing.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AuthzLevel.html" title="enum dwara_core::security::authz::AuthzLevel">Authz<wbr>Level</a></dt><dd>Which chain level produced an authorization decision (DW-041): the
+proxy needs the denying link’s own config (its <code>dry_run</code> flag) to
+decide whether a deny is enforced or only observed.</dd><dt><a class="enum" href="enum.Decision.html" title="enum dwara_core::security::authz::Decision">Decision</a></dt><dd>The outcome of an authorization decision.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.authorize.html" title="fn dwara_core::security::authz::authorize">authorize</a></dt><dd>Resolve the precedence chain. Merge semantics (documented, frozen):</dd><dt><a class="fn" href="fn.effective_client_ip.html" title="fn dwara_core::security::authz::effective_client_ip">effective_<wbr>client_<wbr>ip</a></dt><dd>Resolve the EFFECTIVE client IP (DW-009 trusted-proxy chain).</dd><dt><a class="fn" href="fn.evaluate_one.html" title="fn dwara_core::security::authz::evaluate_one">evaluate_<wbr>one</a></dt><dd>Evaluate ONE <a href="../../config/struct.Authz.html" title="struct dwara_core::config::Authz"><code>Authz</code></a> block. <code>None</code> means the block imposes nothing
+(no rules at all — a transparent level); <code>Some(Allow)</code> /
+<code>Some(Deny)</code> is this level’s verdict.</dd><dt><a class="fn" href="fn.resolve.html" title="fn dwara_core::security::authz::resolve">resolve</a></dt><dd><a href="fn.authorize.html" title="fn dwara_core::security::authz::authorize"><code>authorize</code></a> with the dry-run observation attached (DW-041): the
+enforced verdict plus the would-have-denied attachment for the caller
+to log and count. See <a href="struct.Resolved.html" title="struct dwara_core::security::authz::Resolved"><code>Resolved</code></a> for why a dry deny never masks a
+live one.</dd></dl></section></div></main></body></html>

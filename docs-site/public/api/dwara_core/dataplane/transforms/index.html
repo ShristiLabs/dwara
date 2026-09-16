@@ -1,0 +1,127 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request/response transforms and security-header injection (DW-028, feature analysis 4.12 + the 5-Security header-injection row)."><title>dwara_core::dataplane::transforms - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module transforms</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module transforms</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-streaming-split-the-issues-done-when" title="The streaming split (the issue’s done-when)">The streaming split (the issue’s done-when)</a></li><li><a href="#where-each-piece-runs-the-documented-order" title="Where each piece runs (the documented order)">Where each piece runs (the documented order)</a></li><li><a href="#maskings-inverted-gate-posture-dw-029" title="Masking’s inverted gate posture (DW-029)">Masking’s inverted gate posture (DW-029)</a></li><li><a href="#why-headerquery-ops-are-lenient-where-json-pointers-are-strict" title="Why header/query ops are lenient where JSON pointers are strict">Why header/query ops are lenient where JSON pointers are strict</a></li><li><a href="#framing-after-a-body-transform" title="Framing after a body transform">Framing after a body transform</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>transforms</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/transforms.rs.html#1-841">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request/response transforms and security-header injection (DW-028,
+feature analysis 4.12 + the 5-Security header-injection row).</p>
+<h3 id="the-streaming-split-the-issues-done-when"><a class="doc-anchor" href="#the-streaming-split-the-issues-done-when">§</a>The streaming split (the issue’s done-when)</h3>
+<p>“Streaming is preserved unless a transform explicitly buffers.” The
+implementation splits exactly there:</p>
+<ul>
+<li><a href="fn.apply_header_ops.html" title="fn dwara_core::dataplane::transforms::apply_header_ops"><code>apply_header_ops</code></a>, <a href="fn.apply_query_ops.html" title="fn dwara_core::dataplane::transforms::apply_query_ops"><code>apply_query_ops</code></a>, and
+<a href="fn.apply_security_headers.html" title="fn dwara_core::dataplane::transforms::apply_security_headers"><code>apply_security_headers</code></a> never touch a body. A route carrying
+only these forwards and streams byte-identically to a route with
+no transforms block at all.</li>
+<li><a href="fn.transform_request_body.html" title="fn dwara_core::dataplane::transforms::transform_request_body"><code>transform_request_body</code></a> / <a href="fn.transform_response_body.html" title="fn dwara_core::dataplane::transforms::transform_response_body"><code>transform_response_body</code></a> are the
+ONE explicitly buffering path: they apply only when the route
+configured a JSON body transform AND the body declares itself
+JSON AND it is non-empty, and they buffer at most
+<code>max_bytes</code> — enforced against a declared <code>Content-Length</code> up
+front and against the live stream frame by frame. Over-cap fails
+CLOSED (413 request-side, 502 response-side): passing the body
+through untransformed would be fail-open in exactly the masking
+direction DW-029 builds on this machinery for.</li>
+</ul>
+<h3 id="where-each-piece-runs-the-documented-order"><a class="doc-anchor" href="#where-each-piece-runs-the-documented-order">§</a>Where each piece runs (the documented order)</h3>
+<p>Request side, inside the proxy action on the FORWARD path: DW-010
+path rewrite, then <a href="fn.apply_query_ops.html" title="fn dwara_core::dataplane::transforms::apply_query_ops"><code>apply_query_ops</code></a> (the rewrite re-attaches the
+original query verbatim, this block is the only thing that may
+change it), then hop-by-hop stripping and the gateway’s trusted
+headers (<code>X-Forwarded-*</code>, <code>X-Consumer-*</code>), then <a href="fn.apply_header_ops.html" title="fn dwara_core::dataplane::transforms::apply_header_ops"><code>apply_header_ops</code></a>
+— ops see the near-final forwarded request, which is also why they
+MAY remove the trust headers (the operator owns the upstream’s
+contract; see <code>config::transforms</code>), and finally the body transform
+BEFORE retry buffering, so a retried attempt replays the
+TRANSFORMED bytes.</p>
+<p>Response side, in the decoration tail: FIELD MASKING first (DW-029,
+<a href="fn.mask_response_body.html" title="fn dwara_core::dataplane::transforms::mask_response_body"><code>mask_response_body</code></a> — before anything else can so much as read
+the body: once the sentinel replaces a secret, the original bytes
+exist nowhere in the gateway, so no later stage — operator
+transforms, the compression codec — can resurrect or re-emit them),
+then the body transform (compression then encodes the transformed
+bytes and its eligibility check sees the final content type), then
+header ops, then the existing compression -&gt; versioning -&gt; CORS
+stages, then <a href="fn.apply_security_headers.html" title="fn dwara_core::dataplane::transforms::apply_security_headers"><code>apply_security_headers</code></a> (last policy stamp before
+rate headers), then rate headers.</p>
+<p>Response HEADER and BODY transforms apply to action responses only;
+security headers apply to every route-matched response including
+gateway short-circuits (see <code>config::transforms::SecurityHeaders</code>
+for the asymmetry with deprecation stamps). MASKING applies to
+PROXY action responses only: the leak surface it guards is the
+upstream’s output — gateway-authored bodies (redirect, respond) are
+operator config bytes with no upstream data to redact, and bodiless
+statuses (1xx/101/204/304) have nothing to leak; both pass.</p>
+<h3 id="maskings-inverted-gate-posture-dw-029"><a class="doc-anchor" href="#maskings-inverted-gate-posture-dw-029">§</a>Masking’s inverted gate posture (DW-029)</h3>
+<p>The DW-028 body transform PASSES THROUGH what it cannot handle
+(encoded or non-JSON bodies) — a convenience transform skipping
+itself is harmless. Masking inverts every one of those gates into a
+502 REFUSAL: the gateway cannot prove the configured fields absent
+from bytes it cannot parse, and for a redaction policy a skipped
+pass IS the leak (the module docs of <code>config::transforms</code> carry the
+full argument). A route that configures masking pins its proxied
+responses to the contract “identity-encoded JSON within the cap,
+with every configured pointer present” — an upstream that violates
+it answers 502 with a generic envelope, and one <code>dwara::policy</code>
+warn event names the refusal class server-side. Every successful
+mask emits one <code>dwara::policy</code> info event (the audit trail the
+issue’s done-when asks for: route, consumer, count, request-id).</p>
+<h3 id="why-headerquery-ops-are-lenient-where-json-pointers-are-strict"><a class="doc-anchor" href="#why-headerquery-ops-are-lenient-where-json-pointers-are-strict">§</a>Why header/query ops are lenient where JSON pointers are strict</h3>
+<p>A header may legitimately be absent from a given request; renaming
+or removing an absent header is a no-op, not an error. A JSON
+pointer that does not resolve is a DATA-SHAPE violation against a
+contract the operator pinned — and in the remove direction a
+silent miss is the leak the policy exists to prevent. Leniency and
+strictness each sit where their failure mode says they belong.</p>
+<h3 id="framing-after-a-body-transform"><a class="doc-anchor" href="#framing-after-a-body-transform">§</a>Framing after a body transform</h3>
+<p>Both body transforms rewrite <code>Content-Length</code> to the transformed
+body’s exact length (the buffered bytes ARE the body; any stale
+declared length would misframe the hop). Framing headers are
+meanwhile rejected from header ops by validation
+(<code>config::transforms::is_forbidden_*_header</code>), so exactly one
+component — this module — ever writes them.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.RequestBodyOutcome.html" title="enum dwara_core::dataplane::transforms::RequestBodyOutcome">Request<wbr>Body<wbr>Outcome</a></dt><dd>The outcome of the request body-transform step (DW-028).</dd><dt><a class="enum" href="enum.RequestBodyTransformError.html" title="enum dwara_core::dataplane::transforms::RequestBodyTransformError">Request<wbr>Body<wbr>Transform<wbr>Error</a></dt><dd>Why a REQUEST body transform refused or failed (DW-028). The proxy
+maps each arm to its client answer: <code>RouteLimit</code> keeps the route
+limit’s 413 envelope (the route’s cap, not the transform’s, bound
+the body); <code>SignatureMismatch</code> keeps the HMAC family’s 401 (the
+client’s own signature bound a digest the body did not match);
+<code>TooLarge</code>/<code>InvalidJson</code>/<code>Unresolved</code> answer 413/400/400 in the
+transform’s own envelope.</dd><dt><a class="enum" href="enum.ResponseBodyTransformError.html" title="enum dwara_core::dataplane::transforms::ResponseBodyTransformError">Response<wbr>Body<wbr>Transform<wbr>Error</a></dt><dd>Why a RESPONSE body transform failed (DW-028); every arm answers
+502 — the upstream violated the contract the transform pinned (the
+client never sees upstream detail).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.apply_header_ops.html" title="fn dwara_core::dataplane::transforms::apply_header_ops">apply_<wbr>header_<wbr>ops</a></dt><dd>Apply header manipulation ops in the frozen order (DW-028): <code>set</code>
+(replace-all), <code>add</code> (append), <code>rename</code> (relabel every value), then
+<code>remove</code> — see <a href="../../config/transforms/struct.HeaderOps.html" title="struct dwara_core::config::transforms::HeaderOps"><code>HeaderOps</code></a> for the rationale. Every name/value
+was validated representable at config publish; the <code>if let Ok</code>
+skips are generation-tear backstops (never a panic, never a 500),
+the same posture as the respond-action headers.</dd><dt><a class="fn" href="fn.apply_query_ops.html" title="fn dwara_core::dataplane::transforms::apply_query_ops">apply_<wbr>query_<wbr>ops</a></dt><dd>Apply query manipulation ops to a request URI (DW-028). Returns the
+rebuilt URI, or <code>None</code> when nothing changed (the caller keeps the
+original — its bytes are already correct). Original pairs are
+carried VERBATIM (no decode/re-encode round trip: a client’s exact
+percent-encoding spelling survives); only pairs a named op touches
+are encoded, by the shared percent-encoder below.</dd><dt><a class="fn" href="fn.apply_security_headers.html" title="fn dwara_core::dataplane::transforms::apply_security_headers">apply_<wbr>security_<wbr>headers</a></dt><dd>Stamp a route’s security-header policy onto a response (DW-028).
+Every present field REPLACES any upstream-sent value: the gateway
+is the source of truth for its edge policy (the same rule as the
+deprecation and <code>X-RateLimit-*</code> headers). Values are static or
+validation-checked representable; the <code>if let Ok</code> skips are the
+same generation-tear backstop posture as everywhere in the tail.</dd><dt><a class="fn" href="fn.is_json_body.html" title="fn dwara_core::dataplane::transforms::is_json_body">is_<wbr>json_<wbr>body</a></dt><dd>Does this body’s <code>Content-Type</code> make it a JSON body-transform
+candidate (DW-028)? (<code>application/json</code> and the <code>application/ &lt;*+json&gt;</code> family, parameters ignored — see
+<code>config::transforms::is_json_media_type</code>.)</dd><dt><a class="fn" href="fn.mask_response_body.html" title="fn dwara_core::dataplane::transforms::mask_response_body">mask_<wbr>response_<wbr>body</a></dt><dd>The RESPONSE field masking pass (DW-029), the decoration tail’s
+first stage and the security floor of the response path. Gates, in
+order — every one of them FAILS CLOSED (the inverted posture; see
+the module docs): bodiless statuses pass (nothing to leak), then a
+content-encoded body, a non-JSON content type, a declared length
+over the cap, an over-cap or dying stream, unparseable JSON, and a
+pointer miss each answer 502 with a generic envelope plus one
+<code>dwara::policy</code> warn event naming the refusal class server-side.
+The gateway’s OWN compression (DW-027) runs later in the tail, so
+it can never trip the encoding gate — only upstream-pre-encoded
+responses do.</dd><dt><a class="fn" href="fn.media_type.html" title="fn dwara_core::dataplane::transforms::media_type">media_<wbr>type</a></dt><dd>The lowercase media type of a <code>Content-Type</code> header (parameters
+stripped), when the header is present and textual.</dd><dt><a class="fn" href="fn.transform_request_body.html" title="fn dwara_core::dataplane::transforms::transform_request_body">transform_<wbr>request_<wbr>body</a></dt><dd>The REQUEST body transform (DW-028): gate, buffer (capped), parse,
+apply ops, serialize. Gates in order, cheapest first — no compiled
+policy (the caller’s <code>None</code> check), then here: non-JSON content
+type (bodies of other types stream through untouched), an
+already-encoded body (the transform does not decode), a declared
+empty body (nothing to transform — bodiless methods pass), and a
+declared length over the cap (413 without reading a byte). Only
+then does anything buffer.</dd><dt><a class="fn" href="fn.transform_response_body.html" title="fn dwara_core::dataplane::transforms::transform_response_body">transform_<wbr>response_<wbr>body</a></dt><dd>The RESPONSE body transform (DW-028), the decoration tail’s first
+stage: gate, buffer (capped), parse, apply ops, serialize. Gates:
+informational/101/204/304 statuses (no body to shape), non-JSON
+content type, and an already-encoded body all pass through
+UNTOUCHED — SSE and streamed downloads on a transformed route keep
+streaming, the core guarantee of this feature. A declared length
+over the cap fails 502 without reading.</dd></dl></section></div></main></body></html>

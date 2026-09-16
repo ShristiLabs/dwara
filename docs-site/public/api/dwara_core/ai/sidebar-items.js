@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompiledModel"],"mod":["a2a","adapter","adapters","batch","budget","cost","credentials","experiments","governance","guardrails","image_fetch","ingress","logging","mcp","openai_compat","policy","redaction","routing","semantic_cache","sse","stream","token_estimator","types"],"struct":["AiRuntime","CompiledProvider","RouteTarget"]};

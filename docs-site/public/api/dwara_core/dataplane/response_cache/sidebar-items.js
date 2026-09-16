@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_COALESCING_KEYS","MAX_INFLIGHT_REVALIDATIONS","X_CACHE"],"enum":["CacheFlow","CoalesceOutcome","LookupOutcome"],"fn":["derive_key","inm_matches","store_veto","strip_weak","validators_match"],"struct":["CacheControl","CoalesceLead","EntryEnvelope","MissFlow","PassthroughBody","ResponseCache"]};

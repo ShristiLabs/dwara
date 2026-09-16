@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Schema v6 (DW-086): three tables for prompt experimentation."><title>SCHEMA_V6 in dwara_core::analytics::schema - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc constant"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">SCHEMA_V6</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><div id="rustdoc-modnav"><h2><a href="index.html">In dwara_<wbr>core::<wbr>analytics::<wbr>schema</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a>::<wbr><a href="index.html">schema</a></div><h1>Constant <span class="constant">SCHEMA_<wbr>V6</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/schema.rs.html#320-362">Source</a> </span></div><pre class="rust item-decl"><code>pub const SCHEMA_V6: &amp;<a class="primitive" href="https://doc.rust-lang.org/1.94.0/std/primitive.str.html">str</a> = &quot;
+    CREATE TABLE IF NOT EXISTS ai_experiment_assignments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        request_id  TEXT NOT NULL,
+        experiment  TEXT NOT NULL,
+        variant     TEXT NOT NULL,
+        model       TEXT NOT NULL,
+        consumer    TEXT NOT NULL DEFAULT &#39;&#39;
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_exp_assign_ts ON ai_experiment_assignments(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_exp_assign_experiment ON ai_experiment_assignments(experiment);
+
+    CREATE TABLE IF NOT EXISTS ai_eval_results (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms           INTEGER NOT NULL,
+        eval_name       TEXT NOT NULL,
+        model           TEXT NOT NULL,
+        variant         TEXT NOT NULL DEFAULT &#39;&#39;,
+        prompt_version  TEXT NOT NULL DEFAULT &#39;&#39;,
+        case_index      INTEGER NOT NULL,
+        input           TEXT NOT NULL,
+        expected        TEXT NOT NULL,
+        actual          TEXT NOT NULL,
+        passed          INTEGER NOT NULL,
+        scorer          TEXT NOT NULL,
+        latency_ms      REAL NOT NULL DEFAULT 0.0
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_eval_results_ts ON ai_eval_results(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_eval_results_eval ON ai_eval_results(eval_name);
+
+    CREATE TABLE IF NOT EXISTS ai_feedback (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms       INTEGER NOT NULL,
+        request_id  TEXT NOT NULL,
+        label       TEXT NOT NULL,
+        comment     TEXT NOT NULL DEFAULT &#39;&#39;,
+        consumer    TEXT NOT NULL DEFAULT &#39;&#39;,
+        model       TEXT NOT NULL DEFAULT &#39;&#39;
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_feedback_ts ON ai_feedback(ts_ms);
+    CREATE INDEX IF NOT EXISTS idx_ai_feedback_request_id ON ai_feedback(request_id);
+&quot;;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Schema v6 (DW-086): three tables for prompt experimentation.</p>
+<ul>
+<li>
+<p><code>ai_experiment_assignments</code> — one row per request that was
+served by an A/B test alias, recording which variant was
+selected. The <code>request_id</code> ties the assignment to the access
+log and spend rows; the <code>experiment</code> and <code>variant</code> labels are
+config-bounded (the experiment and variant names from config).</p>
+</li>
+<li>
+<p><code>ai_eval_results</code> — one row per eval case run, recording the
+input, expected, actual output, pass/fail, scorer, and
+attribution (eval name, model alias, variant, prompt version).
+The admin <code>/analytics/eval-results</code> endpoint reads these rows.</p>
+</li>
+<li>
+<p><code>ai_feedback</code> — one row per feedback record ingested via the
+admin API, carrying the request id, label, comment, and
+attribution. The admin <code>/analytics/feedback</code> endpoint reads
+these rows.</p>
+</li>
+</ul>
+</div></details></section></div></main></body></html>

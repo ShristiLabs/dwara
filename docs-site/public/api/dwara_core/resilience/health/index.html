@@ -1,0 +1,83 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Passive health checking / outlier detection (DW-012, feature analysis 4.5)."><title>dwara_core::resilience::health - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module health</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module health</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#ejection-model" title="Ejection model">Ejection model</a></li><li><a href="#recovery-half-open" title="Recovery (half-open)">Recovery (half-open)</a></li><li><a href="#fail-open" title="Fail-open">Fail-open</a></li><li><a href="#time" title="Time">Time</a></li><li><a href="#concurrency" title="Concurrency">Concurrency</a></li><li><a href="#events-dw-044" title="Events (DW-044)">Events (DW-044)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>resilience</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">resilience</a></div><h1>Module <span>health</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/resilience/health.rs.html#1-507">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Passive health checking / outlier detection (DW-012, feature analysis
+4.5).</p>
+<p>Passive health watches REAL traffic outcomes — no synthetic probes are
+sent while an endpoint is serving. Each endpoint of an upstream carries
+one <a href="struct.EndpointHealth.html" title="struct dwara_core::resilience::health::EndpointHealth"><code>EndpointHealth</code></a> tracker; the proxy’s send path classifies every
+dispatched request’s outcome and reports it to the picked endpoint’s
+tracker (<a href="struct.EndpointHealth.html#method.report" title="method dwara_core::resilience::health::EndpointHealth::report"><code>EndpointHealth::report</code></a>). The load balancer consults
+<a href="struct.EndpointHealth.html#method.acquire" title="method dwara_core::resilience::health::EndpointHealth::acquire"><code>EndpointHealth::acquire</code></a> on every pick (lock-free: atomics only) and
+skips endpoints that are currently ejected.</p>
+<h2 id="ejection-model"><a class="doc-anchor" href="#ejection-model">§</a>Ejection model</h2>
+<p>An endpoint is ejected when EITHER:</p>
+<ul>
+<li><strong>consecutive failures</strong>: <code>consecutive_failures</code> (default 5) transport
+or 5xx outcomes in a row, regardless of volume; or</li>
+<li><strong>failure ratio with volume</strong>: within the rolling <code>window_ms</code>
+(default 60 s) observation window, the 5xx/transport share of
+observations is &gt;= <code>failure_ratio</code> (default 0.5) AND the window saw at
+least <code>failure_min_volume</code> (default 20) observations. The volume gate
+keeps a 2-of-3 blip from ejecting on a trickle of traffic.</li>
+</ul>
+<p>Outcome classification (reported at response-header resolution, the same
+point the in-flight guard releases): transport errors (connect timeout,
+refused, reset, client framing errors) are failures; HTTP status &gt;= 500
+is a failure; 1xx-4xx are successes. 429 and 408 are deliberately
+successes in v1: they describe the CALLER or queueing pressure, not the
+endpoint’s health, and ejecting on them would remove healthy capacity
+exactly when backpressure is needed (documented choice).</p>
+<p>Active health probes report through <a href="struct.EndpointHealth.html#method.report_probe" title="method dwara_core::resilience::health::EndpointHealth::report_probe"><code>EndpointHealth::report_probe</code></a>,
+which drives the SAME consecutive streak and ejection/recovery
+transitions but never inserts an observation into the rolling window:
+synthetic probes never mix into real-traffic ratios.</p>
+<h2 id="recovery-half-open"><a class="doc-anchor" href="#recovery-half-open">§</a>Recovery (half-open)</h2>
+<p>After <code>eject_ms</code> (default 30 s) the tracker moves to half-open on the
+next pick: the first <code>half_open_probes</code> (default 1) requests are allowed
+through (each pick consumes one probe); everything else keeps skipping
+the endpoint. A successful probe restores the endpoint to healthy and
+clears its failure history (so the old failures cannot immediately
+re-eject it); a failed probe re-ejects for another full <code>eject_ms</code>. A
+success observed on an EJECTED endpoint (only possible via the
+all-ejected fail-open path) also restores health — real traffic to it
+just worked, which is the strongest possible health signal.</p>
+<h2 id="fail-open"><a class="doc-anchor" href="#fail-open">§</a>Fail-open</h2>
+<p>If EVERY endpoint of an upstream is ejected, picks fall back to the full
+set rather than blackholing traffic (documented choice; a gateway that
+returns 503 for a fully-ejected pool has converted an upstream brownout
+into a guaranteed outage). The balancer counts these fallbacks
+(<code>UpstreamLb::fail_open_picks</code>) so operators can see the degraded
+state.</p>
+<h2 id="time"><a class="doc-anchor" href="#time">§</a>Time</h2>
+<p>All timing runs on a millisecond clock resolved per call from the owning
+balancer (see <code>UpstreamLb::now_ms</code>), which defaults to the system clock
+and can be swapped for a deterministic clock in tests
+(<code>UpstreamLb::set_health_clock</code>) — the same injection pattern the rate
+limiter (DW-004) uses.</p>
+<h2 id="concurrency"><a class="doc-anchor" href="#concurrency">§</a>Concurrency</h2>
+<p>Status transitions are CAS loops on a status atomic; the observation
+window is a <code>Mutex&lt;VecDeque&gt;</code> mutated only on the report path (never on
+picks). Races between concurrent reports and picks resolve
+best-effort: a probe slot may occasionally be granted to a request that
+observes slightly stale state, which is harmless — the next report
+re-synchronizes the tracker. Tracker state (<code>Arc&lt;EndpointHealth&gt;</code>) is
+keyed by endpoint <code>address:port</code> and carried across config rebuilds like
+the in-flight counters; config changes to the health parameters apply to
+NEW observations (the window and consecutive counter live on).</p>
+<h2 id="events-dw-044"><a class="doc-anchor" href="#events-dw-044">§</a>Events (DW-044)</h2>
+<p>A tracker constructed with <a href="struct.EndpointHealth.html#method.with_events" title="associated function dwara_core::resilience::health::EndpointHealth::with_events"><code>EndpointHealth::with_events</code></a> emits
+<code>endpoint_ejected</code> and <code>endpoint_recovered</code> on the two state
+transitions (bound to its upstream and <code>address:port</code> labels by the
+balancer at construction). Both passive reports and ACTIVE probe
+reports funnel through the same transition code, so either signal
+ejecting or recovering an endpoint emits. Emission is the event
+bus’s bounded non-blocking hand-off (full queue = drop and count);
+<code>None</code> (direct/test constructions) is a documented no-op.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.EndpointHealth.html" title="struct dwara_core::resilience::health::EndpointHealth">Endpoint<wbr>Health</a></dt><dd>Per-endpoint passive health tracker. All pick-path reads are atomic;
+only the observation window takes a lock (report path). Share via <code>Arc</code>
+from the balancer state; carried across rebuilds for unchanged
+<code>address:port</code>.</dd><dt><a class="struct" href="struct.HealthDispatch.html" title="struct dwara_core::resilience::health::HealthDispatch">Health<wbr>Dispatch</a></dt><dd>The per-dispatch health report handle carried out of a pick: the
+endpoint’s tracker plus the parameter generation the pick ran against.
+The send path reports the outcome exactly once.</dd><dt><a class="struct" href="struct.HealthParams.html" title="struct dwara_core::resilience::health::HealthParams">Health<wbr>Params</a></dt><dd>Resolved (validated) passive-health parameters, shared per upstream and
+snapshotted inside each balancer state generation. A rebuild with new
+config swaps the whole <code>Arc</code>; in-flight reports pin the generation they
+were dispatched with, so parameter changes apply only to new
+observations.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_CONSECUTIVE_FAILURES.html" title="constant dwara_core::resilience::health::DEFAULT_CONSECUTIVE_FAILURES">DEFAULT_<wbr>CONSECUTIVE_<wbr>FAILURES</a></dt><dd>Default consecutive-failure ejection threshold.</dd><dt><a class="constant" href="constant.DEFAULT_EJECT_MS.html" title="constant dwara_core::resilience::health::DEFAULT_EJECT_MS">DEFAULT_<wbr>EJECT_<wbr>MS</a></dt><dd>Default ejection duration in milliseconds.</dd><dt><a class="constant" href="constant.DEFAULT_FAILURE_MIN_VOLUME.html" title="constant dwara_core::resilience::health::DEFAULT_FAILURE_MIN_VOLUME">DEFAULT_<wbr>FAILURE_<wbr>MIN_<wbr>VOLUME</a></dt><dd>Default minimum observations in the window before the ratio applies.</dd><dt><a class="constant" href="constant.DEFAULT_FAILURE_RATIO.html" title="constant dwara_core::resilience::health::DEFAULT_FAILURE_RATIO">DEFAULT_<wbr>FAILURE_<wbr>RATIO</a></dt><dd>Default failure ratio (0 &lt; r &lt;= 1).</dd><dt><a class="constant" href="constant.DEFAULT_HALF_OPEN_PROBES.html" title="constant dwara_core::resilience::health::DEFAULT_HALF_OPEN_PROBES">DEFAULT_<wbr>HALF_<wbr>OPEN_<wbr>PROBES</a></dt><dd>Default trial requests allowed through per half-open recovery attempt.</dd><dt><a class="constant" href="constant.DEFAULT_WINDOW_MS.html" title="constant dwara_core::resilience::health::DEFAULT_WINDOW_MS">DEFAULT_<wbr>WINDOW_<wbr>MS</a></dt><dd>Default rolling observation window in milliseconds.</dd></dl></section></div></main></body></html>

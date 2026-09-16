@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_UPGRADE_READY_TIMEOUT","READY_FRAME","UPGRADE_READY_SOCKET_ENV"],"fn":["await_ready","bind_with_reuse_port","initiate_upgrade","new_binary_path","ready_socket_path","ready_timeout","signal_ready","spawn_upgrade_child","write_pid_file"]};

@@ -1,0 +1,32 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The Google Gemini adapter (DW-075)."><title>dwara_core::ai::adapters::gemini - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../../" data-static-root-path="../../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module gemini</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module gemini</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai::<wbr>adapters</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../index.html">dwara_core</a>::<wbr><a href="../../index.html">ai</a>::<wbr><a href="../index.html">adapters</a></div><h1>Module <span>gemini</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../src/dwara_core/ai/adapters/gemini.rs.html#1-417">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The Google Gemini adapter (DW-075).</p>
+<p>Speaks the Gemini <code>generateContent</code> API
+(<code>POST /v1beta/models/{model}:generateContent</code> — note the model
+rides in the PATH, not the body, which is why
+<a href="../../adapter/trait.ProviderAdapter.html#tymethod.build_request" title="method dwara_core::ai::adapter::ProviderAdapter::build_request"><code>ProviderAdapter::build_request</code></a> takes the provider model
+explicitly). Translation notes:</p>
+<ul>
+<li>System messages lift to <code>systemInstruction</code>.</li>
+<li>Roles are <code>user</code>/<code>model</code> only; OpenAI <code>tool</code> results become user
+turns carrying a <code>functionResponse</code> part. Gemini requires the
+FUNCTION NAME there, while the OpenAI shape carries only the call
+id — the adapter resolves the name by scanning backward through
+the conversation for the assistant <code>tool_calls</code> entry with that
+id, and falls back to the id itself when the history does not
+contain it (a client that invented a tool_call_id out of thin
+air).</li>
+<li>Tool declarations become <code>functionDeclarations</code>; the JSON-Schema
+<code>parameters</code> object is passed through minus <code>$schema</code> (which
+Gemini rejects).</li>
+<li><code>data:</code> URI images become <code>inline_data</code> parts; remote image URLs
+have no Gemini equivalent in this API and are DROPPED (documented
+limitation of the translation, not a silent corruption — the
+alternative, fetching the URL, is a side effect a gateway must
+not invent).</li>
+<li>Finish reasons map <code>STOP</code> -&gt; stop, <code>MAX_TOKENS</code> -&gt; length,
+<code>SAFETY</code>/<code>PROHIBITED_CONTENT</code> -&gt; content filter, <code>RECITATION</code> -&gt;
+other. Usage maps <code>promptTokenCount</code>/<code>candidatesTokenCount</code>.</li>
+<li>Streaming uses <code>:streamGenerateContent?alt=sse</code>; each SSE data
+payload is a <code>GenerateContentResponse</code> translated like a
+single-choice fragment.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GeminiAdapter.html" title="struct dwara_core::ai::adapters::gemini::GeminiAdapter">Gemini<wbr>Adapter</a></dt><dd>The Gemini generateContent adapter. Stateless singleton.</dd></dl></section></div></main></body></html>

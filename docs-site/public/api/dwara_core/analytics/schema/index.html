@@ -1,0 +1,103 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Analytics store schema (DW-043)."><title>dwara_core::analytics::schema - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module schema</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module schema</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>analytics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a></div><h1>Module <span>schema</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/schema.rs.html#1-463">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Analytics store schema (DW-043).</p>
+<p>The analytics database is a SEPARATE SQLite file from the state
+store (DW-018): different lifecycle (retention deletes vs identity
+upserts), different write pattern (high-churn batched appends vs
+request-path point lookups), and an independent bounded-disk story
+(incremental vacuum reclaims retention deletes here without ever
+compacting the identity store). It owns its own <code>PRAGMA user_version</code>
+namespace — a state-store database and an analytics database can
+never be confused for one another, and the state store’s
+forward-only migration contract stays untouched by analytics churn.</p>
+<p>Schema v1 (this file is migration 001; v2 adds the DW-120
+<code>export_runs</code> ledger — see <a href="constant.SCHEMA_V2.html" title="constant dwara_core::analytics::schema::SCHEMA_V2"><code>SCHEMA_V2</code></a>):</p>
+<ul>
+<li><code>meta</code> — rollup cursors (see <a href="../rollup/index.html" title="mod dwara_core::analytics::rollup"><code>super::rollup</code></a>): the exclusive
+upper bound each granularity has durably rolled through, written
+in the SAME transaction as the rollup rows it covers, so a crash
+between rollups never double-counts a window.</li>
+<li><code>raw</code> — one row per completed request, exactly the redacted
+<a href="../../observability/struct.AccessRecord.html" title="struct dwara_core::observability::AccessRecord"><code>AccessRecord</code></a> field set
+plus a JSON object of custom dimensions. Raw retention is SHORT
+(default 24 h): raw exists to seed rollups and answer
+custom-dimension ad hoc queries; the durable history is the
+rollup tables.</li>
+<li><code>rollup_fixed</code> — pre-aggregated counters per (granularity,
+window, fixed dimension tuple). Latency lives as 13 fixed
+per-bucket counts (<a href="constant.MS_BUCKETS.html" title="constant dwara_core::analytics::schema::MS_BUCKETS"><code>MS_BUCKETS</code></a> bounds) so any set of windows
+merges by summation and percentiles are estimable without
+storing per-request samples.</li>
+<li><code>rollup_dim</code> — the custom-dimension twin: one row per
+(granularity, window, dimension name, value), aggregated in Rust
+(the source is a JSON column; keeping the aggregation out of SQL
+avoids a JSON1 feature dependency in the bundled SQLite).</li>
+</ul>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BUCKET_COLS.html" title="constant dwara_core::analytics::schema::BUCKET_COLS">BUCKET_<wbr>COLS</a></dt><dd>Total stored bucket counts per rollup row: 12 bounded + overflow.</dd><dt><a class="constant" href="constant.LATEST_SCHEMA_VERSION.html" title="constant dwara_core::analytics::schema::LATEST_SCHEMA_VERSION">LATEST_<wbr>SCHEMA_<wbr>VERSION</a></dt><dd>Latest analytics schema version this build knows.</dd><dt><a class="constant" href="constant.MS_BUCKETS.html" title="constant dwara_core::analytics::schema::MS_BUCKETS">MS_<wbr>BUCKETS</a></dt><dd>Latency bucket UPPER bounds in milliseconds (inclusive). A request
+lands in exactly one bucket: the first bound it does not exceed,
+else the overflow bucket (index 12). The bounds are the
+observability histogram’s shape at millisecond granularity —
+sub-millisecond precision is noise at gateway scale, 10 s covers
+every classified timeout. Counts are stored NON-cumulative
+(per-bucket); cumulative form is computed at read time.</dd><dt><a class="constant" href="constant.SCHEMA_V1.html" title="constant dwara_core::analytics::schema::SCHEMA_V1">SCHEMA_<wbr>V1</a></dt><dd>The full v1 DDL. Idempotent (<code>IF NOT EXISTS</code>) so a fresh database
+and a re-run both land at version 1. Connection-level pragmas
+(WAL, synchronous, auto_vacuum) are applied at open time — several
+of them return rows and cannot live in an <code>execute_batch</code>.</dd><dt><a class="constant" href="constant.SCHEMA_V2.html" title="constant dwara_core::analytics::schema::SCHEMA_V2">SCHEMA_<wbr>V2</a></dt><dd>Schema v2 (DW-120): the <code>export_runs</code> ledger. One row per
+scheduled-or-manual usage-statement export attempt per window
+(primary key; a re-export REPLACES the row — the file output is
+equally idempotent). <code>status</code> is <code>ok</code> or <code>failed</code>; <code>partial</code> flags
+a window older than the query granularity’s retention (undercounts
+are possible) so billing consumers can reject flagged statements
+instead of trusting them; <code>windows_nonempty</code> counts the range’s
+rollup windows that carry any data (informational — quiet windows
+have no rows and are not loss).</dd><dt><a class="constant" href="constant.SCHEMA_V3.html" title="constant dwara_core::analytics::schema::SCHEMA_V3">SCHEMA_<wbr>V3</a></dt><dd>Schema v3 (DW-079): the <code>ai_spend</code> table. One row per completed AI
+request carrying the provider-reported token usage and the priced
+cost (micro-USD), attributed to the consumer/team/model/provider
+that served it. The spend query surface
+(<a href="../query/fn.spend_summary.html" title="fn dwara_core::analytics::query::spend_summary"><code>super::query::spend_summary</code></a>) aggregates these rows per
+consumer/team/model for billing reconciliation; the export
+statement (DW-120) folds the per-consumer totals into its rows.</dd><dt><a class="constant" href="constant.SCHEMA_V4.html" title="constant dwara_core::analytics::schema::SCHEMA_V4">SCHEMA_<wbr>V4</a></dt><dd>Schema v4 (DW-084): the <code>ai_governance_events</code> table. One row per
+governance check outcome (allow or deny) when the audit switch is
+on, plus every DENIAL even when the audit switch is off (the
+done-when requirement: a blocked attempt appears in the audit
+log). The admin <code>/analytics/governance-audit</code> endpoint reads these
+rows for shadow review.</dd><dt><a class="constant" href="constant.SCHEMA_V5.html" title="constant dwara_core::analytics::schema::SCHEMA_V5">SCHEMA_<wbr>V5</a></dt><dd>Schema v5 (DW-081): the <code>ai_prompt_logs</code> table. One row per
+captured AI request carrying the REDACTED prompt and response as
+JSON, attributed to the consumer/route/provider/model that served
+it. Capture is opt-in (privacy-first); the redaction pass scrubs
+PII/secrets before storage. The admin <code>/analytics/prompt-logs</code>
+endpoint reads these rows.</dd><dt><a class="constant" href="constant.SCHEMA_V6.html" title="constant dwara_core::analytics::schema::SCHEMA_V6">SCHEMA_<wbr>V6</a></dt><dd>Schema v6 (DW-086): three tables for prompt experimentation.</dd><dt><a class="constant" href="constant.SCHEMA_V7.html" title="constant dwara_core::analytics::schema::SCHEMA_V7">SCHEMA_<wbr>V7</a></dt><dd>Schema v7 (DW-087): the <code>mcp_tool_calls</code> table. One row per MCP
+tool call proxied through the gateway, carrying the session
+correlation id, the authenticated consumer, the tool name, the
+authorization outcome (<code>allowed</code>), the call duration, an optional
+error code, and a status string (<code>success</code>, <code>error</code>, or <code>denied</code>).
+The admin <code>/mcp/calls</code> endpoint reads these rows; the session and
+consumer indexes support per-session and per-consumer drill-down.</dd><dt><a class="constant" href="constant.SCHEMA_V8.html" title="constant dwara_core::analytics::schema::SCHEMA_V8">SCHEMA_<wbr>V8</a></dt><dd>Schema v8 (DW-113): add the <code>consumer_type</code> column to <code>ai_spend</code>
+and <code>mcp_tool_calls</code> for typed agent/user attribution. The column
+defaults to <code>'user'</code> so pre-DW-113 rows and records that omit the
+field land as user traffic (the pre-existing default). Uses ALTER
+TABLE (additive) so existing databases migrate in place.</dd><dt><a class="constant" href="constant.SCHEMA_V9.html" title="constant dwara_core::analytics::schema::SCHEMA_V9">SCHEMA_<wbr>V9</a></dt><dd>Schema v9 (DW-093): add <code>request_id</code> and <code>correlation_id</code> columns
+to the <code>raw</code> table for business-metrics journey/funnel analytics.
+Both default to <code>''</code> so pre-DW-093 rows and records that omit the
+fields land as empty (the journey query simply returns no rows for
+an empty correlation id). The <code>correlation_id</code> index supports the
+journey query (all raw rows for one correlation id, ordered by
+time). Uses ALTER TABLE (additive) so existing databases migrate
+in place.</dd><dt><a class="constant" href="constant.SCHEMA_V10.html" title="constant dwara_core::analytics::schema::SCHEMA_V10">SCHEMA_<wbr>V10</a></dt><dd>Schema v10 (DW-102): add optional replay-capture columns to the
+<code>raw</code> table for time-travel debugging. <code>request_headers_redacted</code>
+holds the redacted request headers (opt-in, scrubbed via the
+existing PII redaction patterns) and <code>auth_identity</code> holds the
+authenticated consumer name (opt-in). Both default to <code>NULL</code> so
+pre-DW-102 rows and records that omit the fields (capture is
+opt-in) land as NULL — the replay reader treats NULL as “not
+captured”. Uses ALTER TABLE (additive) so existing databases
+migrate in place.</dd><dt><a class="constant" href="constant.SCHEMA_V11.html" title="constant dwara_core::analytics::schema::SCHEMA_V11">SCHEMA_<wbr>V11</a></dt><dd>Schema v11 (PERF-12, #209): add <code>bytes_in</code> and <code>bytes_out</code> columns
+to the <code>raw</code> table for per-route traffic accounting. <code>bytes_in</code> is
+the declared <code>Content-Length</code> (0 for chunked request bodies);
+<code>bytes_out</code> is the frame-counted response body size (counted as
+frames stream to the client, no buffering). Both default to 0 so
+pre-v11 rows land as zero. Uses ALTER TABLE (additive) so existing
+databases migrate in place.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.bucket_of.html" title="fn dwara_core::analytics::schema::bucket_of">bucket_<wbr>of</a></dt><dd>Bucket index for one duration (the overflow bucket for anything
+past the last bound).</dd><dt><a class="fn" href="fn.migrate.html" title="fn dwara_core::analytics::schema::migrate">migrate</a></dt><dd>Apply migrations to a fresh-or-existing analytics connection. A
+database at a NEWER version than this build is a hard error (the
+state store’s forward-only rule, same rationale).</dd><dt><a class="fn" href="fn.percentile.html" title="fn dwara_core::analytics::schema::percentile">percentile</a></dt><dd>Percentile estimate from non-cumulative bucket counts: the first
+bound whose cumulative count reaches <code>p * total</code> (else the last
+bound — everything past it is reported as 10 s, the honest ceiling).</dd></dl></section></div></main></body></html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OAuth2 client-credentials proxying (DW-035, feature analysis 4.6)."><title>dwara_core::security::oauth2 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module oauth2</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module oauth2</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#flow" title="Flow">Flow</a></li><li><a href="#caching" title="Caching">Caching</a></li><li><a href="#mtls-to-the-token-endpoint" title="mTLS to the token endpoint">mTLS to the token endpoint</a></li><li><a href="#error-posture" title="Error posture">Error posture</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>oauth2</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/oauth2.rs.html#1-560">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OAuth2 client-credentials proxying (DW-035, feature analysis 4.6).</p>
+<p>The gateway acts as an OAuth2 client itself: for an upstream with an
+<a href="../../config/struct.OAuth2ClientCredentials.html" title="struct dwara_core::config::OAuth2ClientCredentials"><code>crate::config::OAuth2ClientCredentials</code></a> block, it obtains an
+access token from an external token endpoint using the
+client-credentials grant (RFC 6749 section 4.4) and forwards that
+token to the upstream as <code>Authorization: Bearer &lt;token&gt;</code> (replacing
+any client-supplied <code>Authorization</code> header — the upstream sees the
+gateway’s token, not the client’s). This is for service-to-service
+calls where the gateway authenticates to the upstream with a token
+it obtains from an OAuth2 token endpoint.</p>
+<h3 id="flow"><a class="doc-anchor" href="#flow">§</a>Flow</h3>
+<ol>
+<li>Before forwarding a request to an upstream with
+<code>oauth2_client_credentials</code> configured, the gateway checks its
+token cache (per upstream, keyed by upstream name on the
+dataplane) for a valid token.</li>
+<li>If no valid token, it POSTs to the token endpoint with
+<code>grant_type=client_credentials</code>, the <code>client_id</code> and
+<code>client_secret</code> as HTTP Basic auth (RFC 6749 section 2.3.1), and
+<code>scope</code> (space-joined) when configured.</li>
+<li>The response (<code>{access_token, token_type, expires_in, scope}</code>) is
+cached with a TTL of <code>min(expires_in - skew, token_cache_ttl_s)</code> (or just <code>expires_in - skew</code> when no override
+is set). The skew (60 s) avoids using a token that expires while
+an in-flight request is still streaming.</li>
+<li>The gateway adds <code>Authorization: Bearer &lt;token&gt;</code> to the upstream
+request, REPLACING any existing <code>Authorization</code> header from the
+client.</li>
+</ol>
+<h3 id="caching"><a class="doc-anchor" href="#caching">§</a>Caching</h3>
+<p>The cache is a <code>Mutex&lt;HashMap&lt;UpstreamName, CachedToken&gt;&gt;</code> on the
+dataplane. Token refresh is LAZY (on the first request after
+expiry) — no background refresh task. A token is considered valid
+while <code>Instant::now() &lt; expires_at</code>; an expired entry is overwritten
+by the next fetch. Concurrent fetches for the same upstream
+serialize on a per-upstream <code>tokio::Mutex</code> so a token-endpoint
+fetch-storm cannot be driven by concurrent requests (the JWKS
+refresh-lock precedent).</p>
+<h3 id="mtls-to-the-token-endpoint"><a class="doc-anchor" href="#mtls-to-the-token-endpoint">§</a>mTLS to the token endpoint</h3>
+<p>An optional <code>mtls</code> block configures a client certificate for the TLS
+handshake to the token endpoint itself (RFC 8705 <code>tls_client_auth</code>).
+The token endpoint’s SERVER certificate is verified against the
+webpki public roots by default; a private-CA token endpoint is not
+supported in this edition (the <code>trusted_ca_file</code> for the token
+endpoint would be a separate config field; deferred until an
+operator asks for it).</p>
+<h3 id="error-posture"><a class="doc-anchor" href="#error-posture">§</a>Error posture</h3>
+<p>A token-endpoint failure (network error, non-2xx response, malformed
+body) surfaces to the client as 502 <code>oauth2_token_unavailable</code> — the
+gateway cannot authenticate to the upstream and refuses to forward
+without a token (never proxying unauthenticated). The error envelope
+never leaks the token endpoint’s response body or headers.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.OAuth2Client.html" title="struct dwara_core::security::oauth2::OAuth2Client">OAuth2<wbr>Client</a></dt><dd>One upstream’s OAuth2 client-credentials configuration at runtime:
+the resolved config plus a per-upstream HTTP client and a fetch
+serialization lock. The token cache lives on the dataplane
+(<a href="struct.OAuth2TokenCache.html" title="struct dwara_core::security::oauth2::OAuth2TokenCache"><code>OAuth2TokenCache</code></a>) so a config reload reuses cached tokens.</dd><dt><a class="struct" href="struct.OAuth2TokenCache.html" title="struct dwara_core::security::oauth2::OAuth2TokenCache">OAuth2<wbr>Token<wbr>Cache</a></dt><dd>Per-upstream OAuth2 token cache (DW-035): lives on the dataplane so
+a config reload reuses cached tokens (the JWKS cache precedent).
+Entries are keyed by upstream name; each holds the cached token and
+its skew-adjusted expiry. Refresh is lazy (on the first request
+after expiry) — no background task.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.OAuth2Error.html" title="enum dwara_core::security::oauth2::OAuth2Error">OAuth2<wbr>Error</a></dt><dd>Error acquiring a token (DW-035). All variants surface to the client
+as 502 <code>oauth2_token_unavailable</code>; the <code>Display</code> text is logged, not
+sent to the client (the envelope never leaks upstream internals).</dd></dl></section></div></main></body></html>

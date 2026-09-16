@@ -1,0 +1,94 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Webhook delivery (DW-044, feature analysis section 5 “Platform”): drains the event bus and POSTs each event to the configured targets."><title>dwara_core::events::webhook - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module webhook</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module webhook</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#envelope-stable-shape" title="Envelope (stable shape)">Envelope (stable shape)</a></li><li><a href="#delivery-contract" title="Delivery contract">Delivery contract</a></li><li><a href="#isolation-from-the-dataplane" title="Isolation from the dataplane">Isolation from the dataplane</a></li><li><a href="#egress-posture" title="Egress posture">Egress posture</a></li><li><a href="#target-lifecycle" title="Target lifecycle">Target lifecycle</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>events</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">events</a></div><h1>Module <span>webhook</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/events/webhook.rs.html#1-801">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Webhook delivery (DW-044, feature analysis section 5 “Platform”):
+drains the event bus and POSTs each event to the configured targets.</p>
+<h2 id="envelope-stable-shape"><a class="doc-anchor" href="#envelope-stable-shape">§</a>Envelope (stable shape)</h2>
+<p>One JSON object per delivery, serialized once per event and shared by
+every matching target:</p>
+<div class="example-wrap"><pre class="language-json"><code>{
+  &quot;id&quot;: &quot;evt-18f3c2a1b9d0-00000a&quot;,
+  &quot;kind&quot;: &quot;breaker_opened&quot;,
+  &quot;timestamp&quot;: &quot;2026-08-27T09:00:00.123Z&quot;,
+  &quot;gateway&quot;: &quot;dwara-8213-18f3c2910b07&quot;,
+  &quot;payload&quot;: { &quot;upstream&quot;: &quot;billing&quot;, &quot;detail&quot;: &quot;error_ratio&quot; }
+}</code></pre></div>
+<p><code>id</code> is process-unique and monotonic (event correlation, not
+ordering across processes), <code>kind</code> is the closed
+<a href="../enum.EventKind.html" title="enum dwara_core::events::EventKind"><code>EventKind</code></a> spelling, <code>timestamp</code> is RFC 3339 UTC
+with millisecond precision, <code>gateway</code> identifies the emitting
+process, and <code>payload</code> carries only the bounded labels and numbers
+of <a href="../struct.EventPayload.html" title="struct dwara_core::events::EventPayload"><code>EventPayload</code></a> — no request-derived data,
+no secrets. The envelope is byte-capped at <a href="constant.MAX_ENVELOPE_BYTES.html" title="constant dwara_core::events::webhook::MAX_ENVELOPE_BYTES"><code>MAX_ENVELOPE_BYTES</code></a>
+(an over-cap envelope — only possible via absurd config label
+lengths — is dropped and counted, never truncated: a receiver should
+never see a malformed event).</p>
+<h2 id="delivery-contract"><a class="doc-anchor" href="#delivery-contract">§</a>Delivery contract</h2>
+<p>One delivery = one target + one event. Every attempt of a delivery
+(the first POST plus its retries) shares ONE total budget of
+<code>timeout_ms</code>, the OTLP exporter’s model (#133): a flapping or hung
+target cannot stretch a delivery past the budget any more than a
+slow one could, which is the whole failure-isolation guarantee. The
+retry shape is equally borrowed from that client:</p>
+<ul>
+<li>retryable outcomes: transport failures and the transient status
+set 429/502/503/504. A seconds-form <code>Retry-After</code> replaces the
+computed backoff for that wait (the HTTP-date form is deliberately
+uninterpreted); <code>Retry-After: 0</code> falls back to the computed
+backoff so a hostile zero cannot busy-loop.</li>
+<li>every other non-2xx answer (4xx, 500, 3xx — redirects are NOT
+followed) fails the delivery immediately: retrying cannot fix an
+answer that is this delivery’s fault.</li>
+<li>backoff is exponential from <code>backoff_base_ms</code>, doubling up to
+<code>backoff_cap_ms</code>; a wait that would exhaust the remaining budget
+gives up instead of sleeping past it.</li>
+</ul>
+<p>Outcomes are counted in <code>dwara_webhook_events_total{kind,outcome}</code>:
+<code>delivered</code> (2xx on some attempt), <code>failed</code> (retries exhausted,
+non-transient answer, or budget spent — the target was tried and did
+not take it), and <code>dropped</code> (never tried: envelope over the byte
+cap, or the delivery-concurrency semaphore saturated). Queue drops
+at EMIT time are the separate <code>dwara_events_dropped_total</code> gauge
+(see the parent module). Cardinality is bounded: <code>kind</code> is the
+closed event set, <code>outcome</code> is these three spellings.</p>
+<h2 id="isolation-from-the-dataplane"><a class="doc-anchor" href="#isolation-from-the-dataplane">§</a>Isolation from the dataplane</h2>
+<p><a href="fn.run_deliverer.html" title="fn dwara_core::events::webhook::run_deliverer"><code>run_deliverer</code></a> is one background task; each delivery is a further
+task, and at most <a href="constant.MAX_CONCURRENT_DELIVERIES.html" title="constant dwara_core::events::webhook::MAX_CONCURRENT_DELIVERIES"><code>MAX_CONCURRENT_DELIVERIES</code></a> run at once
+(a saturated semaphore drops-and-counts rather than queueing — an
+unbounded delivery queue would just move the unbounded buffer from
+the bus to the deliverer). The emit path (<code>try_send</code> + atomics) is
+unaffected by everything here: a dead target costs its semaphore
+slot for at most <code>timeout_ms</code>, a hung one exactly the same.</p>
+<h2 id="egress-posture"><a class="doc-anchor" href="#egress-posture">§</a>Egress posture</h2>
+<p>Webhook URLs are OPERATOR configuration, exactly like upstream
+endpoints and JWKS URLs: the gateway dials what its config names, so
+there is no SSRF boundary to enforce against the config author.
+There is deliberately no private-address egress filter in v1 (an
+internal alerting listener on 127.0.0.1 or 10/8 is a normal shape);
+<code>https://</code> targets verify against the public webpki root set with no
+<code>trusted_ca_file</code> override (v1 scope — the alerting fan-out is
+public SaaS), and HTTP/1.1 only. Header values may carry secrets
+via <code>${...}</code> references (DW-045): they are resolved at compile time,
+held only by the compiled target, and NEVER logged (delivery logs
+name the URL and the outcome, never the headers).</p>
+<h2 id="target-lifecycle"><a class="doc-anchor" href="#target-lifecycle">§</a>Target lifecycle</h2>
+<p>Targets are compiled per config generation (secret references
+re-resolved on every publish) and pushed to the deliverer over a
+<code>tokio::sync::watch</code> channel by the dataplane’s refresh — a config
+change applies to the NEXT event, with no deliverer restart.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.WebhookTarget.html" title="struct dwara_core::events::webhook::WebhookTarget">Webhook<wbr>Target</a></dt><dd>One compiled <code>gateway.webhooks[]</code> entry (DW-044): the URL decomposed
+for dialing, the event-kind filter, and the RESOLVED header set.
+Built per config generation by <a href="struct.WebhookTarget.html#method.compile" title="associated function dwara_core::events::webhook::WebhookTarget::compile"><code>WebhookTarget::compile</code></a>; held by
+the deliverer via the watch channel. Header values may be secret
+material (a <code>${...}</code> reference): they are never logged and never
+appear in <code>Debug</code> (the impl prints names only).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_CONCURRENT_DELIVERIES.html" title="constant dwara_core::events::webhook::MAX_CONCURRENT_DELIVERIES">MAX_<wbr>CONCURRENT_<wbr>DELIVERIES</a></dt><dd>At most this many deliveries in flight across every target (per
+gateway process). Over it: drop and count — a stuck fleet of
+targets must not accumulate an unbounded task pile.</dd><dt><a class="constant" href="constant.MAX_ENVELOPE_BYTES.html" title="constant dwara_core::events::webhook::MAX_ENVELOPE_BYTES">MAX_<wbr>ENVELOPE_<wbr>BYTES</a></dt><dd>Hard cap on one serialized envelope (bytes). Payload fields are
+bounded config labels, so this only binds absurd label lengths; an
+over-cap envelope is dropped and counted, never sent truncated.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.deliver.html" title="fn dwara_core::events::webhook::deliver">deliver</a></dt><dd>Deliver one alert-event envelope to one target, with the documented
+retry shape, counting exactly one outcome (<code>delivered</code> or <code>failed</code>)
+in <code>dwara_webhook_events_total{kind,outcome}</code>. Public for the
+delivery contract’s unit tests; the deliverer calls it per delivery.</dd><dt><a class="fn" href="fn.envelope_json.html" title="fn dwara_core::events::webhook::envelope_json">envelope_<wbr>json</a></dt><dd>Serialize one event into its envelope JSON.</dd><dt><a class="fn" href="fn.rfc3339_ms.html" title="fn dwara_core::events::webhook::rfc3339_ms">rfc3339_<wbr>ms</a></dt><dd>RFC 3339 UTC with millisecond precision from Unix milliseconds
+(<code>civil_from_days</code>, the standard fully-specified conversion — no
+datetime dependency, stable across toolchains like the FNV ring
+hash). UTC by definition of the <code>Z</code> suffix.</dd><dt><a class="fn" href="fn.run_deliverer.html" title="fn dwara_core::events::webhook::run_deliverer">run_<wbr>deliverer</a></dt><dd>The deliverer loop (DW-044): drain the bus, filter by kind, dispatch
+one bounded-concurrency delivery task per (event, target). Returns
+on shutdown (pending queue abandoned — documented: the gateway is
+not a durable queue) or when the bus closes.</dd></dl></section></div></main></body></html>

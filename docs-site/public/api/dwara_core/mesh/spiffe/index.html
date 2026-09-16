@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="SPIFFE/SPIRE mTLS identity (DW-107)."><title>dwara_core::mesh::spiffe - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module spiffe</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module spiffe</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#implementation" title="Implementation">Implementation</a></li><li><a href="#integration-point" title="Integration point">Integration point</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>mesh</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">mesh</a></div><h1>Module <span>spiffe</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/mesh/spiffe.rs.html#1-1102">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>SPIFFE/SPIRE mTLS identity (DW-107).</p>
+<p>Identity in the service mesh is provided by SPIFFE (Secure Production
+Identity Framework for Everyone) via SPIRE (the SPIFFE Runtime
+Environment). Each workload fetches X.509 SVIDs (SPIFFE Verifiable
+Identity Documents) from the SPIRE Workload API, exposed over a Unix
+domain socket. An X.509 SVID is an X.509 certificate whose URI SAN
+carries the workload’s SPIFFE ID (<code>spiffe://&lt;trust-domain&gt;/&lt;path&gt;</code>).
+The SPIFFE ID is the authentication identity used for policy
+decisions; the trust bundle (the SPIRE signing CAs) is used to
+verify peer SVIDs.</p>
+<h2 id="implementation"><a class="doc-anchor" href="#implementation">§</a>Implementation</h2>
+<p>The Workload API client is implemented behind a transport
+abstraction (<a href="trait.WorkloadApiTransport.html" title="trait dwara_core::mesh::spiffe::WorkloadApiTransport"><code>WorkloadApiTransport</code></a>) so the fetch logic is
+testable without a real SPIRE agent. The production transport
+(<code>GrpcWorkloadApi</code>) uses tonic over a Unix domain socket and is
+gated behind the <code>ent</code> cargo feature (which brings in tonic + prost;
+the mesh feature itself is flag-only). A <a href="struct.FakeWorkloadApi.html" title="struct dwara_core::mesh::spiffe::FakeWorkloadApi"><code>FakeWorkloadApi</code></a> is
+provided for tests.</p>
+<h2 id="integration-point"><a class="doc-anchor" href="#integration-point">§</a>Integration point</h2>
+<p>The mTLS TLS config in <code>security::tls</code> would consume the SVID
+certificate/key (as the presented client/server cert) and the trust
+bundle (as the peer-verification root store). The peer’s SPIFFE ID
+is extracted from the verified peer certificate’s URI SAN and used
+as the auth identity (the consumer / principal for policy
+decisions). This seam is documented here and kept as a hand-off
+(mesh produces the SVID material; security consumes it) so the
+dependency direction stays downward.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.FakeWorkloadApi.html" title="struct dwara_core::mesh::spiffe::FakeWorkloadApi">Fake<wbr>Workload<wbr>Api</a></dt><dd>A fake Workload API transport for tests. Returns preconfigured
+SVIDs and trust bundles without opening a socket. Deterministic
+(no real I/O, no timers).</dd><dt><a class="struct" href="struct.SpiffeClient.html" title="struct dwara_core::mesh::spiffe::SpiffeClient">Spiffe<wbr>Client</a></dt><dd>The SPIFFE Workload API client: connects to the SPIRE agent over a
+Unix socket, fetches X.509 SVIDs for the workload, and refreshes
+them before expiry.</dd><dt><a class="struct" href="struct.SpiffeConfig.html" title="struct dwara_core::mesh::spiffe::SpiffeConfig">Spiffe<wbr>Config</a></dt><dd>The resolved SPIFFE configuration: the trust domain, the Workload
+API socket path, and the SVID refresh interval. Built from the
+config schema (<a href="../../config/mesh/struct.MeshSpiffeConfig.html" title="struct dwara_core::config::mesh::MeshSpiffeConfig"><code>MeshSpiffeConfig</code></a>) at compile time.</dd><dt><a class="struct" href="struct.SpiffeIdentity.html" title="struct dwara_core::mesh::spiffe::SpiffeIdentity">Spiffe<wbr>Identity</a></dt><dd>A SPIFFE ID: the trust domain and the path that together form the
+workload identity (<code>spiffe://&lt;trust-domain&gt;/&lt;path&gt;</code>).</dd><dt><a class="struct" href="struct.SpiffeSvid.html" title="struct dwara_core::mesh::spiffe::SpiffeSvid">Spiffe<wbr>Svid</a></dt><dd>An X.509 SVID: the certificate chain, the private key, and the
+expiry the workload presents to prove its SPIFFE identity.</dd><dt><a class="struct" href="struct.SpiffeTrustBundle.html" title="struct dwara_core::mesh::spiffe::SpiffeTrustBundle">Spiffe<wbr>Trust<wbr>Bundle</a></dt><dd>The SPIFFE trust bundle: the X.509 root certificates (the SPIRE
+signing CAs) used to verify peer SVIDs. The bundle is fetched from
+the Workload API alongside the SVID and refreshed on the same
+schedule.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SpiffeError.html" title="enum dwara_core::mesh::spiffe::SpiffeError">Spiffe<wbr>Error</a></dt><dd>Error returned by the SPIFFE Workload API calls.</dd><dt><a class="enum" href="enum.SvidRefreshResult.html" title="enum dwara_core::mesh::spiffe::SvidRefreshResult">Svid<wbr>Refresh<wbr>Result</a></dt><dd>The outcome of an SVID refresh attempt, captured for the
+<code>dwara_spiffe_svid_refresh_total{result}</code> metric. The CLOSED
+two-value label set: <code>success</code> when the Workload API returned a
+fresh SVID, <code>error</code> when the fetch failed (the client keeps serving
+the previous SVID until it expires).</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.WorkloadApiTransport.html" title="trait dwara_core::mesh::spiffe::WorkloadApiTransport">Workload<wbr>ApiTransport</a></dt><dd>The transport abstraction for the SPIRE Workload API. The
+production implementation (<code>GrpcWorkloadApi</code>) uses tonic over a
+Unix domain socket (ent-gated); tests use <a href="struct.FakeWorkloadApi.html" title="struct dwara_core::mesh::spiffe::FakeWorkloadApi"><code>FakeWorkloadApi</code></a>.</dd></dl></section></div></main></body></html>

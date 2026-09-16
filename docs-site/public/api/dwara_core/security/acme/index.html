@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ACME / Let’s Encrypt automation (SEC-02)."><title>dwara_core::security::acme - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module acme</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module acme</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design" title="Design">Design</a></li><li><a href="#challenge-types" title="Challenge types">Challenge types</a></li><li><a href="#staging-vs-production" title="Staging vs production">Staging vs production</a></li><li><a href="#failure-behavior" title="Failure behavior">Failure behavior</a></li><li><a href="#feature-gate" title="Feature gate">Feature gate</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>acme</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/acme.rs.html#1-144">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ACME / Let’s Encrypt automation (SEC-02).</p>
+<p>When enabled on a listener’s TLS config, the gateway automatically
+obtains and renews certificates from an ACME directory (Let’s
+Encrypt by default). Issued certificates are installed into the
+hot-reloadable TLS termination/SNI resolver.</p>
+<h2 id="design"><a class="doc-anchor" href="#design">§</a>Design</h2>
+<p>The ACME client runs as a background task per listener that has
+<code>tls.acme</code> configured. It:</p>
+<ol>
+<li>Loads or creates an ACME account key (persisted to <code>state_dir</code>).</li>
+<li>Registers the account with the directory (using <code>contact</code>).</li>
+<li>For each domain in <code>domains</code>:
+a. Orders a certificate.
+b. Completes the challenge (HTTP-01 or TLS-ALPN-01).
+c. Finalizes the order and downloads the issued certificate.</li>
+<li>Installs the certificate into the SNI resolver.</li>
+<li>Schedules renewal at 2/3 of the certificate’s validity period.</li>
+</ol>
+<h2 id="challenge-types"><a class="doc-anchor" href="#challenge-types">§</a>Challenge types</h2>
+<ul>
+<li><strong>TLS-ALPN-01</strong> (default): the gateway serves a self-signed
+challenge certificate with the <code>acme-tls/1</code> ALPN protocol on port
+443. No separate listener is needed — the TLS terminator handles
+the challenge during the handshake.</li>
+<li><strong>HTTP-01</strong>: the gateway serves a token at
+<code>/.well-known/acme-challenge/&lt;token&gt;</code> over HTTP on port 80. This
+requires a separate HTTP listener bound to port 80 (or port
+forwarding from an external load balancer).</li>
+</ul>
+<h2 id="staging-vs-production"><a class="doc-anchor" href="#staging-vs-production">§</a>Staging vs production</h2>
+<p>Let’s Encrypt production has strict rate limits (50 certs per domain
+per week). Set <code>staging: true</code> for testing — staging issues
+untrusted certificates that do not trigger rate limits. The staging
+directory is hardcoded when <code>staging: true</code> (overrides
+<code>directory_url</code>).</p>
+<h2 id="failure-behavior"><a class="doc-anchor" href="#failure-behavior">§</a>Failure behavior</h2>
+<ul>
+<li>ACME issuance failure: the gateway logs the error and retries with
+exponential backoff. It does NOT crash — existing certificates
+(manual or previously issued) continue to serve.</li>
+<li>Renewal failure: same — retry with backoff. A certificate that
+expires without renewal causes TLS handshake failures for its SNI
+(the gateway does NOT fall back to a different certificate for
+that SNI).</li>
+</ul>
+<h2 id="feature-gate"><a class="doc-anchor" href="#feature-gate">§</a>Feature gate</h2>
+<p>Behind the <code>acme</code> cargo feature (default OFF). The config block is
+always accepted by the parser (additive-only); when the feature is
+OFF, validation emits a warning and the block is inert.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AcmeState.html" title="struct dwara_core::security::acme::AcmeState">Acme<wbr>State</a></dt><dd>The compiled ACME state for one listener: the resolved config and
+the background task handle. Held by the listener’s TLS state.</dd><dt><a class="struct" href="struct.ResolvedAcmeConfig.html" title="struct dwara_core::security::acme::ResolvedAcmeConfig">Resolved<wbr>Acme<wbr>Config</a></dt><dd>The ACME config with defaults resolved and staging override applied.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AcmeError.html" title="enum dwara_core::security::acme::AcmeError">Acme<wbr>Error</a></dt><dd>The ACME client error.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.build_acme_state.html" title="fn dwara_core::security::acme::build_acme_state">build_<wbr>acme_<wbr>state</a></dt><dd>Build the ACME state from config. Returns <code>None</code> when ACME is not
+configured or the <code>acme</code> cargo feature is OFF.</dd></dl></section></div></main></body></html>

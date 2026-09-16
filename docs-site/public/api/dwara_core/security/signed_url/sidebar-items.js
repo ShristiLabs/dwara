@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SignedUrlError","SignedUrlResult"],"struct":["SignedUrlConfig","SignedUrlVerifier"]};

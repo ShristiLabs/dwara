@@ -1,0 +1,71 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="HTTP/3 (QUIC) upstream transport (DW-108)."><title>dwara_core::dataplane::upstream_h3 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module upstream_h3</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module upstream_<wbr>h3</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#transport-model" title="Transport model">Transport model</a></li><li><a href="#tls" title="TLS">TLS</a></li><li><a href="#0-rtt" title="0-RTT">0-RTT</a></li><li><a href="#response-streaming-perf-10-243" title="Response streaming (PERF-10, #243)">Response streaming (PERF-10, #243)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>upstream_<wbr>h3</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/upstream_h3.rs.html#1-629">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>HTTP/3 (QUIC) upstream transport (DW-108).</p>
+<p>The mirror of the DW-088 H3 <em>ingress</em> listener: an H3 <em>egress</em>
+connector that dials upstream endpoints over QUIC and speaks
+HTTP/3 on bidirectional QUIC streams. A route whose upstream is
+configured <code>protocol: h3</code> dispatches through here instead of the
+TCP/TLS pooled client in <a href="../upstream/index.html" title="mod dwara_core::dataplane::upstream"><code>super::upstream</code></a>.</p>
+<h3 id="transport-model"><a class="doc-anchor" href="#transport-model">§</a>Transport model</h3>
+<p>QUIC multiplexes many streams over one connection, so the pool
+shape is inverted relative to HTTP/1.1: a QUIC <em>connection</em> is the
+pooled resource, and each request opens a fresh bidirectional stream
+<em>within</em> it. <a href="struct.QuicStreamPool.html" title="struct dwara_core::dataplane::upstream_h3::QuicStreamPool"><code>QuicStreamPool</code></a> keeps a bounded set of QUIC
+connections per endpoint address, hands out a cheaply cloneable
+[<code>h3::client::SendRequest</code>] handle per request (one stream per
+<code>send_request</code> call), and reaps connections idle past
+<code>QuicStreamPool::idle_timeout</code>.</p>
+<h3 id="tls"><a class="doc-anchor" href="#tls">§</a>TLS</h3>
+<p>QUIC mandates TLS 1.3, so every H3 upstream negotiates TLS with
+ALPN <code>h3</code>. The trust roots are the SAME ones the pooled https
+connector uses (#121): the Mozilla webpki public set by default, or
+the upstream’s <code>trusted_ca_file</code> bundle when configured. The shared
+rustls client-config shape lives in <a href="../../security/tls/index.html" title="mod dwara_core::security::tls"><code>crate::security::tls</code></a>
+(<a href="../../security/tls/fn.https_h3_client_config.html" title="fn dwara_core::security::tls::https_h3_client_config"><code>https_h3_client_config</code></a>) so the connector and the QUIC active
+health probe can never disagree about trust.</p>
+<h3 id="0-rtt"><a class="doc-anchor" href="#0-rtt">§</a>0-RTT</h3>
+<p>Deliberately NOT used for upstream dialing: 0-RTT early data is
+replayable, and a replayed non-idempotent upstream request is a
+footgun the gateway must not expose by default. The rustls client
+config disables early data (<a href="../../security/tls/fn.https_h3_client_config.html" title="fn dwara_core::security::tls::https_h3_client_config"><code>https_h3_client_config</code></a>).</p>
+<h3 id="response-streaming-perf-10-243"><a class="doc-anchor" href="#response-streaming-perf-10-243">§</a>Response streaming (PERF-10, #243)</h3>
+<p>The H3 transport supports two response modes:</p>
+<ul>
+<li><a href="fn.h3_request.html" title="fn dwara_core::dataplane::upstream_h3::h3_request"><code>h3_request</code></a>: buffers the full response body (the original v1
+behavior; kept for compatibility and simple use cases).</li>
+<li><a href="fn.h3_request_streaming.html" title="fn dwara_core::dataplane::upstream_h3::h3_request_streaming"><code>h3_request_streaming</code></a>: streams the response body through a
+tokio channel as h3 <code>recv_data</code> chunks arrive, matching the
+h1/h2 zero-buffer guarantee. The driver task reads <code>recv_data</code>
+and sends each chunk through a bounded channel (capacity 1) so
+backpressure flows from the consumer to the upstream. The caller
+wraps the receiver in <code>UpstreamBody::from_h3_streaming</code> to get
+a <code>hyper::Body</code>-compatible streaming body with the
+idle/deadline/health knobs.</li>
+</ul>
+<p>The request body is still sent as one <code>DATA</code> frame (the proxy
+already buffers request bodies for retries); streaming request
+bodies are a separate enhancement.</p>
+<p>Everything in this module is compiled into the OSS build; H3
+upstreams are always available.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.H3UpstreamHandle.html" title="struct dwara_core::dataplane::upstream_h3::H3UpstreamHandle">H3Upstream<wbr>Handle</a></dt><dd>Per-upstream H3 transport handle: a <a href="struct.QuicStreamPool.html" title="struct dwara_core::dataplane::upstream_h3::QuicStreamPool"><code>QuicStreamPool</code></a> plus the
+per-upstream timeouts and shared stats. Stored on
+<a href="../upstream/struct.UpstreamHandle.html" title="struct dwara_core::dataplane::upstream::UpstreamHandle"><code>super::upstream::UpstreamHandle</code></a> for the H3 transport;
+the LB, breaker, retry, and health layers are shared with the TCP/TLS
+path (they operate on endpoint addresses, not the transport).</dd><dt><a class="struct" href="struct.QuicStreamPool.html" title="struct dwara_core::dataplane::upstream_h3::QuicStreamPool">Quic<wbr>Stream<wbr>Pool</a></dt><dd>QUIC stream-aware connection pool: a bounded set of QUIC connections
+per endpoint address, each carrying many H3 streams. One
+<a href="struct.QuicStreamPool.html" title="struct dwara_core::dataplane::upstream_h3::QuicStreamPool"><code>QuicStreamPool</code></a> serves one upstream (the per-upstream connection
+cap and trust roots are fixed at build time); endpoint addresses are
+the inner key so a multi-endpoint upstream shares one pool.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.H3Error.html" title="enum dwara_core::dataplane::upstream_h3::H3Error">H3Error</a></dt><dd>Errors specific to the H3/QUIC upstream transport. Mapped onto the
+shared <a href="../upstream/enum.UpstreamError.html" title="enum dwara_core::dataplane::upstream::UpstreamError"><code>UpstreamError</code></a> by <a href="struct.H3UpstreamHandle.html#method.send" title="method dwara_core::dataplane::upstream_h3::H3UpstreamHandle::send"><code>H3UpstreamHandle::send</code></a> so the proxy,
+breaker, and health layers stay transport-agnostic.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_H3_CONNECTION_CAP.html" title="constant dwara_core::dataplane::upstream_h3::DEFAULT_H3_CONNECTION_CAP">DEFAULT_<wbr>H3_<wbr>CONNECTION_<wbr>CAP</a></dt><dd>Default maximum QUIC connections per endpoint address when the
+upstream’s <code>connection_cap</code> is absent. Lower than the TCP/TLS default
+(64): one QUIC connection carries many streams, so a handful of
+connections saturates concurrency without the per-stream head-of-line
+blocking that makes TCP pools need many connections.</dd><dt><a class="constant" href="constant.DEFAULT_H3_IDLE_TIMEOUT_MS.html" title="constant dwara_core::dataplane::upstream_h3::DEFAULT_H3_IDLE_TIMEOUT_MS">DEFAULT_<wbr>H3_<wbr>IDLE_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default idle timeout for a pooled QUIC connection (no streams opened
+through it for this long =&gt; close and reap). QUIC’s own keep-alive is
+not configured here; the sweep is the reaper.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.h3_request.html" title="fn dwara_core::dataplane::upstream_h3::h3_request">h3_<wbr>request</a></dt><dd>Send an HTTP/3 request over a QUIC stream (one <code>send_request</code> call =
+one bidirectional stream) and read the full response. The request body
+is sent as a single <code>DATA</code> frame (the H3 path buffers the request
+body; see the module docs); the response body is collected into one
+[<code>Bytes</code>] (streaming H3 response bodies are a follow-up).</dd><dt><a class="fn" href="fn.h3_request_streaming.html" title="fn dwara_core::dataplane::upstream_h3::h3_request_streaming">h3_<wbr>request_<wbr>streaming</a></dt><dd>Send an HTTP/3 request over a QUIC stream and return a STREAMING
+response body (PERF-10, #243). The response headers are returned
+immediately; the body is forwarded through a tokio channel as h3
+<code>recv_data</code> chunks arrive, matching the h1/h2 zero-buffer guarantee.</dd></dl></section></div></main></body></html>

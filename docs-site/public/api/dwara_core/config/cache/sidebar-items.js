@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CACHE_MAX_BODY_BYTES","DEFAULT_COALESCE_WAIT_MS","MAX_CACHE_MAX_BODY_BYTES","MAX_CACHE_STALE_SECS","MAX_CACHE_TTL_SECS","MAX_CACHE_VARY_HEADERS","MAX_COALESCE_WAIT_MS"],"fn":["forbidden_vary_reason"],"struct":["CompiledRouteCache","RouteCache","RouteCacheCoalescing"]};

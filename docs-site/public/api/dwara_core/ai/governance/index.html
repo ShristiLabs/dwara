@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI model governance (DW-084): per-team model allowlists and the shadow-audit switch."><title>dwara_core::ai::governance - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module governance</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module governance</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#resolution-deny-wins-intersection" title="Resolution (deny-wins intersection)">Resolution (deny-wins intersection)</a></li><li><a href="#audit" title="Audit">Audit</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>governance</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/governance.rs.html#1-180">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI model governance (DW-084): per-team model allowlists and the
+shadow-audit switch.</p>
+<p>A team is a POLICY name (the same vocabulary the token budgets use
+for <code>scope: policy</code>): every consumer attaching a policy that
+carries an allowlist entry is restricted to that allowlist’s
+client-facing model aliases. The check runs BEFORE routing, against
+the alias the client put in the request body, so a disallowed (or
+typo’d) alias is blocked at the edge with a 403
+<code>model_denied_by_policy</code> rather than surfacing as a provider 404.</p>
+<h2 id="resolution-deny-wins-intersection"><a class="doc-anchor" href="#resolution-deny-wins-intersection">§</a>Resolution (deny-wins intersection)</h2>
+<p>The binding allowlists for one request are EVERY policy in the
+frozen precedence chain (consumer &gt; route &gt; service &gt; listener &gt;
+global) that has a <code>team_allowlists</code> entry. The model must be in
+ALL of them — the intersection, deny-anywhere-wins (the same
+principle as authz). A consumer with no binding allowlist policy
+is unrestricted (fail-open, the DW-017 default posture).</p>
+<h2 id="audit"><a class="doc-anchor" href="#audit">§</a>Audit</h2>
+<p>When <code>ai.governance.audit</code> is true, BOTH allowed and denied
+attempts are recorded into the <code>ai_governance_events</code> analytics
+table for shadow review (the admin <code>/analytics/governance-audit</code>
+endpoint reads it). When false, only the denial metric fires — no
+per-event audit rows. Denied requests are ALWAYS audited when the
+governance block is present (the done-when requirement: a blocked
+attempt appears in the audit log); the <code>audit</code> flag extends
+recording to ALLOWED calls for spend-by-team shadow review.</p>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only (see <code>scripts/check_deps.py</code>); this
+module reads <code>config::ai::AiConfig</code> and nothing else. The audit
+RECORD DTO lives in <code>analytics</code> (a plain struct, not importing
+<code>ai</code>) — the dataplane converts at the call site, keeping the
+dependency direction downward.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GovernanceEngine.html" title="struct dwara_core::ai::governance::GovernanceEngine">Governance<wbr>Engine</a></dt><dd>The per-generation compiled governance rules (DW-084): the
+team_allowlists map plus the audit switch. Built at dataplane
+refresh from the published config; immutable once built. Stored on
+the dataplane behind an ArcSwap and swapped on reload, so a
+governance change applies to the next request with no restart.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.GovernanceVerdict.html" title="enum dwara_core::ai::governance::GovernanceVerdict">Governance<wbr>Verdict</a></dt><dd>The governance check verdict for one request.</dd></dl></section></div></main></body></html>

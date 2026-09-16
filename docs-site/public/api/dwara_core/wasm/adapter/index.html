@@ -1,0 +1,43 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The WASM-to-unified-chain adapter (DW-119)."><title>dwara_core::wasm::adapter - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adapter</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adapter</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#http-callouts-the-pauseresume-seam-dw-167" title="HTTP callouts: the pause/resume seam (DW-167)">HTTP callouts: the pause/resume seam (DW-167)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>wasm</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">wasm</a></div><h1>Module <span>adapter</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/wasm/adapter.rs.html#1-355">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The WASM-to-unified-chain adapter (DW-119).</p>
+<p><a href="struct.WasmChainAdapter.html" title="struct dwara_core::wasm::adapter::WasmChainAdapter"><code>WasmChainAdapter</code></a> bridges the proxy-wasm host’s per-request
+<a href="../runner/struct.PluginInstances.html" title="struct dwara_core::wasm::runner::PluginInstances"><code>PluginInstances</code></a> into the unified <a href="../../plugins/chain/struct.PluginChain.html" title="struct dwara_core::plugins::chain::PluginChain"><code>crate::plugins::PluginChain</code></a>
+by implementing <a href="../../plugins/chain/trait.WasmDispatch.html" title="trait dwara_core::plugins::chain::WasmDispatch"><code>crate::plugins::WasmDispatch</code></a>. The dataplane
+constructs one adapter per request (holding the <code>PluginInstances</code>
+for the route’s WASM plugins) and passes it to <code>PluginChain::new</code>;
+the chain calls back into the adapter once per WASM entry per phase,
+passing the entry’s NAME, and the adapter dispatches to exactly that
+plugin’s instance (so a chain interleaving native filters and WASM
+plugins in one phase runs each entry exactly once, in config order).</p>
+<p>This module (and the whole proxy-wasm host) compiles unconditionally
+in the OSS build — there are no cargo features for it. The unified
+chain’s no-wasm adapter (<code>crate::plugins::NoWasm</code>) exists for
+native-only chains and tests.</p>
+<p>Dependency direction: <code>wasm</code> depends on <code>plugins</code> (downward —
+<code>plugins</code> sits below <code>wasm</code> in the dependency table). The adapter
+converts <code>wasm::host::LocalResponse</code> to
+<code>plugins::LocalResponse</code> at the dispatch boundary, and attributes
+traps to the named plugin so the dataplane can record
+<code>dwara_plugin_failures_total{name,reason}</code> (DW-157).</p>
+<h3 id="http-callouts-the-pauseresume-seam-dw-167"><a class="doc-anchor" href="#http-callouts-the-pauseresume-seam-dw-167">§</a>HTTP callouts: the pause/resume seam (DW-167)</h3>
+<p>When a phase dispatch ends with the plugin having registered
+<code>proxy_http_call</code> callouts (<a href="../host/enum.PhaseResult.html#variant.Pause" title="variant dwara_core::wasm::host::PhaseResult::Pause"><code>PhaseResult::Pause</code></a>), the adapter
+records WHICH plugin paused and reports
+<a href="../../plugins/chain/enum.ChainOutcome.html#variant.CalloutPending" title="variant dwara_core::plugins::chain::ChainOutcome::CalloutPending"><code>ChainOutcome::CalloutPending</code></a> up the chain; the chain stops and
+the async driver in <code>dataplane::plugin_dispatch</code> takes over:</p>
+<ol>
+<li><a href="struct.WasmChainAdapter.html#method.pending_callouts" title="method dwara_core::wasm::adapter::WasmChainAdapter::pending_callouts"><code>WasmChainAdapter::pending_callouts</code></a> drains the paused
+instance’s queue (FIFO) as transport-ready <a href="../callout/struct.CalloutRequest.html" title="struct dwara_core::wasm::callout::CalloutRequest"><code>CalloutRequest</code></a>s;</li>
+<li>the driver performs each exchange off-thread
+(<code>spawn_blocking</code> around the synchronous client) and records the
+<code>dwara_plugin_callouts_total{name,outcome}</code> metric;</li>
+<li><a href="struct.WasmChainAdapter.html#method.deliver_callout" title="method dwara_core::wasm::adapter::WasmChainAdapter::deliver_callout"><code>WasmChainAdapter::deliver_callout</code></a> re-enters the instance
+(synchronous wasmtime) with <code>proxy_on_http_call_response</code> and
+returns the plugin’s resumed outcome — Continue, a local
+response, a trap, or another <code>CalloutPending</code> (the plugin
+dispatched again; the driver loops, bounded);</li>
+<li>on Continue the driver reads the resumed plugin’s phase payload
+back through this adapter and continues the chain from the entry
+AFTER the paused one (<code>PluginChain::resume_*</code>).</li>
+</ol>
+<p>The wasm runner stays fully synchronous; only the driver awaits.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.WasmChainAdapter.html" title="struct dwara_core::wasm::adapter::WasmChainAdapter">Wasm<wbr>Chain<wbr>Adapter</a></dt><dd>The per-request WASM dispatch adapter.</dd></dl></section></div></main></body></html>

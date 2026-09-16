@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_GRAPHQL_MAX_BODY_BYTES","PARSE_DEPTH_CAP"],"enum":["GraphQLBodyError","GraphQLCheckResult"],"fn":["scan_depth_complexity","sha256_hex"],"struct":["GraphQLChecker","GraphqlBody"]};

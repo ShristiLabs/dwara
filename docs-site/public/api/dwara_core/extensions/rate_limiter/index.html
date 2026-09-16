@@ -1,0 +1,101 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Rate limiting extension point."><title>dwara_core::extensions::rate_limiter - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module rate_limiter</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module rate_<wbr>limiter</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#contract-ratelimiter" title="Contract: `RateLimiter`">Contract: <code>RateLimiter</code></a></li><li><a href="#dw-017-gcra-limiter-and-policy-engine" title="DW-017: GCRA limiter and policy engine">DW-017: GCRA limiter and policy engine</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>extensions</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">extensions</a></div><h1>Module <span>rate_<wbr>limiter</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/extensions/rate_limiter.rs.html#1-1234">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Rate limiting extension point.</p>
+<h2 id="contract-ratelimiter"><a class="doc-anchor" href="#contract-ratelimiter">§</a>Contract: <a href="trait.RateLimiter.html" title="trait dwara_core::extensions::rate_limiter::RateLimiter"><code>RateLimiter</code></a></h2>
+<p><strong>Purpose:</strong> decide, per caller-supplied key (consumer id, IP, route, or
+a composite), whether a request costing <code>cost</code> units may proceed.</p>
+<p><strong>Semantics:</strong> <code>check</code> is the hot path — it MUST be non-blocking from the
+caller’s perspective (in-flight for at most the backend round-trip) and
+MUST be atomic: concurrent <code>check</code> calls for the same key are linearized
+by the implementation. Ordering across distinct keys is unspecified.
+<code>check</code> both decides AND reserves: if it returns <code>allowed: true</code> the cost
+has already been deducted from the key’s budget; callers must not call
+again to “commit”. There is no separate refund in M1.</p>
+<p><strong>Failure model:</strong> returns <a href="../enum.ExtensionsError.html" title="enum dwara_core::extensions::ExtensionsError"><code>ExtensionsError</code></a>; a limiter that cannot
+reach its backend should report <a href="../enum.ExtensionsError.html#variant.Backend" title="variant dwara_core::extensions::ExtensionsError::Backend"><code>ExtensionsError::Backend</code></a>. Callers are
+expected to apply their own fail-open/fail-closed policy — the trait does
+not prescribe one. No retries are built in.</p>
+<p><strong>Editions:</strong> OSS ships <a href="struct.InMemoryRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::InMemoryRateLimiter"><code>InMemoryRateLimiter</code></a> (fixed window, kept for
+reference) and <a href="struct.GcraRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::GcraRateLimiter"><code>GcraRateLimiter</code></a> (DW-017: the real sharded GCRA
+limiter behind this same trait). Additional distributed limiter
+backends may be provided separately in future editions.</p>
+<h2 id="dw-017-gcra-limiter-and-policy-engine"><a class="doc-anchor" href="#dw-017-gcra-limiter-and-policy-engine">§</a>DW-017: GCRA limiter and policy engine</h2>
+<p><a href="struct.GcraRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::GcraRateLimiter"><code>GcraRateLimiter</code></a> implements the <a href="trait.RateLimiter.html" title="trait dwara_core::extensions::rate_limiter::RateLimiter"><code>RateLimiter</code></a> trait with the
+<code>governor</code> crate’s GCRA cells over a sharded keyed state store
+(<code>GcraShardStore</code>: fixed-count shard-locked maps per window, no
+global mutex; contrast <a href="struct.InMemoryRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::InMemoryRateLimiter"><code>InMemoryRateLimiter</code></a>’s single
+<code>Mutex&lt;HashMap&gt;</code>, which is why it stayed a skeleton). A limiter may
+STACK several windows (e.g. 10 r/s AND 100 r/hour): each window is
+an independent GCRA cell per key and the decision is the AND of all
+windows — denied if ANY window denies, <code>retry_after</code> from the
+denying (binding) window.</p>
+<p><strong>Stacking consumption semantics (documented trade-off):</strong> windows are
+evaluated shortest-first and evaluation STOPS at the first denial, so
+windows before the binding one have already consumed their cell. A
+request denied by the hourly window still spends one second-window
+token. This is fail-fast and slightly STRICTER than a fully-atomic
+all-windows decision (governor’s public API has no non-consuming
+peek), never more permissive, and the waste is bounded to the
+short-window bucket (which also replenishes fastest).</p>
+<p><strong>Multi-rule denial semantics:</strong> when several RULES apply (route- and
+service-attached policies), a denial in one rule does not stop
+evaluation of the others — every applicable rule’s state advances and
+the reported <code>Retry-After</code> is the MAXIMUM wait across all denying
+rules, while the Limit/Remaining headers come from the first (binding)
+denying rule. Headers thus show the tightest constraint in resolution
+order; Retry-After is the longest wait, so a compliant client never
+retries into a second 429 early. This max-wait rule is across RULES;
+the stricter-not-looser stop-at-first-denial semantics above stay,
+per limiter, for WINDOWS stacked within one rule.</p>
+<p><strong>Dry-run bundles (DW-041):</strong> a policy bundle may set <code>dry_run</code> —
+its rules still evaluate (buckets advance exactly as if enforcing,
+so denial rates preview enforcement) but its denials are reported to
+the caller (<a href="struct.RateLimitEngine.html#method.evaluate" title="method dwara_core::extensions::rate_limiter::RateLimitEngine::evaluate"><code>RateLimitEngine::evaluate</code></a>’s <code>dry_denied</code>]) instead of
+enforced, and its allowed outcomes contribute no <code>X-RateLimit-*</code>
+headers. LIVE bundles attached to the same request enforce
+unaffected: monitor mode observes without ever making enforcement
+more permissive. Extensions may not import observability, so the
+log/metric side of the report lives on the dataplane caller.</p>
+<p><strong>Per-key eviction (#122):</strong> every window’s keyed GCRA state lives in
+a <code>GcraShardStore</code> — <a href="constant.GCRA_STORE_SHARDS.html" title="constant dwara_core::extensions::rate_limiter::GCRA_STORE_SHARDS"><code>GCRA_STORE_SHARDS</code></a> independent lock-guarded
+maps replacing governor’s unbounded <code>DashMapStateStore</code> (whose key
+set a reload can only reset wholesale). Each shard holds at most
+<a href="../../config/limits/constant.MAX_RATE_LIMITER_KEYS_PER_SHARD.html" title="constant dwara_core::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD"><code>crate::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD</code></a> keys, so a
+window’s worst case is <code>GCRA_STORE_SHARDS</code> times that cap — an
+<code>[ip]</code>-selector limiter under key spray is memory-bounded for the
+process lifetime. The sweep runs INLINE, on the shard lock a
+reservation already holds (cascade-on-insert; no background task, no
+O(cap) work per request): when a shard reaches its cap it first
+drops IDLE cells — keys untouched for at least the window’s
+full-refill time, whose GCRA state is indistinguishable from a fresh
+cell, so dropping them cannot change any decision — and if the shard
+is still crowded (every key fresh — sustained spray) it evicts the
+idlest half, ordered by <code>(last_touch_ms, key)</code>, down to half the cap
+so the O(cap) sweep amortizes to O(1) per insertion. Idle-first
+ordering means a key actively under enforcement (denied, hence
+freshly touched) is evicted only when the shard holds more than a
+cap-full of keys ALL touched within one full-refill window; losing a
+cell then merely resets that key’s bucket (a fresh bucket can only
+be MORE permissive for that key, never stricter for anyone) — the
+documented fail-open trade under spray. <code>GcraRateLimiter::evictions</code>
+exposes the dropped-cell count as a monotonic counter in the
+balancer’s fail-open-picks style; extensions may not import
+observability, so no metric family is wired here (a future gauge can
+scrape it from the dataplane).</p>
+<p><strong>Legacy field mapping:</strong> a policy’s old <code>rate_limit {requests, window_seconds}</code> compiles to one rule with selector
+<code>[route]</code> and a single window of <code>requests</code> per <code>window_seconds</code>
+(burst = requests). Both fields may be set; both apply.</p>
+<p><strong>Burst vs sustained:</strong> a window of <code>requests_per.s = 10</code> with
+<code>burst: 20</code> is a GCRA quota replenishing 1 token per 1/10 s with a
+20-token bucket: 20 rapid requests pass (burst), sustained traffic
+above 10 r/s starts drawing 429s once the bucket empties. <code>burst</code>
+defaults to the window’s request count; under GCRA the first window
+can admit up to <code>burst + replenished</code> cells (documented, standard
+GCRA shape).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GcraOutcome.html" title="struct dwara_core::extensions::rate_limiter::GcraOutcome">Gcra<wbr>Outcome</a></dt><dd>Result of one <a href="struct.GcraRateLimiter.html#method.check" title="method dwara_core::extensions::rate_limiter::GcraRateLimiter::check"><code>GcraRateLimiter::check</code></a> across its stacked windows.</dd><dt><a class="struct" href="struct.GcraRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::GcraRateLimiter">Gcra<wbr>Rate<wbr>Limiter</a></dt><dd>Sharded GCRA limiter over one or more stacked windows (DW-017).</dd><dt><a class="struct" href="struct.GcraWindowSpec.html" title="struct dwara_core::extensions::rate_limiter::GcraWindowSpec">Gcra<wbr>Window<wbr>Spec</a></dt><dd>One window specification for <a href="struct.GcraRateLimiter.html#method.new" title="associated function dwara_core::extensions::rate_limiter::GcraRateLimiter::new"><code>GcraRateLimiter::new</code></a>.</dd><dt><a class="struct" href="struct.InMemoryRateLimiter.html" title="struct dwara_core::extensions::rate_limiter::InMemoryRateLimiter">InMemory<wbr>Rate<wbr>Limiter</a></dt><dd>In-memory fixed-window limiter (OSS skeleton).</dd><dt><a class="struct" href="struct.RateDecision.html" title="struct dwara_core::extensions::rate_limiter::RateDecision">Rate<wbr>Decision</a></dt><dd>Outcome of a <a href="trait.RateLimiter.html#tymethod.check" title="method dwara_core::extensions::rate_limiter::RateLimiter::check"><code>RateLimiter::check</code></a> call.</dd><dt><a class="struct" href="struct.RateLimitEngine.html" title="struct dwara_core::extensions::rate_limiter::RateLimitEngine">Rate<wbr>Limit<wbr>Engine</a></dt><dd>Policy-resolution and key-building engine for request rate limiting
+(DW-017). Compiled once per config generation.</dd><dt><a class="struct" href="struct.RateLimitEvaluation.html" title="struct dwara_core::extensions::rate_limiter::RateLimitEvaluation">Rate<wbr>Limit<wbr>Evaluation</a></dt><dd>The full rate-limit decision for one request (DW-041): the LIVE
+enforcement outcome (exactly the pre-dry-run <code>check</code> semantics over
+live bundles) plus the first dry bundle’s would-be denial, if any
+evaluated to one.</dd><dt><a class="struct" href="struct.RateLimitKeyContext.html" title="struct dwara_core::extensions::rate_limiter::RateLimitKeyContext">Rate<wbr>Limit<wbr>KeyContext</a></dt><dd>The per-request attributes a rule key can be built from (DW-017).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.RateLimitOutcome.html" title="enum dwara_core::extensions::rate_limiter::RateLimitOutcome">Rate<wbr>Limit<wbr>Outcome</a></dt><dd>What the engine decided for one request (DW-017).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.GCRA_STORE_SHARDS.html" title="constant dwara_core::extensions::rate_limiter::GCRA_STORE_SHARDS">GCRA_<wbr>STORE_<wbr>SHARDS</a></dt><dd>Number of independent shard locks in a <code>GcraShardStore</code>. Fixed (not
+CPU-count-derived) so the worst-case key bound per window
+(<code>GCRA_STORE_SHARDS * MAX_RATE_LIMITER_KEYS_PER_SHARD</code>) is the same
+number on every machine. Public for the eviction tests’ bound
+assertions.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.RateLimiter.html" title="trait dwara_core::extensions::rate_limiter::RateLimiter">Rate<wbr>Limiter</a></dt><dd>Swappable rate-limit backend.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.denied_outcome.html" title="fn dwara_core::extensions::rate_limiter::denied_outcome">denied_<wbr>outcome</a></dt></dl></section></div></main></body></html>

@@ -1,0 +1,91 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Load generator rig (DW-024, PERF-06); public for reuse and testing."><title>dwara_cli::loadgen - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_cli" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module loadgen</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_cli/index.html">dwara_<wbr>cli</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module loadgen</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#protocols" title="Protocols">Protocols</a></li><li><a href="#workloads" title="Workloads">Workloads</a></li><li><a href="#output" title="Output">Output</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>cli</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_cli</a></div><h1>Module <span>loadgen</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_cli/loadgen.rs.html#1-1640">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Load generator rig (DW-024, PERF-06); public for reuse and testing.</p>
+<p>A dependency-free (wrk/k6-less) load generator used by
+scripts/bench-macro.sh, scripts/bench-regression.sh, and
+.github/workflows/bench*.yml to measure the gateway’s end-to-end
+throughput and latency across HTTP/1, HTTP/2, and (feature-gated)
+HTTP/3, plus pool-reuse and streaming macro workloads.</p>
+<h3 id="protocols"><a class="doc-anchor" href="#protocols">§</a>Protocols</h3>
+<ul>
+<li><code>h1</code> (default): one worker task per connection; each worker owns a
+persistent hyper HTTP/1.1 connection (<code>client::conn::http1</code>, no
+pool) and issues back-to-back requests.</li>
+<li><code>h2</code>: each worker owns a persistent HTTP/2 connection
+(<code>client::conn::http2</code>, h2c prior-knowledge over cleartext) and
+issues back-to-back requests multiplexed on it.</li>
+<li><code>h3</code>: feature-gated behind the <code>h3</code> cargo feature (QUIC + h3). Each
+worker owns one QUIC connection and opens one bidirectional stream
+per request. h3 has NO in-process echo upstream (<code>--echo</code> is
+rejected with <code>--protocol h3</code>): point it at a real h3 listener
+(the gateway with a <code>protocol: h3</code> listener). <code>--insecure</code> skips
+certificate verification for loopback benchmark targets only.</li>
+</ul>
+<h3 id="workloads"><a class="doc-anchor" href="#workloads">§</a>Workloads</h3>
+<ul>
+<li><code>throughput</code> (default): owned persistent connection, back-to-back
+requests against a fixed-body echo. Measures raw max throughput.</li>
+<li><code>pool-reuse</code>: a shared pooled client (hyper-util legacy for h1/h2;
+one shared QUIC connection for h3) issues requests across all
+workers, exercising connection/stream reuse on the client side and
+the gateway’s upstream pool on the server side.</li>
+<li><code>streaming</code>: owned persistent connection against a streaming echo
+that emits <code>--stream-chunks</code> chunks of <code>--stream-chunk-bytes</code> bytes
+each (with <code>--stream-chunk-delay-ms</code> between chunks); the client
+drains the full streaming body. Measures streaming throughput.</li>
+</ul>
+<h3 id="output"><a class="doc-anchor" href="#output">§</a>Output</h3>
+<p>STDOUT: a human-readable block plus a machine-parseable <code>RESULT:</code>
+line (<code>RESULT rps=&lt;f64&gt; errors=&lt;u64&gt; p50_ns=.. p90_ns=.. p99_ns=.. p999_ns=.. err_p99_ns=..</code>). With <code>--json</code>, an additional <code>JSON:</code>
+line carries the same metrics plus the protocol/workload labels for
+the regression gate (<code>scripts/bench-regression.py</code>). Success
+percentiles cover only successful requests on warm connections (one
+unrecorded warmup request per worker); failed and timed-out requests
+land in err_p99. Exit code 1 if any request failed (the CI macro job
+asserts errors=0 via this).</p>
+<p>100k-connection runs: this rig imposes no connection cap, but the
+OS does - on Linux raise file descriptors first
+(<code>ulimit -n 1048576</code>); the macOS dev default is far lower, so local
+smoke runs should stay at 10k connections or fewer (see
+scripts/bench-macro.sh).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Args.html" title="struct dwara_cli::loadgen::Args">Args</a></dt><dd>Command-line shape (unit-tested in <code>tests/loadgen_unit.rs</code>; keep
+<code>parse_from</code>-able).</dd><dt><a class="struct" href="struct.H3Target.html" title="struct dwara_cli::loadgen::H3Target">H3Target</a></dt><dd>A resolved h3 target: authority (host:port), path, and the
+insecure-verifier flag.</dd><dt><a class="struct" href="struct.Histogram.html" title="struct dwara_cli::loadgen::Histogram">Histogram</a></dt><dd>Latency samples in nanoseconds; percentile computed by sorting at
+report time. Correctness is unit-tested in <code>tests/loadgen_unit.rs</code>.</dd><dt><a class="struct" href="struct.Pacer.html" title="struct dwara_cli::loadgen::Pacer">Pacer</a></dt><dd>Shared pacing state: the permit balance plus the single time base
+both sides of pacing use (#127).</dd><dt><a class="struct" href="struct.SharedState.html" title="struct dwara_cli::loadgen::SharedState">Shared<wbr>State</a></dt><dd>Per-run state shared by all workers: request/error counters plus the
+success and error latency histograms (error latencies kept separate so
+failures never contaminate the success percentiles).</dd><dt><a class="struct" href="struct.Totals.html" title="struct dwara_cli::loadgen::Totals">Totals</a></dt><dd>Per-run request/error counters shared by all workers.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.Protocol.html" title="enum dwara_cli::loadgen::Protocol">Protocol</a></dt><dd>Wire protocol to drive the target with.</dd><dt><a class="enum" href="enum.Workload.html" title="enum dwara_cli::loadgen::Workload">Workload</a></dt><dd>Macro workload shape (PERF-06).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.PACE_SLICE.html" title="constant dwara_cli::loadgen::PACE_SLICE">PACE_<wbr>SLICE</a></dt><dd>Pacing slice: the dispenser wakes and tops up every 50 ms, and a
+starved worker sleeps to the NEXT slice boundary. One constant (and
+the single epoch in <a href="struct.Pacer.html" title="struct dwara_cli::loadgen::Pacer"><code>Pacer</code></a>) is what keeps the two sides of pacing
+on the same grid.</dd><dt><a class="constant" href="constant.SAMPLE_CAP.html" title="constant dwara_cli::loadgen::SAMPLE_CAP">SAMPLE_<wbr>CAP</a></dt><dd>Retained-sample ceiling (about 32 MB of u64 samples).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.echo_server.html" title="fn dwara_cli::loadgen::echo_server">echo_<wbr>server</a></dt><dd>Minimal HTTP/1.1 echo server on 127.0.0.1:<code>port</code>, serving
+<code>body_len</code>-byte bodies forever (the in-process upstream for the rig).</dd><dt><a class="fn" href="fn.echo_server_streaming.html" title="fn dwara_cli::loadgen::echo_server_streaming">echo_<wbr>server_<wbr>streaming</a></dt><dd>Streaming HTTP/1.1 echo server on 127.0.0.1:<code>port</code>: each response is
+a chunked body of <code>chunks</code> frames of <code>chunk_bytes</code> bytes, with
+<code>chunk_delay_ms</code> between frames. Used by the <code>streaming</code> workload.</dd><dt><a class="fn" href="fn.pace_top_up.html" title="fn dwara_cli::loadgen::pace_top_up">pace_<wbr>top_<wbr>up</a></dt><dd>One dispenser tick’s top-up decision (#127): how many permits to add,
+given the cumulative total the rate schedule owes (<code>owed</code>), the
+cumulative total already dispensed (<code>paid</code>), and the current
+unconsumed <code>balance</code>. The top-up target is
+<code>min(owed, consumed + per_slice)</code> with <code>consumed = paid - balance</code>:</dd><dt><a class="fn" href="fn.run.html" title="fn dwara_cli::loadgen::run">run</a></dt><dd>Run the whole rig per <code>args</code>: optionally the in-process echo upstream,
+the pacing dispenser (positive <code>--rate</code>), one worker per connection
+(or per pooled-client slot), then the report. Returns the process
+exit code (1 if any request failed, 2 on invalid arguments).</dd><dt><a class="fn" href="fn.shared_h3_connection.html" title="fn dwara_cli::loadgen::shared_h3_connection">shared_<wbr>h3_<wbr>connection</a></dt><dd>Establish one shared h3 connection for the pool-reuse workload.
+Returns the <code>Endpoint</code> (must be kept alive for the duration of
+the run — dropping it closes the UDP socket and kills the QUIC
+connection), the cloneable <code>SendRequest</code>, and the driver
+<code>JoinHandle</code> (also must be kept alive).</dd><dt><a class="fn" href="fn.until_next_tick.html" title="fn dwara_cli::loadgen::until_next_tick">until_<wbr>next_<wbr>tick</a></dt><dd>Wait from <code>now</code> until the next pacing-slice boundary STRICTLY after
+<code>now</code>, where boundaries are <code>epoch + k * PACE_SLICE</code> (k = 1, 2, …).
+Pure arithmetic over <code>Instant</code>s; unit-tested in
+<code>tests/loadgen_unit.rs</code>. <code>now</code> before <code>epoch</code> (never in practice)
+reads as phase 0 and waits one full slice.</dd><dt><a class="fn" href="fn.worker.html" title="fn dwara_cli::loadgen::worker">worker</a></dt><dd>One load-generation connection: owns a persistent hyper connection,
+acquires pacing permits from <code>pacer</code>, and records each request’s
+outcome into <code>shared</code> until <code>deadline</code>. The first (warmup) request per
+connection is unrecorded, so percentiles measure pure RTT on warm
+connections.</dd><dt><a class="fn" href="fn.worker_h2.html" title="fn dwara_cli::loadgen::worker_h2">worker_<wbr>h2</a></dt><dd>h2 owned-connection worker: one persistent h2c connection, back-to-back
+requests multiplexed on it.</dd><dt><a class="fn" href="fn.worker_h3.html" title="fn dwara_cli::loadgen::worker_h3">worker_<wbr>h3</a></dt><dd>h3 owned-connection worker: one QUIC connection, back-to-back
+streams.</dd><dt><a class="fn" href="fn.worker_pooled_h1.html" title="fn dwara_cli::loadgen::worker_pooled_h1">worker_<wbr>pooled_<wbr>h1</a></dt><dd>h1 pool-reuse worker: issues requests through a shared hyper-util
+legacy client (which pools connections). No owned connection state.</dd><dt><a class="fn" href="fn.worker_pooled_h2.html" title="fn dwara_cli::loadgen::worker_pooled_h2">worker_<wbr>pooled_<wbr>h2</a></dt><dd>h2 pool-reuse worker: each worker holds its own clone of the h2
+<code>SendRequest</code> (it is <code>Clone</code> — clones share the same underlying
+connection but can issue concurrent streams without mutex
+serialization). This exercises real h2 stream multiplexing: many
+workers, many concurrent streams, one connection.</dd><dt><a class="fn" href="fn.worker_pooled_h3.html" title="fn dwara_cli::loadgen::worker_pooled_h3">worker_<wbr>pooled_<wbr>h3</a></dt><dd>h3 pool-reuse worker: each worker holds its own clone of the h3
+<code>SendRequest</code> (Clone — clones share the same QUIC connection but
+can issue concurrent streams without mutex serialization). This
+exercises real h3 stream multiplexing: many workers, many
+concurrent streams, one QUIC connection.</dd></dl></section></div></main></body></html>

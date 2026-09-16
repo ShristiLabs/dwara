@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["install","resolve_registry","search","select_entry"],"struct":["InstallResult"]};

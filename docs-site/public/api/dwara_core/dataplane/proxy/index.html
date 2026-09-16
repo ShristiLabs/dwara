@@ -1,0 +1,324 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Reverse-proxy dataplane (DW-009, feature analysis sections 4.1 and 9.2)."><title>dwara_core::dataplane::proxy - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module proxy</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module proxy</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>proxy</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/proxy.rs.html#1-8858">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Reverse-proxy dataplane (DW-009, feature analysis sections 4.1 and 9.2).</p>
+<p>Per request: snapshot lookup, route resolution (path via the compiled
+<code>RouteTable</code>, then the route’s non-path criteria: host, methods,
+headers, query, cookies), and the route action:</p>
+<ul>
+<li><code>proxy</code>: strip hop-by-hop headers, rebuild <code>Host</code> to the upstream
+authority (upstream <code>address:port</code>, NOT the inbound host — v1 choice:
+the gateway, not the client, names the origin it dials), inject
+<code>X-Forwarded-For</code> / <code>X-Real-IP</code>, and stream the request body through
+the pooled upstream client frame-by-frame. The upstream response
+(<code>Incoming</code>) is forwarded untouched after hop-by-hop stripping.
+ZERO default buffering: no code on this path collects a body.
+Backpressure is hyper’s natural frame-based flow — the gateway never
+spawns unbounded buffering tasks.</li>
+<li><code>redirect</code>: 3xx with a <code>Location</code> built from the configured
+scheme/host/path; when no <code>path</code> is configured the inbound path AND
+query are preserved verbatim (v1 semantics).</li>
+<li><code>respond</code>: fixed status/body straight from config.</li>
+<li>no route / criteria miss: 404 via the unified error envelope (v1
+does not model 405; a method or host mismatch reads as “no route
+for this request”).</li>
+</ul>
+<p>Forwarded-header semantics (chosen and frozen here):</p>
+<ul>
+<li><code>X-Forwarded-For</code>: if the direct connection peer is inside
+<code>gateway.trusted_proxies</code>, the inbound XFF value is preserved and the
+peer appended (<code>"&lt;inbound&gt;, &lt;peer&gt;"</code>). Otherwise (including the empty
+default list — trust nobody) the inbound XFF is DISCARDED and replaced
+with exactly the peer. A spoofed chain from an untrusted peer never
+reaches the upstream.</li>
+<li><code>X-Real-IP</code>: always the direct peer. When the peer is a trusted proxy
+this equals “the last trusted hop”; when it is the client itself it
+equals the client. One rule, no configuration.</li>
+</ul>
+<p>Protocol upgrades (generic 101 tunneling, not WebSocket-specific): a
+request carrying an <code>Upgrade</code> header on HTTP/1.1 is forwarded with its
+<code>Upgrade</code>/<code>Connection</code> headers intact; a <code>101</code> upstream response is
+relayed to the client and both connections are upgraded
+(<code>hyper::upgrade::on</code> both sides) and spliced with
+<code>tokio::io::copy_bidirectional</code> until EOF. HTTP/2 clients cannot tunnel
+upgrades the HTTP/1.1 way: an <code>Upgrade</code> request received over h2/h2c is
+answered <code>501 Not Implemented</code> with a clear message (extended CONNECT is
+out of scope for v1).</p>
+<p>Upstream error classification (details are logged server-side, never
+leaked to the client): connect timeout / per-attempt read timeout -&gt;
+504; endpoint refused / pool failure / no endpoints -&gt; 502; invalid TLS
+host -&gt; 500. A mid-body upstream abort (connection torn down partway
+through a response body, or the DW-014 body-idle timeout firing) is NOT
+retryable — the attempt was final once its headers resolved — and any
+frames already forwarded to the client end abruptly (HTTP/1.1
+truncation semantics, no synthesized tail). The abort IS reported as a
+passive-health failure for the picked endpoint (DW-014 closing the
+DW-012 gap), so chronically dying streams eject the endpoint.</p>
+<p>Retries, timeouts, budgets (DW-014): per-upstream <code>retries</code> config
+drives a bounded retry loop around the send — per attempt the balancer
+re-picks the endpoint (health ejection applies naturally), the
+per-attempt <code>read_ms</code> deadline is enforced by the upstream handle, and
+backoff is exponential with full jitter. Idempotency:
+GET/HEAD/OPTIONS/TRACE/PUT are retry-eligible by method; POST is
+retried ONLY when the upstream sets <code>retries.retry_post</code> (the opt-in
+governs POST exclusively — DELETE, PATCH, and every other
+non-idempotent method are never retried). A request
+body is replayed only when it was buffered within
+<code>retries.buffer_max_bytes</code> (opt-in; the default proxy path never
+buffers — zero-copy streaming is preserved byte-for-byte when retries
+are off). Every retry is charged against the upstream’s rolling-window
+retry budget; exhaustion fails requests through to the client.</p>
+<p>Authorization (DW-020): immediately after authN (and before rate
+limiting), the request runs through the <code>authz</code> module’s precedence
+chain — consumer &gt; route &gt; service &gt; listener &gt; global
+(<code>authz::AuthzChain</code>; every link has a config attachment:
+<code>consumers[].authorization</code>, <code>routes[].authorization</code>,
+<code>services[].authorization</code>, <code>listeners[].authorization</code>, and the
+gateway-level <code>authorization</code>) — consumer/group/scope/claim rules
+against the authenticated identity, IP ACLs against the EFFECTIVE
+client IP (XFF-resolved behind a trusted proxy, see DW-009). A deny
+at ANY level wins; otherwise the most specific level with rules
+governs. Denials answer 403 (generic body, reason logged server-side
+only); identity rules imply authentication, so an anonymous caller
+gets 401. An <code>ip_acl</code>-only block is the one authorization shape that
+can admit anonymous traffic.</p>
+<p>Local rate limiting (DW-017): after route resolution (and its
+criteria checks) but BEFORE cap admission, the request runs through
+the rate-limit engine (<code>RateLimitEngine</code>, built from the generation’s
+policies). Ordering rationale: rejecting early with a 429 is the
+cheapest thing the gateway can do with a request, so it precedes the
+more expensive admission layers; a 429 is emitted before any permit is
+acquired, so rate-limited requests never hold a cap slot (though the
+connection itself is held for the length of the response — accepted).
+A denied request answers 429 with <code>Retry-After</code> (whole seconds,
+rounded up, minimum 1) and <code>X-RateLimit-Limit</code> / <code>-Remaining</code> /
+<code>-Reset</code> headers from the BINDING constraint (the window that denied;
+see the rate_limiter module docs for stacked-window semantics).
+Admitted requests whose policies matched carry the same three
+<code>X-RateLimit-*</code> headers on their final response (only when a policy
+actually applied — a no-match request carries no rate headers).
+<code>X-RateLimit-Reset</code> is Unix epoch seconds of the binding window’s
+estimated full replenishment. Policy resolution follows the frozen
+precedence chain consumer &gt; route &gt; service &gt; listener &gt; global:
+every level with an attachment applies and the applicable rules
+AND together; the resolution order binds the 429 headers (the first
+denying rule wins them — see the rate_limiter module docs). UNROUTED
+traffic (no route / criteria miss) is NOT exempt: the listener and
+global links apply to it before the 404 is answered (rate limiting
+at minimum; the consumer/route/service links are unknowable before
+routing, and authentication sits after route resolution in the
+documented order), so 404 floods cannot bypass the limiter. The
+reserved paths (<code>/healthz</code>, <code>/readyz</code>, <code>/metrics</code>) stay exempt. When
+several rules deny, Retry-After is the maximum wait across denying
+rules while the Limit/Remaining headers come from the first binding
+one (see the rate_limiter module docs for multi-rule denial
+semantics). When rate headers are applied the GATEWAY is the source
+of truth for <code>X-RateLimit-*</code>: any upstream values are silently
+replaced.</p>
+<p>Consumer request budgets (DW-033): a quota-configured consumer’s
+requests additionally run a budget check AFTER rate limiting and
+BEFORE cap admission — an in-memory GCRA 429 is cheaper than a
+store-backed one, and a refused request never holds a concurrency
+slot. A budget 429 reuses the same builder (Retry-After +
+<code>X-RateLimit-*</code> from the binding budget; reset is the UTC window
+boundary), but budget headers appear on DENIALS only: admitted
+responses’ <code>X-RateLimit-*</code> family belongs to the rate limiter when
+it applies (two mechanisms racing to write the same header names on
+every success would be noise, not information). Budgets apply to
+authenticated CONFIG consumers exclusively (anonymous traffic and
+store-managed consumers have none); counters live in the state
+store, so quota config without <code>DWARA_STATE_DB</code> is inert (warned
+once). Usage is metered through <code>dwara_quota_*</code> metrics, the
+admin <code>GET /quotas/usage</code> endpoint, the analytics store’s
+per-consumer axis, and the <code>quota_near_limit</code> event (edge-triggered
+once per budget per window at 80%). See <code>state::quotas</code> for the
+window and evaluation semantics.</p>
+<p>Observability (DW-021): every request opens a root <code>request</code> span
+(request id, method, path WITHOUT the query string, consumer, route,
+listener) with child spans per phase — authn, authz, ratelimit,
+quota, admission, and one <code>upstream_attempt</code> per send (the balancer’s pick
+runs inside it as <code>upstream_pick</code>). On completion the wrapper
+records <code>requests_total</code>/<code>request_duration_seconds</code>, echoes
+<code>X-Request-Id</code> (a valid inbound value respected, printable ASCII up
+to 128 bytes; anything else replaced), and emits the sampled
+<code>dwara::access</code> log line. <code>/metrics</code> is reserved on every HTTP(S)
+listener like <code>/healthz</code> (it shadows configured routes). All
+gateway-generated error bodies — including the reserved health
+endpoints — are the JSON envelope <code>{"error":{code,message, request_id}}</code> with classification-only messages (upstream internals
+never leak). See the <code>observability</code> module for the full surface.
+Load shedding by priority (DW-016): the gateway concurrency cap admits
+requests ROUTE-AWARE — route resolution happens BEFORE cap admission
+(so the request’s priority class is known; 404s therefore never consume
+cap slots, a deliberate change from DW-015’s admit-at-entry ordering).
+Priority classes are 0 (lowest) to 10 (highest); 5 is the default. The
+design is a RESERVED BUCKET, not preemption — HTTP requests already in
+flight cannot be displaced, so under saturation the gateway sheds
+lower-priority ADMISSIONS first: requests at <code>high_priority</code> (&gt;= 8) may
+draw from a reserved sub-allowance of the cap (10% of the cap, minimum
+one permit) that lower-priority traffic cannot use. Normal traffic is
+shed (503 “gateway saturated”) as soon as the general allowance fills;
+high-priority traffic survives until the reserved bucket fills too.
+The bucket is carved only when a high-priority ROUTE is configured
+(priority &gt;= 8; consumer priorities are inert until authN — DW-019 —
+and never trigger carving), so priority-free configs behave
+byte-identically to DW-015 (full cap for everyone, same shed
+response). Sheds are 503, not 429 — 429 is reserved for rate limiting
+(DW-017); no <code>Retry-After</code> is set (immediate re-dispatch under a
+saturated gateway is not advised) and no shed marker header is added
+(the response stays a plain 503 status + the error envelope). Every admission and shed
+is counted per priority class in atomics on the dataplane
+(<code>DataPlane::priority_counters</code>; metrics exposure is DW-021).</p>
+<p>Circuit breaking and caps (DW-015): three independent admission
+layers wrap the send path. (1) The per-upstream BREAKER
+(<code>upstreams[].breaker</code>, see <code>breaker</code>) is checked BEFORE the endpoint
+pick and before every (re)attempt — an open upstream answers 503
+“upstream circuit open” with a <code>Retry-After</code> of the seconds until
+half-open; in-flight requests complete normally, and the breaker is a
+layer ABOVE endpoint ejection (a fail-open pick still flows through
+it; a breaker-open period ejects nothing, since health sees no
+traffic). (2) The per-upstream PENDING cap (<code>upstreams[].max_pending</code>)
+rejects requests that would have to WAIT for an outbound connection
+slot: 503 “upstream saturated”, immediately, no queueing (the default
+is the DW-008 queue-forever behavior). (3) The GATEWAY concurrency cap
+(<code>gateway.max_concurrent_requests</code>) admits requests at <code>handle()</code>
+entry — after the reserved <code>/healthz</code>/<code>/readyz</code> paths, so probes
+answer under saturation — rejecting over-cap requests with 503
+“gateway saturated” immediately; a slot is released when the response
+body completes (or the client connection drops).</p>
+<p>Upgrade forwarding on non-tunnel requests: an <code>Upgrade</code> header arriving
+on an ordinary proxied request (no <code>101</code> ever comes back) is forwarded
+upstream, together with its <code>Connection</code> tokens, rather than stripped.
+This is deliberate: the upstream, not the gateway, decides protocol
+switches — stripping <code>Upgrade</code> would break legitimate upgrades (h2c,
+WebSocket handshakes that begin as a normal request) the moment the
+upstream wanted to accept one. RFC-strict proxies that strip
+connection-oriented headers wholesale would reject this; we chose
+upgrade transparency, and the behavior is pinned by the coverage suite.</p>
+<p>Maintenance mode (DW-041): a route carrying a <code>maintenance</code> block is
+answered by the GATEWAY, never the route action — a 503 carrying
+<code>Retry-After</code> and the JSON envelope (<code>maintenance</code> code,
+operator-optional message).
+The check runs IMMEDIATELY after route resolution, BEFORE the route’s
+request limits: maintenance is a statement about the route’s
+availability, not about any request’s shape, so every matched request
+gets the same answer (an over-limit request is told “we’re down”, not
+“your headers are too big” — fixing the headers would still leave it
+refused) and the gateway skips evaluating limits for a request it will
+refuse anyway. Preflights are the one exemption: a CORS preflight on
+a CORS-configured route still answers 204 (the preflight is a Fetch
+handshake about the gateway’s own cross-origin policy, sent without
+credentials; failing it surfaces in the browser as an opaque CORS
+error and hides the 503 the operator wants clients to see on the
+actual request — which DOES get 503, carrying the policy’s
+actual-response CORS headers so browser clients can read the
+envelope). Reserved paths answer before route resolution and are
+unaffected: probes and scrapes keep working through maintenance.
+Toggled per generation by config reload; unrouted traffic is
+unaffected (404 stays 404).</p>
+<p>Policy dry run (DW-041, monitor mode): every policy phase that can
+reject supports a per-attachment <code>dry_run</code> flag — route limits
+(<code>routes[].limits.dry_run</code>, 413/431), authorization
+(<code>authorization.dry_run</code> at any of the five levels, 401/403), rate
+limiting (<code>policies[].dry_run</code>, 429), and load shedding
+(<code>gateway.load_shed_dry_run</code>, 503). A dry phase still EVALUATES, but
+on a would-reject it logs one structured <code>dwara::policy</code> warn event
+(phase, would-be status, reason, route, consumer, request id),
+increments <code>dwara_policy_dry_run_total{phase,route}</code>, and lets the
+request PROCEED. The invariant throughout: dry run never makes
+enforcement more permissive — a LIVE deny always enforces (the authz
+resolver walks past a dry deny and stops only at a live one; live
+rate-limit bundles 429 regardless of dry bundles on the same
+request). Dry rate-limit rules contribute no <code>X-RateLimit-*</code> headers;
+a dry route-limits block leaves the streaming body guard unarmed
+(only the cheap up-front checks are observable). Authentication
+(401 on invalid/missing credentials, <code>auth_required</code>) is identity
+verification, not a policy phase, and has no dry-run flag. The
+metric + log events ARE the dry-run report (§9.3): no endpoint, no
+buffer — scrape the counter and grep <code>dwara::policy</code>.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CountingBody.html" title="struct dwara_core::dataplane::proxy::CountingBody">Counting<wbr>Body</a></dt><dd>A response body wrapper that counts outbound bytes as they stream
+to the client (PERF-12, #209), WITHOUT buffering. Each data frame
+that passes through <code>poll_frame</code> increments the shared
+<code>Arc&lt;AtomicU64&gt;</code> (the same one in <a href="../../observability/struct.AccessRecord.html#structfield.bytes_out" title="field dwara_core::observability::AccessRecord::bytes_out"><code>AccessRecord::bytes_out</code></a>).</dd><dt><a class="struct" href="struct.DataPlane.html" title="struct dwara_core::dataplane::proxy::DataPlane">Data<wbr>Plane</a></dt><dd>The proxy dataplane: reads config generations from <a href="../../snapshot/struct.ConfigState.html" title="struct dwara_core::snapshot::ConfigState"><code>ConfigState</code></a> and
+keeps an <a href="../upstream/struct.UpstreamRegistry.html" title="struct dwara_core::dataplane::upstream::UpstreamRegistry"><code>UpstreamRegistry</code></a> coupled to each generation.</dd><dt><a class="struct" href="struct.PriorityCounters.html" title="struct dwara_core::dataplane::proxy::PriorityCounters">Priority<wbr>Counters</a></dt><dd>Per-priority-class admission/shed counters (DW-016). Plain atomics on
+the dataplane — they survive config reloads (unlike the cap semaphores)
+and are never reset. Exposure through the admin/metrics surface is
+DW-021; tests read them directly.</dd><dt><a class="struct" href="struct.StoreEventDurability.html" title="struct dwara_core::dataplane::proxy::StoreEventDurability">Store<wbr>Event<wbr>Durability</a></dt><dd>REL-14 (#249): concrete <code>EventDurability</code> backed by the SQLite
+<code>StateStore</code>. The dataplane owns both the store and the event bus,
+so it provides this adapter to the events module’s trait. The
+implementation is best-effort: a SQLite error is logged but does
+not block the emit path (the event still goes to the in-memory
+channel).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ProxyBody.html" title="enum dwara_core::dataplane::proxy::ProxyBody">Proxy<wbr>Body</a></dt><dd>Body type of every proxied/gateway-generated response: a small
+fully-buffered gateway message (<code>Full</code>), the untouched streaming
+upstream body (<a href="../upstream/struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody"><code>UpstreamBody</code></a>: the pooled stream wrapped with the
+DW-014 write-timeout / mid-body health-report knobs), a route-
+compressed stream (<a href="../compression/struct.CompressedBody.html" title="struct dwara_core::dataplane::compression::CompressedBody"><code>crate::dataplane::compression::CompressedBody</code></a>, DW-027 — the codec wrapper
+around either of the other two), or an over-cap cache passthrough
+(<a href="../response_cache/struct.PassthroughBody.html" title="struct dwara_core::dataplane::response_cache::PassthroughBody"><code>crate::dataplane::response_cache::PassthroughBody</code></a>, DW-037 —
+the buffered prefix followed by the untouched remainder).</dd><dt><a class="enum" href="enum.ProxyBodyError.html" title="enum dwara_core::dataplane::proxy::ProxyBodyError">Proxy<wbr>Body<wbr>Error</a></dt><dd>Error of a <a href="enum.ProxyBody.html" title="enum dwara_core::dataplane::proxy::ProxyBody"><code>ProxyBody</code></a>: upstream stream failure or a compression
+codec failure (DW-027). The <code>Full</code> variant is infallible.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_PRIORITY.html" title="constant dwara_core::dataplane::proxy::DEFAULT_PRIORITY">DEFAULT_<wbr>PRIORITY</a></dt><dd>The default priority class (DW-016): requests on routes without an
+explicit <code>priority</code> shed and are shed as class 5.</dd><dt><a class="constant" href="constant.HIGH_PRIORITY.html" title="constant dwara_core::dataplane::proxy::HIGH_PRIORITY">HIGH_<wbr>PRIORITY</a></dt><dd>The priority class at or above which a request may draw from the
+gateway cap’s reserved sub-allowance (DW-016).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.apply_path_rewrite.html" title="fn dwara_core::dataplane::proxy::apply_path_rewrite">apply_<wbr>path_<wbr>rewrite</a></dt><dd>Apply a proxy action’s path rewrite (DW-010). <code>params</code> are the
+<code>{param}</code> captures of the exact-template match for this request (empty
+for regex/prefix routes); they are available to <code>regex</code> substitutions
+as <code>$name</code> references that miss the pattern’s own capture groups.
+Returns the rewritten path; a rewrite that does not apply (e.g.
+<code>strip_prefix</code> on a path that does not start with the prefix) leaves
+the path unchanged. The query string is NOT touched here — the caller
+re-attaches it. Public for the router golden-file tests.</dd><dt><a class="fn" href="fn.expand_substitution.html" title="fn dwara_core::dataplane::proxy::expand_substitution">expand_<wbr>substitution</a></dt><dd>Expand <code>$1</code> / <code>${name}</code> references against a regex match. Lookup order
+for a name: numeric -&gt; pattern capture group by index; otherwise -&gt;
+pattern named group, then the route’s <code>{param}</code> path capture; unknown
+references expand to the empty string. A lone <code>$</code> (end of string, or
+followed by a non-identifier character) is kept literally.</dd><dt><a class="fn" href="fn.grpc_request.html" title="fn dwara_core::dataplane::proxy::grpc_request">grpc_<wbr>request</a></dt><dd>Whether a request is gRPC (DW-039): HTTP/2 with an
+<code>application/grpc</code> content type (the spec’s family prefix —
+<code>application/grpc+proto</code>, <code>+json</code>, … all match).</dd><dt><a class="fn" href="fn.handle.html" title="fn dwara_core::dataplane::proxy::handle">handle</a></dt><dd>Handle one request against the current generation. Never panics; every
+failure path is a classified response. Generic over the request body so
+tests and alternative frontends can drive it with any streaming body.
+Takes the dataplane as an <code>Arc</code> reference: the response cache’s
+stale-while-revalidate path (DW-037) spawns background revalidations
+that need the dataplane to outlive the request.</dd><dt><a class="fn" href="fn.parse_cookies.html" title="fn dwara_core::dataplane::proxy::parse_cookies">parse_<wbr>cookies</a></dt><dd>Parse a <code>Cookie</code> request header into (name, value) pairs. Simple
+RFC-6265-shaped parsing: split on <code>;</code>, trim spaces, split each pair on
+the FIRST <code>=</code>. No quoting/encoding handling in v1 — values are matched
+exactly as sent. Public for the router golden-file tests.</dd><dt><a class="fn" href="fn.parse_grpc_timeout.html" title="fn dwara_core::dataplane::proxy::parse_grpc_timeout">parse_<wbr>grpc_<wbr>timeout</a></dt><dd>Parse a <code>grpc-timeout</code> value (DW-039): 1..=8 ASCII decimal digits
+plus a unit — Hours, Minutes, Seconds, milliseconds, microseconds,
+nanoseconds (RFC <code>SnH</code> grammar, case-exact per the spec). Values
+that overflow the duration space saturate at one day (a longer RPC
+budget than that is un-enforceable by this gateway anyway); garbage
+is <code>None</code> (the caller treats absence as no deadline).</dd><dt><a class="fn" href="fn.refresh_quota_gauges.html" title="fn dwara_core::dataplane::proxy::refresh_quota_gauges">refresh_<wbr>quota_<wbr>gauges</a></dt><dd>Refresh the quota observation gauges at scrape time (DW-033): the
+current-window usage and the configured cap of every
+quota-configured consumer’s every budget, read from the state
+store (the same <code>current_usage</code> walk the admin <code>/quotas/usage</code>
+endpoint and the near-limit trigger use). Series cardinality is
+config-bounded (quota consumers x the closed daily/monthly set).
+A consumer REMOVED from the config by a reload keeps its last
+series values until restart — the accepted staleness trade of the
+scrape-time snapshot model (the rate-limiter gauges carry the same
+caveat); the used/limit ratio of a stale pair stays correct
+because both series freeze together. No store (quotas inert) or a
+store error skips the refresh without failing the scrape.</dd><dt><a class="fn" href="fn.refresh_rate_limiter_gauges.html" title="fn dwara_core::dataplane::proxy::refresh_rate_limiter_gauges">refresh_<wbr>rate_<wbr>limiter_<wbr>gauges</a></dt><dd>Refresh the rate-limiter observation gauges from the CURRENT
+engine at scrape time (#132) — the same snapshot model as
+<a href="../upstream/fn.refresh_observation_gauges.html" title="fn dwara_core::dataplane::upstream::refresh_observation_gauges"><code>refresh_observation_gauges</code></a>: the walk lives on the dataplane
+(the extensions-side engine must stay free of observability
+imports), the hot check path stays pure atomics with zero metrics
+coupling, and the observability side only records what it is
+handed. Both gauges are aggregate and unlabeled — cardinality is
+never per key. The eviction figure resets when a reload rebuilds
+the engine (documented family caveat).</dd><dt><a class="fn" href="fn.resolve_priority.html" title="fn dwara_core::dataplane::proxy::resolve_priority">resolve_<wbr>priority</a></dt><dd>Resolve a request’s load-shedding priority class (DW-016). This is the
+documented PRIORITY-RESOLVER seam: consumer (once known) overrides the
+route, the route overrides the default. Today authentication is not
+wired (DW-019/DW-020), so the caller passes <code>None</code> and priority is
+purely route-level; once authN identifies the consumer, pass
+<code>Some(consumer)</code> here and its <code>priority</code> wins over the route’s — no
+other change to the shedding path is needed.</dd><dt><a class="fn" href="fn.route_applies.html" title="fn dwara_core::dataplane::proxy::route_applies">route_<wbr>applies</a></dt><dd>Apply the route’s non-path criteria. All criteria are AND-ed. Empty
+method list = all methods; host matches the <code>Host</code> header
+(case-insensitive, with or without a port); headers must all be present
+with exact values; query and cookie entries match on presence, or on
+exact value when one is configured. <code>accept</code> is the route’s COMPILED
+<code>match.accept</code> media type (<code>RouteTable::accept_media_type</code>), never the
+raw config string — padding and case are normalized once at snapshot
+compile, so a padded spelling matches exactly like its trimmed form.
+Public so router golden-file tests (tests/router_golden.rs) can
+exercise the full resolution pipeline without a live upstream.</dd><dt><a class="fn" href="fn.strip_hop_by_hop.html" title="fn dwara_core::dataplane::proxy::strip_hop_by_hop">strip_<wbr>hop_<wbr>by_<wbr>hop</a></dt><dd>Header names always treated as hop-by-hop per RFC 7230 section 6.1
+(plus the de-facto <code>Proxy-Connection</code>), and any name listed in ANY
+<code>Connection</code> header (RFC 7230 allows multiple; only <code>get_all</code> sees them
+all). <code>TE</code> is dropped — EXCEPT for a gRPC request (DW-039), whose
+spec-mandated <code>TE: trailers</code> rides through so conformant gRPC
+servers see the client’s dialect (h2 carries trailers natively; the
+header is the courtesy contract). <code>Upgrade</code> (and its <code>Connection</code>
+token) survives only when the request is being tunneled.</dd></dl></section></div></main></body></html>

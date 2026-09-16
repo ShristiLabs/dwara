@@ -1,0 +1,153 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The `ai:` configuration block (DW-075): AI provider adapters."><title>dwara_core::config::ai - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module ai</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module ai</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">config</a></div><h1>Module <span>ai</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/config/ai.rs.html#1-1402">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The <code>ai:</code> configuration block (DW-075): AI provider adapters.</p>
+<p>This is the source shape only — the runtime translation lives in the
+AI domain one level up (see the <code>ai</code> module’s <code>AiRuntime</code>), which
+consumes these types at compile time. The block is ADDITIVE to the
+gateway schema: absent (the default), the gateway has no AI surface
+at all; present, it declares the provider pool (<code>providers:</code>) and
+the model alias table (<code>models:</code>) that map an OpenAI-shaped client
+request onto a concrete provider call.</p>
+<p>Design notes (DW-075):</p>
+<ul>
+<li>A provider names an UPSTREAM (<code>upstreams:</code> entry), not a raw base
+URL: the provider’s transport — endpoint set, TLS trust, connection
+pooling, timeouts, breaker, passive health — is the SAME machinery
+every other upstream gets, and the adapter layer stays pure
+request/response translation with no HTTP client of its own. A
+multi-region provider pool is then just an upstream with several
+endpoints.</li>
+<li>Authentication is a verbatim header (<code>auth.header</code> + <code>auth.value</code>)
+rather than a per-provider auth enum: providers disagree on the
+convention (OpenAI wants <code>Authorization: Bearer ...</code>, Anthropic
+<code>x-api-key: ...</code>, Gemini <code>x-goog-api-key: ...</code>), and a verbatim
+pair expresses all of them without the schema growing a variant
+per provider. <code>value</code> is secret-bearing: inline values are
+redacted in every config echo (DW-045) and <code>${...}</code> references
+resolve at config-compile time, failing the generation closed when
+unresolvable.</li>
+<li><code>models:</code> is a map from the MODEL ALIAS the client names in the
+request body to the provider that serves it plus the provider’s own
+model identifier. The alias is what the gateway echoes back in the
+response; the provider model never leaks to the client.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.A2aAgent.html" title="struct dwara_core::config::ai::A2aAgent">A2aAgent</a></dt><dd>One A2A agent (DW-114 <code>ai.a2a.agents[]</code>). The gateway routes a
+chat request to the agent by translating it into an A2A task-submit
+body and placing the call through the named upstream. The Agent
+Card (discovery doc) declares the agent’s capabilities and
+authentication; it is parsed at compile time.</dd><dt><a class="struct" href="struct.A2aAgentCard.html" title="struct dwara_core::config::ai::A2aAgentCard">A2aAgent<wbr>Card</a></dt><dd>The Agent Card source (DW-114): a file path or an inline JSON
+object. One of the two is required when <code>card</code> is present.</dd><dt><a class="struct" href="struct.A2aConfig.html" title="struct dwara_core::config::ai::A2aConfig">A2aConfig</a></dt><dd>A2A (agent-to-agent) protocol config (DW-114 <code>ai.a2a</code>). Declares
+the remote A2A agents the gateway can route chat requests to and
+the session policy for agent-to-agent task sessions. The block is
+ADDITIVE: absent (the default), the gateway has no A2A surface.
+Compiled into every build (no cargo feature).</dd><dt><a class="struct" href="struct.A2aSessions.html" title="struct dwara_core::config::ai::A2aSessions">A2aSessions</a></dt><dd>A2A session policy (DW-114 <code>ai.a2a.sessions</code>), mirroring MCP.</dd><dt><a class="struct" href="struct.AiAbTest.html" title="struct dwara_core::config::ai::AiAbTest">AiAb<wbr>Test</a></dt><dd>One A/B test (DW-086 <code>ai.experiments.ab_tests.&lt;name&gt;</code>): two or
+more variants, each naming a model alias, an optional prompt
+version, and a weight. A model alias declares <code>ab_test: &lt;name&gt;</code>
+to be served by one; the test is evaluated per request (a
+deterministic weighted pick by request id selects a variant).</dd><dt><a class="struct" href="struct.AiAbVariant.html" title="struct dwara_core::config::ai::AiAbVariant">AiAb<wbr>Variant</a></dt><dd>One variant of an A/B test (DW-086
+<code>ai.experiments.ab_tests.&lt;name&gt;.variants[]</code>).</dd><dt><a class="struct" href="struct.AiCanaryVersion.html" title="struct dwara_core::config::ai::AiCanaryVersion">AiCanary<wbr>Version</a></dt><dd>One weighted version of a canary split (DW-076
+<code>ai.models.&lt;alias&gt;.canary[]</code>).</dd><dt><a class="struct" href="struct.AiConfig.html" title="struct dwara_core::config::ai::AiConfig">AiConfig</a></dt><dd>The <code>ai:</code> top-level block (DW-075). Absent: no AI surface. Present:
+validation requires at least one provider and at least one model —
+an <code>ai:</code> block that can never serve a model is an authoring error,
+not a silently inert config.</dd><dt><a class="struct" href="struct.AiCredentialPool.html" title="struct dwara_core::config::ai::AiCredentialPool">AiCredential<wbr>Pool</a></dt><dd>DW-080 (Ent): a credential pool for a provider — multiple API keys
+rotated across to aggregate rate-limit headroom. Each entry is an
+<code>AiProviderAuth</code> (same header+value shape as the singular <code>auth</code>
+field). The pool is used INSTEAD of <code>auth</code>; validation rejects a
+provider that sets both.</dd><dt><a class="struct" href="struct.AiEval.html" title="struct dwara_core::config::ai::AiEval">AiEval</a></dt><dd>One regression eval (DW-086 <code>ai.experiments.evals.&lt;name&gt;</code>): a
+golden set of input/expected cases plus an optional prompt
+version. The admin API runs it against a model alias (or an A/B
+test’s variants) and stores the results in analytics.</dd><dt><a class="struct" href="struct.AiEvalCase.html" title="struct dwara_core::config::ai::AiEvalCase">AiEval<wbr>Case</a></dt><dd>One eval case (DW-086
+<code>ai.experiments.evals.&lt;name&gt;.golden_set[]</code>).</dd><dt><a class="struct" href="struct.AiExperiments.html" title="struct dwara_core::config::ai::AiExperiments">AiExperiments</a></dt><dd>Prompt experimentation (DW-086 <code>ai.experiments</code>): prompt
+versioning, A/B model comparison, regression evals, and feedback
+ingestion. Absent (the default): no experiments surface.</dd><dt><a class="struct" href="struct.AiFallbackChainPolicy.html" title="struct dwara_core::config::ai::AiFallbackChainPolicy">AiFallback<wbr>Chain<wbr>Policy</a></dt><dd>A fallback-chain routing policy (DW-085 <code>kind: fallback_chain</code>):
+cheap-model-first with complexity-signal escalation. The
+<code>cheap</code> and <code>escalate_to</code> fields name OTHER model aliases (plain
+chain/canary aliases — a policy composes over DW-076 routing, so
+it has no provider/model pair of its own).</dd><dt><a class="struct" href="struct.AiFeedbackConfig.html" title="struct dwara_core::config::ai::AiFeedbackConfig">AiFeedback<wbr>Config</a></dt><dd>Feedback ingestion config (DW-086
+<code>ai.experiments.feedback</code>).</dd><dt><a class="struct" href="struct.AiGovernance.html" title="struct dwara_core::config::ai::AiGovernance">AiGovernance</a></dt><dd>Model governance (DW-084 <code>ai.governance</code>): per-team model
+allowlists plus a shadow-audit switch. A team is a POLICY name
+(the same vocabulary the token budgets use for <code>scope: policy</code>):
+every consumer attaching a policy with an allowlist entry is
+restricted to that allowlist’s aliases. The check runs BEFORE
+routing, against the client-facing alias (the <code>model</code> value in
+the request body), so a typo or a renamed alias is blocked at the
+edge rather than surfacing as a provider 404. Multiple policies
+with allowlists that bind one request intersect (deny-wins): the
+model must be in EVERY binding allowlist, matching the authz
+deny-anywhere-wins principle. Consumers with no binding allowlist
+policy are unrestricted (fail-open, the DW-017 default posture).
+<code>audit: true</code> records BOTH allowed and denied attempts into the
+<code>ai_governance_events</code> analytics table for shadow review.</dd><dt><a class="struct" href="struct.AiGuardrailRule.html" title="struct dwara_core::config::ai::AiGuardrailRule">AiGuardrail<wbr>Rule</a></dt><dd>One guardrail rule (DW-082 <code>ai.guardrails.rules[]</code>). A rule
+declares a <code>kind</code> (what to check), an <code>action</code> (what to do on a
+match), a <code>phase</code> (prompt, response, or both), the patterns or
+schema to check against, and the policies it attaches to.</dd><dt><a class="struct" href="struct.AiGuardrails.html" title="struct dwara_core::config::ai::AiGuardrails">AiGuardrails</a></dt><dd>Guardrails (DW-082 <code>ai.guardrails</code>): a list of rules that inspect
+prompts and responses for prompt-injection, PII, banned content,
+and output schema conformance. Each rule is one check applied at
+the prompt phase (before the provider call) and/or the response
+phase (after). Policy-scoped rules apply only to consumers
+attaching a listed policy; an empty <code>policies</code> list applies to
+all. See <a href="struct.AiGuardrailRule.html" title="struct dwara_core::config::ai::AiGuardrailRule"><code>AiGuardrailRule</code></a> for the per-rule shape.</dd><dt><a class="struct" href="struct.AiLatencyCostCandidate.html" title="struct dwara_core::config::ai::AiLatencyCostCandidate">AiLatency<wbr>Cost<wbr>Candidate</a></dt><dd>One candidate in a latency-vs-cost policy (DW-085
+<code>ai.routing_policies.&lt;name&gt;.candidates[]</code>).</dd><dt><a class="struct" href="struct.AiLatencyCostPolicy.html" title="struct dwara_core::config::ai::AiLatencyCostPolicy">AiLatency<wbr>Cost<wbr>Policy</a></dt><dd>A latency-vs-cost routing policy (DW-085 <code>kind: latency_cost</code>):
+static config-based selection. The operator declares cost/latency
+scores per candidate and a preference; the policy sorts candidates
+at compile time and picks the best one deterministically (no
+runtime metrics needed).</dd><dt><a class="struct" href="struct.AiLogging.html" title="struct dwara_core::config::ai::AiLogging">AiLogging</a></dt><dd>Prompt/response logging (DW-081 <code>ai.logging</code>): opt-in capture of
+the canonical prompt and response with PII redaction, sampling,
+and retention. Capture is OFF by default (privacy-first): the
+<code>enabled</code> field defaults to false, so an <code>ai.logging</code> block
+without <code>enabled: true</code> captures nothing. When on, a redaction
+pass scrubs PII/secrets before storage, <code>sample_rate</code> controls
+volume, and <code>retention_secs</code> ages records out. Per-consumer
+<code>ai_logging</code> overrides respect tenant preference.</dd><dt><a class="struct" href="struct.AiLoggingExternalSink.html" title="struct dwara_core::config::ai::AiLoggingExternalSink">AiLogging<wbr>External<wbr>Sink</a></dt><dd>SCALE-12 (#190): external sink configuration for prompt/response
+logs. The sync command is invoked by the analytics maintenance
+tick with the export directory as its first argument. Failures are
+logged and silently ignored (best-effort sync).</dd><dt><a class="struct" href="struct.AiMcpConfig.html" title="struct dwara_core::config::ai::AiMcpConfig">AiMcp<wbr>Config</a></dt><dd>MCP gateway config (DW-087 <code>ai.mcp</code>): the tool table, session
+policy, and reserved path. Tools are configured with upstream
+references; the gateway proxies tool calls to upstream HTTP
+endpoints (POST JSON body, get JSON response). The gateway is a
+router, not a tool executor.</dd><dt><a class="struct" href="struct.AiMcpPrompt.html" title="struct dwara_core::config::ai::AiMcpPrompt">AiMcp<wbr>Prompt</a></dt><dd>AI-11 (#200): One MCP static prompt template
+(<code>ai.mcp.prompts.&lt;name&gt;</code>). Prompts are served inline. The
+template body is returned in <code>prompts/get</code> responses, with
+optional argument substitution.</dd><dt><a class="struct" href="struct.AiMcpPromptArgument.html" title="struct dwara_core::config::ai::AiMcpPromptArgument">AiMcp<wbr>Prompt<wbr>Argument</a></dt><dd>AI-11 (#200): One prompt argument definition.</dd><dt><a class="struct" href="struct.AiMcpResource.html" title="struct dwara_core::config::ai::AiMcpResource">AiMcp<wbr>Resource</a></dt><dd>AI-11 (#200): One MCP static resource (<code>ai.mcp.resources.&lt;name&gt;</code>).
+Resources are served inline (no upstream proxy). The content is
+returned verbatim in <code>resources/read</code> responses.</dd><dt><a class="struct" href="struct.AiMcpSessions.html" title="struct dwara_core::config::ai::AiMcpSessions">AiMcp<wbr>Sessions</a></dt><dd>MCP session policy (DW-087 <code>ai.mcp.sessions</code>).</dd><dt><a class="struct" href="struct.AiMcpTool.html" title="struct dwara_core::config::ai::AiMcpTool">AiMcp<wbr>Tool</a></dt><dd>One MCP tool (DW-087 <code>ai.mcp.tools.&lt;name&gt;</code>). The gateway proxies
+tool calls to the named upstream’s HTTP endpoint: the tool’s
+arguments are sent as the JSON request body, and the upstream’s
+response body becomes the tool’s output.</dd><dt><a class="struct" href="struct.AiModel.html" title="struct dwara_core::config::ai::AiModel">AiModel</a></dt><dd>One model alias mapping (DW-075 <code>ai.models{alias}</code>).</dd><dt><a class="struct" href="struct.AiModelTarget.html" title="struct dwara_core::config::ai::AiModelTarget">AiModel<wbr>Target</a></dt><dd>One provider/model pair an alias can route to (DW-076): the primary
+shape reused by failover entries and canary versions.</dd><dt><a class="struct" href="struct.AiPricing.html" title="struct dwara_core::config::ai::AiPricing">AiPricing</a></dt><dd>Per-model token pricing (DW-079 <code>ai.pricing.&lt;provider_model&gt;</code>).
+Costs are integer MICRO-USD per 1 000 tokens (1 000 000 micro-USD =
+$1.00 — no floating-point money). The key in the parent map is the
+PROVIDER MODEL identifier (the actual model the provider charges
+for), not the client-facing alias. Spend is computed as
+<code>input_tokens * input_per_1k_micros / 1000 + output_tokens * output_per_1k_micros / 1000</code> (integer micro-USD, saturating).</dd><dt><a class="struct" href="struct.AiPromptVersion.html" title="struct dwara_core::config::ai::AiPromptVersion">AiPrompt<wbr>Version</a></dt><dd>One prompt version (DW-086
+<code>ai.experiments.prompts.&lt;name&gt;.versions.&lt;version&gt;</code>): a system
+message prepended to the request’s messages when this version is
+active.</dd><dt><a class="struct" href="struct.AiPromptVersions.html" title="struct dwara_core::config::ai::AiPromptVersions">AiPrompt<wbr>Versions</a></dt><dd>One prompt’s version set (DW-086 <code>ai.experiments.prompts.&lt;name&gt;</code>):
+a map of version names to system messages plus the active version.
+The active version can be overridden at runtime via the admin API.</dd><dt><a class="struct" href="struct.AiProvider.html" title="struct dwara_core::config::ai::AiProvider">AiProvider</a></dt><dd>One AI provider (DW-075 <code>ai.providers[]</code>).</dd><dt><a class="struct" href="struct.AiProviderAuth.html" title="struct dwara_core::config::ai::AiProviderAuth">AiProvider<wbr>Auth</a></dt><dd>Verbatim authentication header for a provider (DW-075
+<code>ai.providers[].auth</code>). <code>value</code> is SECRET-BEARING: an inline value is
+replaced by the redaction placeholder in every config echo, and a
+<code>${...}</code> reference is resolved at config-compile time (DW-045).</dd><dt><a class="struct" href="struct.RedactionConfig.html" title="struct dwara_core::config::ai::RedactionConfig">Redaction<wbr>Config</a></dt><dd>PII redaction configuration (DW-081 <code>ai.logging.redaction</code>).
+Built-in patterns scrub common PII/secrets; custom patterns add
+deployment-specific scrubbing. All patterns are compiled into a
+single <code>regex::RegexSet</code> for one-pass efficiency.</dd><dt><a class="struct" href="struct.SemanticCacheConfig.html" title="struct dwara_core::config::ai::SemanticCacheConfig">Semantic<wbr>Cache<wbr>Config</a></dt><dd>Semantic cache config (DW-083 <code>ai.semantic_cache</code>): an
+embedding-similarity cache for AI prompts. A paraphrased prompt
+within the cosine-similarity threshold returns the cached response
+with no provider call and no token spend. Uses an external
+embedding service (OpenAI-compatible /v1/embeddings API) to
+vectorize prompts and <code>hnsw_rs</code> (pure Rust HNSW) for approximate
+nearest neighbor search. Compiled into every build (<code>hnsw_rs</code> is
+an unconditional dependency).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AiGuardrailAction.html" title="enum dwara_core::config::ai::AiGuardrailAction">AiGuardrail<wbr>Action</a></dt><dd>Guardrail action (DW-082 <code>ai.guardrails.rules[].action</code>).</dd><dt><a class="enum" href="enum.AiGuardrailKind.html" title="enum dwara_core::config::ai::AiGuardrailKind">AiGuardrail<wbr>Kind</a></dt><dd>Guardrail kind (DW-082 <code>ai.guardrails.rules[].kind</code>).</dd><dt><a class="enum" href="enum.AiGuardrailPhase.html" title="enum dwara_core::config::ai::AiGuardrailPhase">AiGuardrail<wbr>Phase</a></dt><dd>Guardrail phase (DW-082 <code>ai.guardrails.rules[].phase</code>).</dd><dt><a class="enum" href="enum.AiLatencyPreference.html" title="enum dwara_core::config::ai::AiLatencyPreference">AiLatency<wbr>Preference</a></dt><dd>The latency-vs-cost selection preference (DW-085
+<code>ai.routing_policies.&lt;name&gt;.preference</code>).</dd><dt><a class="enum" href="enum.AiPoolStrategy.html" title="enum dwara_core::config::ai::AiPoolStrategy">AiPool<wbr>Strategy</a></dt><dd>Credential pool rotation strategy (DW-080).</dd><dt><a class="enum" href="enum.AiProviderKind.html" title="enum dwara_core::config::ai::AiProviderKind">AiProvider<wbr>Kind</a></dt><dd>The wire protocol an adapter speaks (DW-075).</dd><dt><a class="enum" href="enum.AiRoutingPolicy.html" title="enum dwara_core::config::ai::AiRoutingPolicy">AiRouting<wbr>Policy</a></dt><dd>A routing policy (DW-085 <code>ai.routing_policies.&lt;name&gt;</code>):
+within-request escalation or latency-vs-cost selection. Keyed by
+name in <code>ai.routing_policies</code>. An alias declares
+<code>routing_policy: &lt;name&gt;</code> to be served by one; the policy is
+evaluated per request and composes over DW-076 routing (the
+candidate aliases it names are themselves plain chain/canary
+aliases). Internally tagged by <code>kind</code> so the YAML shape is:</dd><dt><a class="enum" href="enum.UnknownModelPolicy.html" title="enum dwara_core::config::ai::UnknownModelPolicy">Unknown<wbr>Model<wbr>Policy</a></dt><dd>The unknown-model pricing policy (DW-AI-03
+<code>ai.unknown_model_policy</code>): what the gateway does when a provider
+model has no entry in the <code>ai.pricing</code> table. The default (<code>allow</code>)
+preserves the original fail-open behavior (cost 0, never a crash);
+<code>fail_closed</code> rejects the response with 403
+<code>ai_unknown_model_pricing</code> so an unpriced model cannot serve
+traffic silently; <code>alert</code> proceeds with cost 0 but logs a WARN and
+increments <code>dwara_ai_unknown_pricing_total{model}</code> for observability
+without blocking the call.</dd></dl></section></div></main></body></html>

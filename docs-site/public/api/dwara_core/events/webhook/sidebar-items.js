@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_CONCURRENT_DELIVERIES","MAX_ENVELOPE_BYTES"],"fn":["deliver","envelope_json","rfc3339_ms","run_deliverer"],"struct":["WebhookTarget"]};

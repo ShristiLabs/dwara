@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Versioned, transactional SQLite schema migrations (DW-115)."><title>dwara_core::state::migrations - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module migrations</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module migrations</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#model" title="Model">Model</a></li><li><a href="#forward-only" title="Forward-only">Forward-only</a></li><li><a href="#adding-a-migration" title="Adding a migration">Adding a migration</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>state</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">state</a></div><h1>Module <span>migrations</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/state/migrations.rs.html#1-290">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Versioned, transactional SQLite schema migrations (DW-115).</p>
+<h2 id="model"><a class="doc-anchor" href="#model">§</a>Model</h2>
+<p>All schema evolution is expressed as an ordered list of UP migrations
+(<a href="fn.migrations.html" title="fn dwara_core::state::migrations::migrations"><code>migrations</code></a>) applied by <code>rusqlite_migration</code>, which records progress
+in <code>PRAGMA user_version</code> — the same pragma the DW-018 hand-rolled schema
+used. A database at <code>user_version = 1</code> with the DW-018 tables IS
+migration state 1: migration 001 below is that exact baseline DDL
+(kept idempotent via <code>IF NOT EXISTS</code>), so a fresh database runs 001 to
+reach state 1, while an existing DW-018 database already reports state 1
+and 001 is correctly treated as applied.</p>
+<h2 id="forward-only"><a class="doc-anchor" href="#forward-only">§</a>Forward-only</h2>
+<p>There are NO down migrations. Rolling a gateway binary back onto a
+newer-schema data directory is refused (see
+<a href="../store/struct.StateStore.html" title="struct dwara_core::state::store::StateStore"><code>StateStore</code></a> open: <code>user_version</code> greater
+than the binary’s latest is a hard error), and downgrading in place is
+unsupported. The documented rebuild path, since schema v1 content is
+entirely re-derivable:</p>
+<ol>
+<li>Stop the gateway. Every migration takes a backup first — see
+“Backup before migrate” in <a href="../store/index.html" title="mod dwara_core::state::store"><code>crate::state::store</code></a> — so locate the newest
+<code>&lt;db&gt;.bak-&lt;version&gt;-&lt;timestamp&gt;</code> file for the version you want.</li>
+<li>Replace the live db file with that backup (it is a consistent
+<code>VACUUM INTO</code> snapshot at the pre-migration version).</li>
+<li>Restart. Consumers and credentials are also re-seedable from
+config via <a href="../store/fn.sync_consumers_from_config.html" title="fn dwara_core::state::store::sync_consumers_from_config"><code>sync_consumers_from_config</code></a>
+if no backup exists, so the honest v1 answer is: restore the backup,
+or recreate the data dir and let config seeding repopulate it.</li>
+</ol>
+<h2 id="adding-a-migration"><a class="doc-anchor" href="#adding-a-migration">§</a>Adding a migration</h2>
+<p>Append ONE <code>M::up</code> entry and bump <a href="constant.LATEST_SCHEMA_VERSION.html" title="constant dwara_core::state::migrations::LATEST_SCHEMA_VERSION"><code>LATEST_SCHEMA_VERSION</code></a>.
+Migrations must be additive (create table/index, add column with a
+default) so every historical version migrates forward with zero data
+loss — tests here open a hand-built v1 database through every version
+to HEAD. Never edit an existing migration: databases in the wild have
+already recorded it.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SchemaInfo.html" title="struct dwara_core::state::migrations::SchemaInfo">Schema<wbr>Info</a></dt><dd>Current vs latest schema version, for the admin surface (DW-022 will
+expose this via the admin API; <code>current &lt; latest</code> after open should be
+impossible because <a href="../store/struct.StateStore.html#method.open" title="associated function dwara_core::state::store::StateStore::open"><code>StateStore::open</code></a>
+migrates automatically — the seam exists for reporting, not gating).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.LATEST_SCHEMA_VERSION.html" title="constant dwara_core::state::migrations::LATEST_SCHEMA_VERSION">LATEST_<wbr>SCHEMA_<wbr>VERSION</a></dt><dd>Latest schema version this build knows how to produce. Equals the
+number of entries in <a href="fn.migrations.html" title="fn dwara_core::state::migrations::migrations"><code>migrations</code></a>; asserted by test.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.migrations.html" title="fn dwara_core::state::migrations::migrations">migrations</a></dt><dd>The full forward migration set, in order. See the module docs for the
+baseline recognition rule and the forward-only policy.</dd></dl></section></div></main></body></html>

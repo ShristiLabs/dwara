@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Hot reload: config snapshot and TLS certificate reloads."><title>dwara::reload - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module reload</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara/index.html">dwara</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module reload</a></h2><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara</a></div><h1>Module <span>reload</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara/reload.rs.html#1-296">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Hot reload: config snapshot and TLS certificate reloads.</p>
+<p>Hot reload semantics:</p>
+<ul>
+<li>Config file watch + SIGHUP: re-read, validate, <code>compile_and_publish</code>
+(DW-006 semantics unchanged). A file-watch reload of UNCHANGED
+content is a no-op (the generation only moves when content changes);
+SIGHUP always re-publishes (forced reload). Watch events limited to
+create/modify-data/remove/rename — metadata churn (atime) from the
+reload’s own reads must not re-trigger it. On success, terminate
+listeners’ TLS configurations are rebuilt from the new snapshot and
+the active health probe loops (DW-013) are respawned against the new
+generation (endpoints persisting across the swap keep their health
+trackers).</li>
+<li>Certificate hot reload: cert/key files of terminate listeners are
+watched; a change rebuilds the <code>ServerConfig</code> behind an <code>ArcSwap</code>
+WITHOUT dropping connections. New handshakes use the new material;
+in-flight sessions keep the configuration they negotiated.</li>
+<li>SCALE-03 (#182): listener hot-reload. On a successful reload, the
+listener set is diffed: added listeners are bound, removed
+listeners are drained, changed listeners are restarted. The
+<code>ListenerManager</code> lives in the reload driver task and is applied
+after every successful publish. The bind identity (address, port,
+protocol, proxy_protocol, TLS mode) determines whether a listener
+needs a restart; everything else (policies, authorization, alt_svc,
+TLS cert material) is read from the live snapshot at request time
+and needs no restart.</li>
+</ul>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.refresh_tls_states.html" title="fn dwara::reload::refresh_tls_states">refresh_<wbr>tls_<wbr>states</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Rebuild every known terminate listener’s TLS config from <code>snapshot</code>.
+Listeners are matched by name (the bind set is fixed at startup); a
+listener that changed mode or vanished from the config keeps its
+current certificate material until restart (documented limitation).
+Failures log and keep the previous config.</dd><dt><a class="fn" href="fn.reload.html" title="fn dwara::reload::reload">reload</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>One reload attempt: re-read from disk, validate, publish atomically.
+Never fatal: on any failure the published snapshot is untouched and the
+process keeps running. On success, the dataplane’s (snapshot, registry)
+pair is rebuilt (routes and upstream pools hot-swap together; in-flight
+requests keep the old pair) and terminate listeners’ TLS configs are
+rebuilt from the new snapshot (certificate material follows the config
+generation it belongs to).</dd><dt><a class="fn" href="fn.resolve_sources_off_worker.html" title="fn dwara::reload::resolve_sources_off_worker">resolve_<wbr>sources_<wbr>off_<wbr>worker</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Resolve registry plugin sources (DW-165) on the blocking pool.</dd><dt><a class="fn" href="fn.spawn_file_watcher.html" title="fn dwara::reload::spawn_file_watcher">spawn_<wbr>file_<wbr>watcher</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Notify watcher over a set of directories, forwarding events that touch
+any of <code>names</code> into the async channel. Mirrors the config-watcher
+pattern (directory watch so atomic rename saves are observed).</dd></dl></section></div></main></body></html>

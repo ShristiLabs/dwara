@@ -1,0 +1,76 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI token budgets (DW-078): tokens/min and cost/day per consumer or per policy-shared team."><title>dwara_core::ai::budget - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module budget</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module budget</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#check-then-spend-the-locked-no-estimation-decision" title="Check-then-spend (the locked no-estimation decision)">Check-then-spend (the locked no-estimation decision)</a></li><li><a href="#mid-stream-cutoff" title="Mid-stream cutoff">Mid-stream cutoff</a></li><li><a href="#windows-and-keys" title="Windows and keys">Windows and keys</a></li><li><a href="#pricing-seam-dw-079" title="Pricing seam (DW-079)">Pricing seam (DW-079)</a></li><li><a href="#lifetime" title="Lifetime">Lifetime</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>budget</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/budget.rs.html#1-1038">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI token budgets (DW-078): tokens/min and cost/day per consumer or
+per policy-shared team.</p>
+<p>A budget is a LIMIT OF TOTALS, not a rate: it caps how many
+provider-reported tokens (or how much priced cost) one budget
+holder may consume inside a window. It composes with — never
+replaces — the request-count limiter (DW-017) and the request
+quotas (DW-033): those count REQUESTS, this counts TOKENS.</p>
+<h2 id="check-then-spend-the-locked-no-estimation-decision"><a class="doc-anchor" href="#check-then-spend-the-locked-no-estimation-decision">§</a>Check-then-spend (the locked no-estimation decision)</h2>
+<p>The gateway never estimates a request’s cost before the provider
+answers, so enforcement is two-phase:</p>
+<ol>
+<li><strong>Pre-check</strong> (before any provider contact): a holder whose
+window is ALREADY exhausted is rejected with 429
+<code>ai_budget_exceeded</code> and a <code>Retry-After</code> to the window boundary.</li>
+<li><strong>Spend</strong> (after usage is known): the provider-REPORTED usage is
+added to the window — non-streaming from the translated
+response, streaming from the accumulated DW-077 usage events.</li>
+</ol>
+<p>The contract is therefore: reject when the window is exhausted,
+spend what the provider reports. Overrun within one request is
+bounded by that one request’s usage — a holder at the limit can
+always complete one more request, and the next pre-check rejects.</p>
+<h2 id="mid-stream-cutoff"><a class="doc-anchor" href="#mid-stream-cutoff">§</a>Mid-stream cutoff</h2>
+<p>While a stream is being forwarded, the provider’s usage report is
+spent as it GROWS — each reported token exactly once — and checked
+against the window after every batch. When a dialect reports usage
+EARLY (Anthropic carries input tokens in <code>message_start</code>), a
+crossing is detected mid-stream: forwarding stops, the client
+receives the documented <code>ai_budget_exceeded</code> SSE event and the
+terminator, and the provider body is dropped AT ONCE — the upstream
+cancel propagates immediately, so even a stalled client cannot keep
+the provider generating. Dialects that
+only report usage at the END (OpenAI without include_usage would
+be one; the gateway forces include_usage, whose chunk is terminal)
+cannot cut off mid-stream: their usage is spent at stream end and
+enforced by the next pre-check. Documented, honest boundary.</p>
+<h2 id="windows-and-keys"><a class="doc-anchor" href="#windows-and-keys">§</a>Windows and keys</h2>
+<p><code>tokens_per_min</code> is a fixed 60-second window aligned to the epoch
+minute (deterministic in tests; <code>Retry-After</code> counts to the next
+boundary). <code>cost_per_day_micros</code> is a UTC calendar day — the same
+window shape as the DW-033 quotas. Cost is integer MICRO-USD (no
+floating-point money). The budget KEY is the consumer name
+(<code>scope: consumer</code>) or, for a shared team budget, the POLICY name
+(<code>scope: policy</code>) — every consumer attaching that policy spends
+from one ledger entry.</p>
+<h2 id="pricing-seam-dw-079"><a class="doc-anchor" href="#pricing-seam-dw-079">§</a>Pricing seam (DW-079)</h2>
+<p>Cost enforcement is wired end to end but reads prices through
+<a href="fn.cost_micros.html" title="fn dwara_core::ai::budget::cost_micros"><code>cost_micros</code></a>, which returns 0 until the pricing tables land in
+DW-079 — enforced-but-inert, the honest seam.</p>
+<h2 id="lifetime"><a class="doc-anchor" href="#lifetime">§</a>Lifetime</h2>
+<p>The ledger (windows) lives on the dataplane and SURVIVES config
+reloads (a reload must not reset a 60-second window or a daily
+spend); only the limits resolve per generation. A reload PRUNES the
+keys the new generation can no longer derive (a removed or renamed
+holder’s windows) — carried-forward state is bounded by the config,
+not the deployment’s history. Unbudgeted consumers (no policy with
+a <code>token_budget</code> binds them) are unlimited — fail-open, the DW-017
+default posture. An ANONYMOUS request (a route without
+<code>auth_required</code>) cannot bind a consumer-scoped budget — the walk
+falls through to the next candidate, so a less-specific
+policy-scoped (team) budget still binds rather than silently
+unlimiting the request.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AiBudgetEngine.html" title="struct dwara_core::ai::budget::AiBudgetEngine">AiBudget<wbr>Engine</a></dt><dd>The per-generation budget rules plus the reload-surviving ledger.</dd><dt><a class="struct" href="struct.BudgetGuard.html" title="struct dwara_core::ai::budget::BudgetGuard">Budget<wbr>Guard</a></dt><dd>The resolved budget for one request: a live guard over the ledger.</dd><dt><a class="struct" href="struct.BudgetLedger.html" title="struct dwara_core::ai::budget::BudgetLedger">Budget<wbr>Ledger</a></dt><dd>The shared spend ledger: one entry per (budget key, window kind).
+A single mutex guards the map — AI request rates are orders of
+magnitude below the GCRA path’s sharding needs, and the critical
+section is two integer adds (the DW-033 store pays an fsync per
+request; this pays none).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.BudgetKind.html" title="enum dwara_core::ai::budget::BudgetKind">Budget<wbr>Kind</a></dt><dd>Which budget window denied (the <code>kind</code> label of
+<code>dwara_ai_budget_denied_total</code>).</dd><dt><a class="enum" href="enum.BudgetVerdict.html" title="enum dwara_core::ai::budget::BudgetVerdict">Budget<wbr>Verdict</a></dt><dd>The pre-check verdict.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.consumer_policies_of.html" title="fn dwara_core::ai::budget::consumer_policies_of">consumer_<wbr>policies_<wbr>of</a></dt><dd>Resolve a consumer’s attached policies from the config (by name).</dd><dt><a class="fn" href="fn.cost_micros.html" title="fn dwara_core::ai::budget::cost_micros">cost_<wbr>micros</a></dt><dd>The DW-079 pricing seam: micro-USD for one provider-model call
+with this usage. Reads prices through a DEFAULT (empty) pricing
+table, so this free function always returns 0 (the unknown-model
+<code>allow</code> policy) — it exists for test/backward-compat call sites
+that do not have a dataplane handle. The live path uses the
+dataplane’s compiled
+<a href="../cost/struct.PricingTable.html" title="struct dwara_core::ai::cost::PricingTable"><code>PricingTable</code></a> (stored on the
+DataPlane as an ArcSwap, refreshed per generation).</dd><dt><a class="fn" href="fn.listener_policies_of.html" title="fn dwara_core::ai::budget::listener_policies_of">listener_<wbr>policies_<wbr>of</a></dt><dd>The listener’s policy list (by name).</dd><dt><a class="fn" href="fn.service_policies_of.html" title="fn dwara_core::ai::budget::service_policies_of">service_<wbr>policies_<wbr>of</a></dt><dd>The route’s service’s policy list (empty when the service is
+missing — validation rejects that elsewhere).</dd></dl></section></div></main></body></html>

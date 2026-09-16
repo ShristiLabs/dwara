@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="API-versioning grammar (DW-048): the two shared vocabularies the versioning aids need beyond serde shapes — HTTP-dates (RFC 9110 IMF-fixdate) and media types (RFC 9110 `type/subtype` tokens)."><title>dwara_core::config::versioning - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module versioning</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module versioning</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#why-imf-fixdate-only" title="Why IMF-fixdate only">Why IMF-fixdate only</a></li><li><a href="#why-bare-media-types" title="Why bare media types">Why bare media types</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">config</a></div><h1>Module <span>versioning</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/config/versioning.rs.html#1-249">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>API-versioning grammar (DW-048): the two shared vocabularies the
+versioning aids need beyond serde shapes — HTTP-dates (RFC 9110
+IMF-fixdate) and media types (RFC 9110 <code>type/subtype</code> tokens).</p>
+<p>Both are config-contract grammar in the same sense as <code>net.rs</code> (the
+IP/CIDR vocabulary) and <code>normalize_origin</code> (the CORS origin
+vocabulary): validation (<code>snapshot::validate</code>) and the runtime
+(<code>dataplane::versioning</code>) must agree on ONE parsing of these strings,
+so it lives in <code>config</code>, the lowest consuming domain, and everything
+above imports it from here.</p>
+<h3 id="why-imf-fixdate-only"><a class="doc-anchor" href="#why-imf-fixdate-only">§</a>Why IMF-fixdate only</h3>
+<p>RFC 9110 defines three HTTP-date formats (IMF-fixdate, RFC 850,
+asctime) and requires RECIPIENTS to accept all three — but generators
+“MUST send the IMF-fixdate form”. This module is not a recipient of
+arbitrary network dates; it parses OPERATOR-AUTHORED config strings
+that this gateway will echo verbatim into the <code>Sunset</code> response
+header. Accepting only the one form generators must produce keeps the
+emitted header canonical and the validation message short; the
+obsolete forms are rejected with an example of the expected shape.</p>
+<h3 id="why-bare-media-types"><a class="doc-anchor" href="#why-bare-media-types">§</a>Why bare media types</h3>
+<p>The <code>match.accept</code> criterion matches a media TYPE (<code>type/subtype</code>),
+ignoring parameters and q-values on the request side — the
+versioned-media-type convention embeds the version in the subtype
+(<code>application/vnd.acme.v2+json</code>). Parameter-form versioning
+(<code>application/vnd.acme+json;version=2</code>) is deliberately unsupported:
+Accept entries mix media-type parameters with accept-extensions
+(RFC 9110 section 12.5.1), and separating them reliably is parser
+work out of proportion to an S-sized aid. Wildcards are rejected as
+CONFIG values because they can never match (the criterion requires
+the client to NAME the version explicitly — see
+<code>dataplane::versioning</code>).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.HttpDate.html" title="struct dwara_core::config::versioning::HttpDate">Http<wbr>Date</a></dt><dd>A parsed IMF-fixdate HTTP-date (DW-048). The original config string is
+what gets echoed into the <code>Sunset</code> header (validated verbatim); this
+type carries the derived Unix seconds the RFC 9745 <code>Deprecation</code>
+structured date (<code>@&lt;seconds&gt;</code>) needs.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.normalize_media_type.html" title="fn dwara_core::config::versioning::normalize_media_type">normalize_<wbr>media_<wbr>type</a></dt><dd>Normalize a configured media type (DW-048): trim, lowercase, and
+require a bare <code>type/subtype</code> — both halves non-empty RFC 9110
+tokens, no parameters (<code>;...</code>), no whitespace, no wildcards. The
+lowercased form is the comparison key; <code>None</code> marks an authoring
+error validation reports.</dd><dt><a class="fn" href="fn.parse_http_date.html" title="fn dwara_core::config::versioning::parse_http_date">parse_<wbr>http_<wbr>date</a></dt><dd>Parse an IMF-fixdate HTTP-date (DW-048):
+<code>day-name "," SP 2DIGIT SP month SP 4DIGIT SP time SP "GMT"</code>, e.g.
+<code>Sun, 06 Nov 1994 08:49:37 GMT</code>. Returns <code>None</code> for anything else —
+including the obsolete RFC 850 / asctime forms (see the module docs
+for why) and a day-name that disagrees with the date it names (a
+typo’d weekday is a typo’d date; <code>date -u</code> output always agrees).</dd><dt><a class="fn" href="fn.parse_retry_after.html" title="fn dwara_core::config::versioning::parse_retry_after">parse_<wbr>retry_<wbr>after</a></dt><dd>Parse an HTTP <code>Retry-After</code> header value (DW-089) into a duration
+from NOW. Per RFC 9110 the value is either a non-negative integer
+(seconds to wait) or an IMF-fixdate (the time at which to retry).
+Returns <code>None</code> for anything else (the caller treats a missing/invalid
+header as no backoff signal). For the HTTP-date form the duration is
+<code>max(0, date - now)</code>; a date in the past yields a zero duration (the
+advertised window has already elapsed).</dd></dl></section></div></main></body></html>

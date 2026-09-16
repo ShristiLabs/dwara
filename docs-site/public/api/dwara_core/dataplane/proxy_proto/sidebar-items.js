@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ProxyProtoError"],"fn":["read_client_addr","reject_malformed"],"struct":["ProxyHeader"]};

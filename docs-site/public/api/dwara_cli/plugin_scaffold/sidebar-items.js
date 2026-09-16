@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["scaffold"],"struct":["ScaffoldResult"]};

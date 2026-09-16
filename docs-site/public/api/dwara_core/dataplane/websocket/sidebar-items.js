@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FrameViolation","Handshake"],"fn":["count_data_frames","flag_to_metric","handshake_verdict","offers_websocket","origin_allowed"],"struct":["FrameCounter","WsPoliceIo"]};

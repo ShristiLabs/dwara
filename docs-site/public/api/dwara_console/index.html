@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="dwara web console v3 (live charts, CRUD flows, AI ops) – #226."><title>dwara_console - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="dwara_console" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate dwara_console</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../dwara_console/index.html">dwara_<wbr>console</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#views" title="Views">Views</a></li><li><a href="#workspace-switcher-dw-118" title="Workspace switcher (DW-118)">Workspace switcher (DW-118)</a></li><li><a href="#done-when" title="Done-when">Done-when</a></li><li><a href="#serving" title="Serving">Serving</a></li></ul><h3><a href="#structs">Crate Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><h1>Crate <span>dwara_<wbr>console</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/dwara_console/lib.rs.html#1-119">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>dwara web console v3 (live charts, CRUD flows, AI ops) – #226.</p>
+<p>A static SPA served from the mTLS admin listener. The SPA fetches
+from the admin API (same origin). No dataplane deps – the SPA is
+static, embedded at compile time via <code>include_str!</code>/<code>include_bytes!</code>.</p>
+<h3 id="views"><a class="doc-anchor" href="#views">§</a>Views</h3>
+<ul>
+<li>Overview: gateway status, active requests, uptime, config epoch,
+route/listener counts.</li>
+<li>Live (#226): real-time charts from /analytics/live and
+/analytics/dashboard. Canvas-based latency sparklines and
+request-rate bars, auto-refreshing every 2 seconds.</li>
+<li>Routes: route table (name, path, service, methods) with CRUD
+buttons (create, edit, delete) that call POST/PUT/DELETE /routes.</li>
+<li>Upstreams: upstream/service health table (service, address,
+health, requests, errors) with CRUD buttons.</li>
+<li>Health: raw health JSON.</li>
+<li>Analytics: Top-N analytics.</li>
+<li>AI Ops (#226): AI credential pool status, MCP sessions/tools,
+experiment overrides, and prompt-log query.</li>
+<li>Fleet (DW-118): version skew check + fleet status (upgrade order,
+concurrency cap, halt-on-failure). Consumes GET /fleet/skew and
+GET /fleet/status.</li>
+<li>Config: current config YAML dump (read-only).</li>
+<li>Editor (DW-118): config YAML editor with validation preview
+(POST /config/validate) and publish (PATCH /config). Shows
+validation issues before the operator commits.</li>
+</ul>
+<h3 id="workspace-switcher-dw-118"><a class="doc-anchor" href="#workspace-switcher-dw-118">§</a>Workspace switcher (DW-118)</h3>
+<p>The top bar includes a workspace switcher that fetches the
+available workspaces from GET /workspaces (DW-067). When workspaces
+are not configured (OSS or no ent license), the switcher falls back
+to a single “default” option.</p>
+<h3 id="done-when"><a class="doc-anchor" href="#done-when">§</a>Done-when</h3>
+<p>An operator runs day-2 fleet operations (canary, rollback,
+credential rotation) from the console – no CLI needed. CRUD on
+routes/services/policies/consumers shows a validation preview
+before publish. Fleet views show all CP-managed edges; workspace
+switcher scopes views to a workspace.</p>
+<h3 id="serving"><a class="doc-anchor" href="#serving">§</a>Serving</h3>
+<p>The console is served at <code>/console/</code> from the admin listener. The
+admin handler checks for <code>/console</code> paths before dispatching to the
+admin API handlers. The SPA fetches from the admin API endpoints
+(<code>/health</code>, <code>/stats</code>, <code>/config</code>, <code>/config_dump</code>, <code>/analytics/top</code>)
+on the same origin.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.StaticFile.html" title="struct dwara_console::StaticFile">Static<wbr>File</a></dt><dd>A static file response: the body bytes and the content-type.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.FILE_COUNT.html" title="constant dwara_console::FILE_COUNT">FILE_<wbr>COUNT</a></dt><dd>The number of static files embedded in the console.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.file_paths.html" title="fn dwara_console::file_paths">file_<wbr>paths</a></dt><dd>List all embedded file paths.</dd><dt><a class="fn" href="fn.is_console_path.html" title="fn dwara_console::is_console_path">is_<wbr>console_<wbr>path</a></dt><dd>Check if a path is a console path (starts with <code>/console</code>).</dd><dt><a class="fn" href="fn.resolve.html" title="fn dwara_console::resolve">resolve</a></dt><dd>Resolve a console path to a static file.</dd></dl></section></div></main></body></html>

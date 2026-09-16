@@ -1,0 +1,29 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Percentile sketches (PERF-09, #242): a DDSketch-based bounded-memory mergeable quantile sketch with relative-error guarantees, replacing the previous ring-buffer + nearest-rank approach in the live sketches."><title>dwara_core::analytics::sketch - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module sketch</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module sketch</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#algorithm" title="Algorithm">Algorithm</a></li><li><a href="#mergeability" title="Mergeability">Mergeability</a></li><li><a href="#references" title="References">References</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>analytics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a></div><h1>Module <span>sketch</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/sketch.rs.html#1-372">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Percentile sketches (PERF-09, #242): a DDSketch-based
+bounded-memory mergeable quantile sketch with relative-error
+guarantees, replacing the previous ring-buffer + nearest-rank
+approach in the live sketches.</p>
+<p>DDSketch (from Datadog) is a quantile sketch that provides
+relative-error guarantees: the returned quantile is within
+<code>(1 + alpha)</code> of the true quantile. This is ideal for latency
+distributions, which span several orders of magnitude (sub-ms to
+seconds), where absolute-error sketches (like t-digest with
+uniform centroids) lose resolution in the tail.</p>
+<h2 id="algorithm"><a class="doc-anchor" href="#algorithm">§</a>Algorithm</h2>
+<p>DDSketch buckets values by their logarithm. The bucket index for a
+positive value <code>v</code> is <code>floor(log(v) / log(gamma))</code> where
+<code>gamma = (1 + alpha) / (1 - alpha)</code>. Each bucket stores a count.
+The number of buckets is bounded by the range of values (not the
+number of samples), so memory is bounded regardless of traffic
+volume. Negative values are not supported (latencies are
+non-negative); zero is handled as a special bucket.</p>
+<h2 id="mergeability"><a class="doc-anchor" href="#mergeability">§</a>Mergeability</h2>
+<p>Two DDSketches with the same <code>alpha</code> can be merged by adding their
+bucket counts. This enables window-to-window aggregation and
+distributed merging (future: fleet-wide percentiles).</p>
+<h2 id="references"><a class="doc-anchor" href="#references">§</a>References</h2>
+<ul>
+<li>Charles Masson, Jee E. Rim, Homin K. Lee. “DDSketch: A Fast and
+Fully-Mergeable Quantile Sketch with Relative-Error Guarantees.”
+arXiv:1908.10693 [cs.DB], 2019.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DDSketch.html" title="struct dwara_core::analytics::sketch::DDSketch">DDSketch</a></dt><dd>A DDSketch quantile sketch with relative-error guarantees.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DAILY_KEY","MONTHLY_KEY"],"enum":["Budget","QuotaOutcome"],"fn":["day_window","month_window","retry_after"]};

@@ -1,0 +1,56 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The AI proxy action (DW-075): the dataplane half of the provider-adapter pack — extended by DW-076 with routing and failover."><title>dwara_core::dataplane::ai_proxy - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module ai_proxy</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module ai_<wbr>proxy</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#routing-and-failover-dw-076" title="Routing and failover (DW-076)">Routing and failover (DW-076)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>ai_<wbr>proxy</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/ai_proxy.rs.html#1-3011">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The AI proxy action (DW-075): the dataplane half of the
+provider-adapter pack — extended by DW-076 with routing and
+failover.</p>
+<p>Runs when a route’s action is <code>ai</code>: parse the client’s OpenAI
+chat-completions body, resolve the model alias through the
+generation’s <a href="../../ai/struct.AiRuntime.html" title="struct dwara_core::ai::AiRuntime"><code>AiRuntime</code></a>, translate via the
+provider’s <a href="../../ai/adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a>,
+place the call through the provider’s UPSTREAM (pooling, TLS,
+timeouts, breaker, health — the standard machinery), and translate
+the response back. All failures answer in the OpenAI error shape so
+standard client SDKs parse them; the gateway’s request id rides
+along inside <code>error.request_id</code>.</p>
+<h2 id="routing-and-failover-dw-076"><a class="doc-anchor" href="#routing-and-failover-dw-076">§</a>Routing and failover (DW-076)</h2>
+<p><code>AiRuntime::route</code> turns the alias into an ordered candidate list:
+<code>[primary, failover...]</code> for a chained alias, or exactly one
+deterministically-picked canary version for a split alias (see
+<code>ai::routing</code>). The action walks the candidates and advances on
+RETRYABLE outcomes — a 429, a 5xx, a transport error, or a
+dialect-specific translation rejection — and treats everything
+else as final. Failover is invisible to the client by
+construction: a provider response is read and translated WHOLE
+before any byte reaches the client, so a failing candidate emits
+nothing client-visible. Same-provider retries are deliberately not
+the chain’s job — the provider’s upstream breaker owns those; the
+chain only ever moves to a DIFFERENT provider/model pair. Usage and
+request metrics attribute to the provider and canary version that
+actually served; the access record follows the serving provider.</p>
+<p>Body bounds: an AI request must be read whole to translate it (the
+zero-buffering rule yields here by necessity, opt-in by choosing
+the action), and both directions are capped INCREMENTALLY — the
+read aborts as soon as the cap is crossed, never after buffering
+the whole body — at <a href="constant.MAX_AI_REQUEST_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_REQUEST_BYTES"><code>MAX_AI_REQUEST_BYTES</code></a> inbound and
+<a href="constant.MAX_AI_PROVIDER_RESPONSE_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_PROVIDER_RESPONSE_BYTES"><code>MAX_AI_PROVIDER_RESPONSE_BYTES</code></a> from the provider, so a hostile
+or runaway peer cannot turn the translation into an unbounded
+buffer.</p>
+<p>Streaming (DW-077): <code>stream: true</code> requests stream back to the
+client as <code>text/event-stream</code>, translated frame-by-frame with ZERO
+added buffering (<a href="struct.AiStreamBody.html" title="struct dwara_core::dataplane::ai_proxy::AiStreamBody"><code>AiStreamBody</code></a> + <a href="../../ai/stream/struct.StreamTranslator.html" title="struct dwara_core::ai::stream::StreamTranslator"><code>StreamTranslator</code></a>): each
+complete provider frame becomes client frames in the same poll.
+Token counts are provider-reported only (locked decision) and
+accumulate mid-stream into one terminal usage chunk; the gateway
+owns the <code>data: [DONE]</code> terminator. The failover chain applies
+until the streaming response is returned (the commit point); after
+the first forwarded frame a provider abort ends the stream cleanly
+with an error chunk — already-forwarded content stands.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AiStreamBody.html" title="struct dwara_core::dataplane::ai_proxy::AiStreamBody">AiStream<wbr>Body</a></dt><dd>The zero-buffer AI streaming body (DW-077): wraps the provider’s
+upstream body, translates each COMPLETE provider SSE frame into
+OpenAI-shaped client frames as the bytes arrive, and forwards them
+in the same poll — nothing waits for the stream to finish. Usage
+events accumulate (provider-reported only) and are emitted as one
+terminal chunk; the gateway owns the <code>data: [DONE]</code> terminator. A
+provider body error after forwarding becomes a terminal error
+chunk (already-forwarded content stands), never a reset.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_AI_ERROR_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_ERROR_BYTES">MAX_<wbr>AI_<wbr>ERROR_<wbr>BYTES</a></dt><dd>Provider error body cap: 1 MiB.</dd><dt><a class="constant" href="constant.MAX_AI_PROVIDER_RESPONSE_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_PROVIDER_RESPONSE_BYTES">MAX_<wbr>AI_<wbr>PROVIDER_<wbr>RESPONSE_<wbr>BYTES</a></dt><dd>Provider response body cap: 32 MiB (non-streaming completions of
+extreme length). Provider ERROR bodies are capped tighter at
+<a href="constant.MAX_AI_ERROR_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_ERROR_BYTES"><code>MAX_AI_ERROR_BYTES</code></a> — they are never legitimately large.</dd><dt><a class="constant" href="constant.MAX_AI_REQUEST_BYTES.html" title="constant dwara_core::dataplane::ai_proxy::MAX_AI_REQUEST_BYTES">MAX_<wbr>AI_<wbr>REQUEST_<wbr>BYTES</a></dt><dd>Inbound AI request body cap: 16 MiB, generous against long-context
+requests while bounding the translation buffer.</dd></dl></section></div></main></body></html>

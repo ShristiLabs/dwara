@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Service-level traffic splitting (DW-040, feature analysis section 5 “Traffic”): canary releases, blue-green switches, and the sticky cookie that pins a session through them."><title>dwara_core::dataplane::split - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module split</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module split</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-pick" title="The pick">The pick</a></li><li><a href="#stickiness-is-layered" title="Stickiness is layered">Stickiness is layered</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>split</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/split.rs.html#1-188">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Service-level traffic splitting (DW-040, feature analysis section
+5 “Traffic”): canary releases, blue-green switches, and the sticky
+cookie that pins a session through them.</p>
+<h2 id="the-pick"><a class="doc-anchor" href="#the-pick">§</a>The pick</h2>
+<p>A split service dispatches each request to ONE of its target
+upstreams by a deterministic weighted pick over the SAME FNV-1a
+hash the balancer’s consistent-hash ring uses
+(<code>balance::key_hash</code> — the stability argument for that choice,
+toolchain-stable hashing, applies identically here):</p>
+<ul>
+<li>key = the sticky cookie’s VALUE when the service configures
+<a href="../../config/struct.StickyAffinity.html" title="struct dwara_core::config::StickyAffinity"><code>crate::config::StickyAffinity</code></a> and the request carries the
+cookie — a session lands on the same branch for every request
+while the weights are unchanged;</li>
+<li>key = the request id otherwise — per-request distribution whose
+realized ratios converge on the configured weights statistically
+(the issue’s acceptance shape: “split ratios verified
+statistically”).</li>
+</ul>
+<p>The slot is <code>hash % total_weight</code>, walked over the targets’
+cumulative weights. DISPLACEMENT IS BOUNDED BY AN INVARIANT TOTAL:
+when a weight change KEEPS the total constant, only the changed
+share of hash space moves — 95/5 -&gt; 90/10 moves exactly the 5% that
+became canary, and the blue-green flip 100/0 -&gt; 0/100 (total still
+100) moves exactly the stable side. A change that ALTERS the total
+changes the modulus and therefore reshuffles EVERY key — ramp a
+canary by RE-BALANCING the pair (95/5 -&gt; 90/10), never by growing
+the canary alone (95/5 -&gt; 95/10 reshuffles all sessions). The pick
+is STATELESS — no counters, no locks, no per-service runtime state
+— which is what makes the blue-green switch instant: a re-publish
+rebuilds the compiled split, and the very next request dispatches
+by the new generation.</p>
+<h2 id="stickiness-is-layered"><a class="doc-anchor" href="#stickiness-is-layered">§</a>Stickiness is layered</h2>
+<p>The cookie guarantees BRANCH affinity (which upstream). Endpoint
+affinity within a branch comes from the branch upstream’s own
+balancer: when it runs <code>ip_hash</code>, the sticky value becomes the
+ring key (the proxy passes it as the dispatch hash key), so the
+session pins one endpoint through the same ketama machinery that
+pins client IPs. With other balancers the branch pick is the
+affinity guarantee and the endpoint is free to float — documented,
+not hidden: ring-based endpoint pinning and round-robin spreading
+are different tools and the operator picks per branch.</p>
+<p>The cookie value is an opaque affinity handle generated by the
+gateway (time + a process counter, hex): NOT a secret, carrying no
+identity, never trusted as one. Reusing a presented cookie is safe
+precisely because its only power is choosing among upstreams the
+operator already configured — a client “forging” one can only
+pick a branch it could have landed on anyway.</p>
+<p>One documented edge: a session whose FIRST request is a response
+cache HIT is served without a dispatch, so no cookie is minted
+until its first cache MISS — while hits last there is nothing to
+pin (no upstream was contacted), and the miss mints exactly as the
+uncached path would.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ServiceSplit.html" title="struct dwara_core::dataplane::split::ServiceSplit">Service<wbr>Split</a></dt><dd>The compiled weighted split of one service (DW-040): built per
+config generation by the upstream registry, held by the dataplane
+dispatch path. Immutable once built; the pick is stateless.</dd><dt><a class="struct" href="struct.SplitEntry.html" title="struct dwara_core::dataplane::split::SplitEntry">Split<wbr>Entry</a></dt><dd>One compiled target of a service split (DW-040).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.mint_affinity_id.html" title="fn dwara_core::dataplane::split::mint_affinity_id">mint_<wbr>affinity_<wbr>id</a></dt><dd>Mint a fresh affinity handle: <code>hex(unix ms) hex(counter)</code> — 24
+printable hex characters. Opaque, unique per process, NOT a secret
+and never treated as one (its only power is choosing among
+upstreams the operator already configured).</dd><dt><a class="fn" href="fn.read_cookie.html" title="fn dwara_core::dataplane::split::read_cookie">read_<wbr>cookie</a></dt><dd>Read one cookie’s value from a request’s <code>Cookie</code> headers (the
+first match across all header lines wins; <code>Cookie</code> is a
+semicolon-separated <code>name=value</code> list per RFC 6265). Returns the
+trimmed value; a malformed pair cannot match a validated cookie
+name and is skipped silently (the gateway then mints a fresh
+handle — the safe direction: a bad cookie re-sessions rather than
+mis-routing).</dd></dl></section></div></main></body></html>

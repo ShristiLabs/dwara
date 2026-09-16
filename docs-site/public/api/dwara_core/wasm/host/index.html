@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="proxy-wasm host implementation (DW-055)."><title>dwara_core::wasm::host - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module host</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module host</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#fuel-and-epoch-preemption" title="Fuel and epoch preemption">Fuel and epoch preemption</a></li><li><a href="#memory-caps" title="Memory caps">Memory caps</a></li><li><a href="#import-names-and-wasi" title="Import names and WASI">Import names and WASI</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>wasm</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">wasm</a></div><h1>Module <span>host</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/wasm/host.rs.html#1-2694">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>proxy-wasm host implementation (DW-055).</p>
+<p>This module implements the host side of the proxy-wasm ABI: the
+import functions that a WebAssembly plugin calls to interact with
+the proxy. The plugin exports phase callbacks (e.g.
+<code>proxy_on_request_headers</code>) that the host calls at the appropriate
+point in the request pipeline; the plugin calls back into the host
+via the imports defined here to read/write request data, log, send
+responses, etc.</p>
+<h3 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h3>
+<ul>
+<li><a href="struct.WasmEngine.html" title="struct dwara_core::wasm::host::WasmEngine"><code>WasmEngine</code></a> — process-wide wasmtime engine + linker, compiled
+once at startup. Holds the compiled modules keyed by config name.
+Cheap to clone (Arc internals).</li>
+<li><a href="struct.PluginModule.html" title="struct dwara_core::wasm::host::PluginModule"><code>PluginModule</code></a> — a compiled wasmtime module for one plugin
+config entry. Created once at config publish time.</li>
+<li><a href="struct.PluginInstance.html" title="struct dwara_core::wasm::host::PluginInstance"><code>PluginInstance</code></a> — a per-request plugin instance (store +
+instance + context). Created for each request that passes through
+a route with plugins.</li>
+<li><a href="struct.PluginContext.html" title="struct dwara_core::wasm::host::PluginContext"><code>PluginContext</code></a> — the per-instance state the host imports read
+from and write to: request/response headers, body, the action
+returned by the plugin, etc. Stored in the wasmtime store’s
+user data.</li>
+</ul>
+<h3 id="fuel-and-epoch-preemption"><a class="doc-anchor" href="#fuel-and-epoch-preemption">§</a>Fuel and epoch preemption</h3>
+<p>Each instance is created with a fuel budget
+(<a href="struct.PluginLimits.html#structfield.fuel" title="field dwara_core::wasm::host::PluginLimits::fuel"><code>PluginLimits::fuel</code></a>). wasmtime consumes fuel on every operation;
+when the budget is exhausted, the plugin traps with an out-of-fuel
+error, which the host catches and converts to a 500 (the plugin is
+misbehaving, not the request). Epoch-based interruption is used for
+time caps: a background thread increments the epoch, and the plugin
+is interrupted if it runs past <a href="struct.PluginLimits.html#structfield.timeout_ms" title="field dwara_core::wasm::host::PluginLimits::timeout_ms"><code>PluginLimits::timeout_ms</code></a>.</p>
+<h3 id="memory-caps"><a class="doc-anchor" href="#memory-caps">§</a>Memory caps</h3>
+<p><a href="struct.PluginLimits.html#structfield.memory_mb" title="field dwara_core::wasm::host::PluginLimits::memory_mb"><code>PluginLimits::memory_mb</code></a> caps the linear memory the plugin can
+allocate. wasmtime’s <code>ResourceLimiter</code> trait enforces this at the
+allocation boundary.</p>
+<h3 id="import-names-and-wasi"><a class="doc-anchor" href="#import-names-and-wasi">§</a>Import names and WASI</h3>
+<p>Modules built with the Rust <code>proxy-wasm</code> SDK (what
+<code>dwara-cli plugin new</code> scaffolds) import the spec ABI names, so the
+host registers BOTH the spec names (<code>proxy_send_local_response</code>,
+<code>proxy_get_current_time_nanoseconds</code>) and dwara’s original spellings
+(<code>proxy_send_http_response</code>, <code>proxy_get_current_time</code>) with
+identical behavior. The <code>wasm32-wasip1</code> target additionally emits a
+small <code>wasi_snapshot_preview1</code> import set (environment, fd_write,
+proc_exit, random_get, clock_time_get, sched_yield); the host
+provides minimal stubs for exactly that set — a module importing
+other WASI functions fails to instantiate (fail-closed).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LocalResponse.html" title="struct dwara_core::wasm::host::LocalResponse">Local<wbr>Response</a></dt><dd>A local response set by the plugin via <code>proxy_send_http_response</code>.</dd><dt><a class="struct" href="struct.PendingCallout.html" title="struct dwara_core::wasm::host::PendingCallout">Pending<wbr>Callout</a></dt><dd>One <code>proxy_http_call</code> dispatch, parsed and validated at the
+hostcall boundary (DW-167). The instance queues it; the dispatch
+driver (the async plugin_dispatch boundary) performs the exchange
+and delivers the response back through
+<a href="struct.PluginInstance.html#method.deliver_callout_response" title="method dwara_core::wasm::host::PluginInstance::deliver_callout_response"><code>PluginInstance::deliver_callout_response</code></a>.</dd><dt><a class="struct" href="struct.PluginContext.html" title="struct dwara_core::wasm::host::PluginContext">Plugin<wbr>Context</a></dt><dd>The per-instance context the host imports read from and write to.</dd><dt><a class="struct" href="struct.PluginInstance.html" title="struct dwara_core::wasm::host::PluginInstance">Plugin<wbr>Instance</a></dt><dd>A per-request plugin instance: a wasmtime store + instance.</dd><dt><a class="struct" href="struct.PluginLimits.html" title="struct dwara_core::wasm::host::PluginLimits">Plugin<wbr>Limits</a></dt><dd>Per-plugin resource limits (DW-055 decision 4; §9.3).</dd><dt><a class="struct" href="struct.PluginMetric.html" title="struct dwara_core::wasm::host::PluginMetric">Plugin<wbr>Metric</a></dt><dd>A plugin-registered metric.</dd><dt><a class="struct" href="struct.PluginModule.html" title="struct dwara_core::wasm::host::PluginModule">Plugin<wbr>Module</a></dt><dd>A compiled plugin module (one per config entry).</dd><dt><a class="struct" href="struct.WasmEngine.html" title="struct dwara_core::wasm::host::WasmEngine">Wasm<wbr>Engine</a></dt><dd>Process-wide wasmtime engine + linker for proxy-wasm plugins.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PhaseResult.html" title="enum dwara_core::wasm::host::PhaseResult">Phase<wbr>Result</a></dt><dd>The result of a phase callback.</dd><dt><a class="enum" href="enum.PluginMetricType.html" title="enum dwara_core::wasm::host::PluginMetricType">Plugin<wbr>Metric<wbr>Type</a></dt><dd>Metric types (proxy-wasm §2.4).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.SHARED_DATA_CAP_BYTES.html" title="constant dwara_core::wasm::host::SHARED_DATA_CAP_BYTES">SHARED_<wbr>DATA_<wbr>CAP_<wbr>BYTES</a></dt><dd>Per-module cap on the VM-scoped shared-data store: total bytes
+(key + value lengths summed over the entries). The store outlives
+every request (module lifetime), so an unbounded map is a slow OOM
+the wasm <code>ResourceLimiter</code> cannot see. A set that would exceed the
+cap FAILS (the plugin gets an error status it can branch on) —
+entries are never evicted: a silently evicted rate-limit counter
+or cache entry is a correctness bug, a refused set is a signal.</dd><dt><a class="constant" href="constant.SHARED_DATA_CAP_ENTRIES.html" title="constant dwara_core::wasm::host::SHARED_DATA_CAP_ENTRIES">SHARED_<wbr>DATA_<wbr>CAP_<wbr>ENTRIES</a></dt><dd>Per-module cap on the VM-scoped shared-data store: entry count
+(same posture as <a href="constant.SHARED_DATA_CAP_BYTES.html" title="constant dwara_core::wasm::host::SHARED_DATA_CAP_BYTES"><code>SHARED_DATA_CAP_BYTES</code></a>; bounds key overhead a
+byte cap alone would miss).</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.SharedData.html" title="type dwara_core::wasm::host::SharedData">Shared<wbr>Data</a></dt><dd>The VM-scoped shared-data store (DW-167): one map per compiled
+plugin module, shared by every per-request instance through the
+Mutex. Keys are strings; values are bytes with a CAS version for
+optimistic concurrency.</dd></dl></section></div></main></body></html>

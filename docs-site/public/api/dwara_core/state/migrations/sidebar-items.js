@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LATEST_SCHEMA_VERSION"],"fn":["migrations"],"struct":["SchemaInfo"]};

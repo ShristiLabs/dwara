@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI guardrails (DW-082): prompt-injection heuristics, PII detection, banned-content filters, and output schema enforcement as a middleware chain on the AI proxy action."><title>dwara_core::ai::guardrails - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module guardrails</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module guardrails</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#enforcement-order" title="Enforcement order">Enforcement order</a></li><li><a href="#policy-scoping" title="Policy scoping">Policy scoping</a></li><li><a href="#false-positive-characteristics-and-recommended-thresholds" title="False-positive characteristics and recommended thresholds">False-positive characteristics and recommended thresholds</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>guardrails</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/guardrails.rs.html#1-1029">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI guardrails (DW-082): prompt-injection heuristics, PII detection,
+banned-content filters, and output schema enforcement as a
+middleware chain on the AI proxy action.</p>
+<p>A <a href="struct.GuardrailEngine.html" title="struct dwara_core::ai::guardrails::GuardrailEngine"><code>GuardrailEngine</code></a> is compiled from the <code>ai.guardrails</code> config
+block at dataplane refresh and stored behind an ArcSwap (swapped on
+reload, so a guardrail change applies to the next request with no
+restart). Each rule is compiled once: regex patterns into a
+[<code>regex::RegexSet</code>] (injection/pii/banned kinds) and JSON schemas
+into a JSON-schema validator (schema kind, feature-gated).</p>
+<h2 id="enforcement-order"><a class="doc-anchor" href="#enforcement-order">§</a>Enforcement order</h2>
+<p>Prompt-phase rules run AFTER the chat request is parsed and AFTER
+the governance check, BEFORE model resolution and the provider
+call. A <code>block</code> action returns a 400 <code>guardrail_blocked</code>; a
+<code>redact</code> action scrubs the matched content from the prompt and
+continues; a <code>log</code> action records the match and continues
+(dry-run).</p>
+<p>Response-phase rules run AFTER the provider response is parsed and
+BEFORE it is returned to the client. A <code>block</code> action returns a
+400 (<code>response_schema_violation</code> for schema kind, <code>guardrail_blocked</code>
+otherwise). Streaming responses cannot be schema-validated (partial
+content); banned-content checks run per-chunk in the stream body.</p>
+<h2 id="policy-scoping"><a class="doc-anchor" href="#policy-scoping">§</a>Policy scoping</h2>
+<p>A rule with an empty <code>policies</code> list applies to ALL consumers. A
+rule with a non-empty list applies only to consumers whose attached
+policies (the consumer &gt; route &gt; service &gt; listener &gt; global chain)
+include at least one listed name — the same vocabulary the budgets
+and governance use.</p>
+<h2 id="false-positive-characteristics-and-recommended-thresholds"><a class="doc-anchor" href="#false-positive-characteristics-and-recommended-thresholds">§</a>False-positive characteristics and recommended thresholds</h2>
+<p>The guardrails are PATTERN-BASED heuristics, not ML classifiers.
+Their false-positive profiles differ by kind; operators should tune
+the pattern sets per deployment and use the <code>log</code> action to measure
+the false-positive rate on benign traffic before switching to
+<code>block</code>.</p>
+<ul>
+<li><strong>Injection</strong>: the built-in patterns target explicit instruction-
+override phrases (“ignore previous instructions”, “disregard the
+above”, “you are now”, “new instructions:”, role-injection
+<code>"role":"system"</code>). False positives arise when a legitimate
+prompt discusses prompt injection (security research, meta-
+discussion about LLM behavior). Recommended threshold: start
+with <code>log</code>, review the matches, and narrow the custom patterns
+before switching to <code>block</code>. The built-in set is deliberately
+conservative (phrase-level, not keyword-level) to keep the
+benign-traffic false-positive rate near zero.</li>
+<li><strong>PII</strong>: the built-in patterns match structured PII (email,
+phone, API key, credit card). False positives are rare for
+structured formats but can occur on phone-number patterns in
+numeric-heavy prompts (math, statistics). The phone pattern is
+conservative (requires a leading <code>+</code> or 7+ digits with
+separators). Recommended threshold: <code>redact</code> is safe by default
+(scrubs and continues); switch to <code>block</code> only when the
+deployment must never forward PII.</li>
+<li><strong>Banned</strong>: entirely deployment-defined (no built-in patterns).
+The false-positive rate depends on the operator’s pattern set.
+Recommended threshold: start with <code>log</code>, measure, then <code>block</code>.</li>
+<li><strong>Schema</strong>: deterministic (JSON Schema validation). No false
+positives — a response either conforms or it does not. The
+“false positive” risk is an overly strict schema that rejects
+valid provider responses; test the schema against representative
+traffic before enforcing <code>block</code>.</li>
+</ul>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only (see <code>scripts/check_deps.py</code>); this
+module reads <code>config::ai::AiConfig</code> and nothing else. The <code>regex</code>
+crate is a workspace dependency. The <code>jsonschema</code> crate is a
+workspace dependency used unconditionally for schema guardrails
+(AI-08/#197 decoupled schema checks from the openapi_validation
+feature flag — schema conformance is always available).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GuardrailEngine.html" title="struct dwara_core::ai::guardrails::GuardrailEngine">Guardrail<wbr>Engine</a></dt><dd>The per-generation compiled guardrail engine (DW-082): the
+compiled rules from the <code>ai.guardrails</code> config block. Built at
+dataplane refresh; immutable once built. Stored on the dataplane
+behind an ArcSwap and swapped on reload, so a guardrail change
+applies to the next request with no restart.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.GuardrailResult.html" title="enum dwara_core::ai::guardrails::GuardrailResult">Guardrail<wbr>Result</a></dt><dd>The guardrail check result for one request or response.</dd></dl></section></div></main></body></html>

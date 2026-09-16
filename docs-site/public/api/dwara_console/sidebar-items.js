@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FILE_COUNT"],"fn":["file_paths","is_console_path","resolve"],"struct":["StaticFile"]};

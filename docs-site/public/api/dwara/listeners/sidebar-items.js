@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LISTENER_RESPAWNS"],"enum":["ListenerMode"],"fn":["acceptors_per_listener","bind_listener","proxy_phase","run_listener","run_listener_supervised","serve_http_tls"],"struct":["BoundListener","SpliceDrain","SpliceGuard"]};

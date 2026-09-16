@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ComposeResult","FailPolicy","FragmentResult"],"fn":["compose","extract_jsonpath","make_error_fragment_result","make_fragment_result","run_aggregation","shape_fragment","validate_spec"],"struct":["AggregationSpec","FragmentSpec","ResolvedEndpoint"],"trait":["ServiceResolver"]};

@@ -1,0 +1,68 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="WASM route handlers (nano-services) – DW-106."><title>dwara_core::dataplane::nano_service - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module nano_service</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module nano_<wbr>service</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#handler-abi" title="Handler ABI">Handler ABI</a></li><li><a href="#resource-limits" title="Resource limits">Resource limits</a></li><li><a href="#feature-gate" title="Feature gate">Feature gate</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>nano_<wbr>service</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/nano_service.rs.html#1-643">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>WASM route handlers (nano-services) – DW-106.</p>
+<p>A nano-service is a route action that runs a WebAssembly module to
+generate the response directly, instead of proxying to an upstream.
+The module implements a simple request-&gt;response handler ABI over
+the existing wasmtime runtime (the <code>wasm</code> cargo feature, brought in
+by <code>nano_services</code>). This is the “function-as-a-route” path: a
+self-contained WASM module owns the whole response for a route –
+status, headers, and body – with no backend contact.</p>
+<h3 id="handler-abi"><a class="doc-anchor" href="#handler-abi">§</a>Handler ABI</h3>
+<p>The module exports:</p>
+<ul>
+<li><code>memory</code> – the linear memory the host and module share.</li>
+<li><code>alloc(size: i32) -&gt; i32</code> – allocate <code>size</code> bytes in linear
+memory and return a pointer (a simple bump allocator is fine; the
+host uses it to place the serialized request).</li>
+<li><code>handle(req_ptr: i32, req_len: i32) -&gt; i32</code> – handle the request
+whose serialized form lives at <code>[req_ptr, req_ptr+req_len)</code> in
+linear memory. Returns 0 on success (the response is communicated
+back via the host imports below) and non-zero on error (the route
+answers 502).</li>
+</ul>
+<p>The host provides these imports under the module name <code>dwara</code>:</p>
+<ul>
+<li><code>response_status(status: i32)</code> – set the HTTP response status.</li>
+<li><code>response_header(k_ptr, k_len, v_ptr, v_len)</code> – add a response
+header.</li>
+<li><code>response_body(ptr, len)</code> – set the response body.</li>
+<li><code>log(ptr, len)</code> – emit a log line (tracing::debug).</li>
+</ul>
+<p>The request is serialized into linear memory in a length-prefixed
+binary format (all lengths u32 big-endian):</p>
+<div class="example-wrap"><pre class="language-text"><code>u32 method_len, method bytes
+u32 path_len, path bytes
+u32 headers_count, [u32 key_len, key, u32 val_len, val]...
+u32 body_len, body bytes</code></pre></div>
+<p>The module parses this to read the request, then calls the host
+imports to build the response and returns 0 from <code>handle</code>.</p>
+<h3 id="resource-limits"><a class="doc-anchor" href="#resource-limits">§</a>Resource limits</h3>
+<p><code>memory_limit</code> caps the linear memory the module may allocate
+(enforced via wasmtime’s <code>ResourceLimiter</code>). <code>execution_timeout_ms</code>
+caps the wall-clock time the <code>handle</code> call may run: the call runs on
+a blocking pool thread wrapped in a <code>tokio::time::timeout</code>, so a
+module that exceeds it is interrupted and the route answers 504. A
+fuel budget caps CPU work (a module that exhausts it traps and the
+route answers 502).</p>
+<h3 id="feature-gate"><a class="doc-anchor" href="#feature-gate">§</a>Feature gate</h3>
+<p>The module compiles only when the <code>nano_services</code> cargo feature is
+enabled (which pulls in <code>wasm</code> / wasmtime). The config schema is
+always present, so configs round-trip without the feature; when the
+feature is off the action is accepted but inert (validation warns,
+the route returns 502).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DeserializedRequest.html" title="struct dwara_core::dataplane::nano_service::DeserializedRequest">Deserialized<wbr>Request</a></dt><dd>The deserialized parts of a nano-service wire-format request.</dd><dt><a class="struct" href="struct.NanoService.html" title="struct dwara_core::dataplane::nano_service::NanoService">Nano<wbr>Service</a></dt><dd>A compiled nano-service: the module path and the resource limits,
+resolved from the route’s <a href="../../config/struct.NanoServiceAction.html" title="struct dwara_core::config::NanoServiceAction"><code>NanoServiceAction</code></a>. The WASM bytes are
+read and compiled lazily by <code>NanoServiceHandler::load</code> so a
+missing/broken module is reported at handler construction, not at
+config publish time (validation already checks the file exists).</dd><dt><a class="struct" href="struct.NanoServiceHandler.html" title="struct dwara_core::dataplane::nano_service::NanoServiceHandler">Nano<wbr>Service<wbr>Handler</a></dt><dd>The nano-service handler: holds a process-wide wasmtime engine and
+the linker wired with the <code>dwara</code> host imports. Cheap to clone (Arc
+internals). One instance per <code>crate::dataplane::DataPlane</code> (or per
+route set); <a href="struct.NanoServiceHandler.html#method.handle" title="method dwara_core::dataplane::nano_service::NanoServiceHandler::handle"><code>NanoServiceHandler::handle</code></a> is called per request.</dd><dt><a class="struct" href="struct.NanoServiceResponse.html" title="struct dwara_core::dataplane::nano_service::NanoServiceResponse">Nano<wbr>Service<wbr>Response</a></dt><dd>The response a nano-service module produced.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.NanoServiceError.html" title="enum dwara_core::dataplane::nano_service::NanoServiceError">Nano<wbr>Service<wbr>Error</a></dt><dd>A nano-service error. Maps to HTTP responses:</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.deserialize_request.html" title="fn dwara_core::dataplane::nano_service::deserialize_request">deserialize_<wbr>request</a></dt><dd>Deserialize a nano-service wire-format request back into its parts.
+Returns <code>None</code> on a truncated/corrupt buffer.</dd><dt><a class="fn" href="fn.serialize_request.html" title="fn dwara_core::dataplane::nano_service::serialize_request">serialize_<wbr>request</a></dt><dd>Serialize a request into the nano-service wire format (all lengths
+u32 big-endian):</dd><dt><a class="fn" href="fn.shared_handler.html" title="fn dwara_core::dataplane::nano_service::shared_handler">shared_<wbr>handler</a></dt><dd>A process-wide shared nano-service handler. wasmtime recommends a
+single <code>Engine</code> per process (compiled modules are cached and shared
+across threads), so the dataplane reuses one handler for every
+nano-service route. The handler is stateless beyond the immutable
+engine + linker (both Arc-held), so sharing it across requests and
+tests is safe. Lazily initialized on first use; a construction
+failure (wasmtime misconfiguration) is reported once and cached as
+an error so every subsequent request answers 502 without retrying.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,139 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="TLS machinery for listeners (DW-007, feature analysis 4.10 / 4.13)."><title>dwara_core::security::tls - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module tls</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module tls</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>tls</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/tls.rs.html#1-1635">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>TLS machinery for listeners (DW-007, feature analysis 4.10 / 4.13).</p>
+<p>Responsibilities:</p>
+<ul>
+<li>process-global crypto provider installation (aws-lc-rs; must happen
+before the first rustls object is created),</li>
+<li>building a hot-reloadable <code>rustls::ServerConfig</code> from a
+<a href="../../config/struct.ListenerTls.html" title="struct dwara_core::config::ListenerTls"><code>ListenerTls</code></a> terminate block, with SNI-based certificate selection
+(the single <code>cert_file</code>/<code>key_file</code> pair is the fallback certificate,
+<code>certificates</code> entries are matched by SNI),</li>
+<li>outbound TRUST for https dials (#121): the default webpki public
+root set, PEM-bundle root stores for the <code>trusted_ca_file</code> config
+field (private CAs), and the shared HTTP/1.1 client-config shape
+used by upstream connectors, active health probes, and the JWKS
+fetcher,</li>
+<li>a minimal TLS ClientHello SNI parser used by passthrough routing,
+and the passthrough byte-splice itself.</li>
+</ul>
+<p>Hot reload model: <a href="struct.TlsTermination.html" title="struct dwara_core::security::tls::TlsTermination"><code>TlsTermination</code></a> keeps the current
+<code>Arc&lt;rustls::ServerConfig&gt;</code> behind an <code>ArcSwap</code>. Each accepted
+connection clones the current <code>Arc</code> into a fresh <code>TlsAcceptor</code>, so a
+swap only affects handshakes that start after it: in-flight TLS
+sessions keep their negotiated configuration and existing connections
+are never dropped by a reload.</p>
+<p>Documented v1 limitation: TLS 1.3 and 1.2 are both enabled with
+rustls’s default (modern) cipher-suite policy; no cipher/version
+overrides are configurable yet.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SniCertResolver.html" title="struct dwara_core::security::tls::SniCertResolver">SniCert<wbr>Resolver</a></dt><dd>SNI-aware certificate resolver: exact server-name match against the
+<code>certificates</code> entries; falls back to the single pair (or the first
+entry when no pair is configured). Names are compared lowercase per
+the SNI specification.</dd><dt><a class="struct" href="struct.TlsTermination.html" title="struct dwara_core::security::tls::TlsTermination">TlsTermination</a></dt><dd>A hot-reloadable TLS termination configuration for one listener.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PassthroughAction.html" title="enum dwara_core::security::tls::PassthroughAction">Passthrough<wbr>Action</a></dt><dd>Passthrough routing outcome.</dd><dt><a class="enum" href="enum.SpiffeMtlsConfig.html" title="enum dwara_core::security::tls::SpiffeMtlsConfig">Spiffe<wbr>Mtls<wbr>Config</a></dt><dd>A SPIFFE-aware mTLS rustls config: either a client config (for
+outbound upstream connections) or a server config (for inbound
+listener connections). Built from an X.509 SVID and a trust
+bundle by <a href="fn.build_spiffe_mtls_config.html" title="fn dwara_core::security::tls::build_spiffe_mtls_config"><code>build_spiffe_mtls_config</code></a>.</dd><dt><a class="enum" href="enum.SpiffeMtlsRole.html" title="enum dwara_core::security::tls::SpiffeMtlsRole">Spiffe<wbr>Mtls<wbr>Role</a></dt><dd>The mTLS role the SPIFFE-aware TLS config plays for a connection.
+Inbound sidecar connections act as the mTLS server (terminate the
+peer’s SVID); outbound sidecar connections act as the mTLS client
+(present the local workload’s SVID).</dd><dt><a class="enum" href="enum.TlsError.html" title="enum dwara_core::security::tls::TlsError">TlsError</a></dt><dd>Error loading or building TLS material.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.admin_mtls_server_config.html" title="fn dwara_core::security::tls::admin_mtls_server_config">admin_<wbr>mtls_<wbr>server_<wbr>config</a></dt><dd>Build the mTLS-ONLY <code>rustls::ServerConfig</code> for the admin listener
+(DW-022, decision 6). Client certificates are REQUIRED and must chain
+to the CA in <code>client_ca_file</code> (<code>WebPkiClientVerifier</code> over a root
+store loaded from that PEM); the server presents the single
+cert/key pair. The key is checked against the leaf exactly like
+dataplane termination, so a torn pair cannot boot. ALPN advertises
+HTTP/1.1 only — the admin API is a small request/response surface.</dd><dt><a class="fn" href="fn.build_spiffe_mtls_config.html" title="fn dwara_core::security::tls::build_spiffe_mtls_config">build_<wbr>spiffe_<wbr>mtls_<wbr>config</a></dt><dd>Build a SPIFFE-aware mTLS rustls config from an X.509 SVID and a
+trust bundle. This is the integration point between the mesh domain
+(which fetches SVIDs from the SPIRE Workload API) and the TLS
+machinery here.</dd><dt><a class="fn" href="fn.extract_spiffe_id_from_peer_cert.html" title="fn dwara_core::security::tls::extract_spiffe_id_from_peer_cert">extract_<wbr>spiffe_<wbr>id_<wbr>from_<wbr>peer_<wbr>cert</a></dt><dd>Extract the SPIFFE ID (the URI SAN) from a verified peer
+certificate. This is the auth identity the mesh uses for policy
+decisions: the sidecar terminates mTLS, verifies the peer SVID
+against the trust bundle, then extracts the SPIFFE ID from the
+peer cert’s URI SAN and hands it to the auth layer as the
+principal/consumer.</dd><dt><a class="fn" href="fn.fingerprint_colon_hex.html" title="fn dwara_core::security::tls::fingerprint_colon_hex">fingerprint_<wbr>colon_<wbr>hex</a></dt><dd>Format the SHA-256 fingerprint of a certificate DER as lowercase
+colon-separated hex (DW-035): the format the
+<code>mtls_consumer_mapping.consumers[].fingerprint</code> config field and the
+<code>X-Client-Cert-Fingerprint</code> forwarding header use. The raw hex
+(no colons) is the credential SELECTOR the authn registry indexes;
+this colon-separated form is the OPERATOR-facing display format
+(config and headers), so the two never collide.</dd><dt><a class="fn" href="fn.handle_passthrough.html" title="fn dwara_core::security::tls::handle_passthrough">handle_<wbr>passthrough</a></dt><dd>Peek the ClientHello off a passthrough connection, decide the route,
+and either splice both directions to the upstream or close.</dd><dt><a class="fn" href="fn.https_h1_client_config.html" title="fn dwara_core::security::tls::https_h1_client_config">https_<wbr>h1_<wbr>client_<wbr>config</a></dt><dd>HTTP/1.1-ALPN rustls client config over the given trust roots: the
+shared shape for every outbound https dial that speaks HTTP/1.1 —
+<code>https</code>-protocol upstream connectors, active health probes, and the
+JWKS fetcher (#121). Keeping one constructor here means a config
+generation applies IDENTICAL trust and handshake policy across the
+pooled client, the probes, and the fetcher; <code>http2</code> upstreams build
+their own config (same roots, <code>h2</code> ALPN).</dd><dt><a class="fn" href="fn.https_h1_client_config_pq.html" title="fn dwara_core::security::tls::https_h1_client_config_pq">https_<wbr>h1_<wbr>client_<wbr>config_<wbr>pq</a></dt><dd>DW-105: HTTP/1.1-ALPN rustls client config with post-quantum hybrid
+key exchange opt-in. When <code>pq</code> is <code>true</code>, the config is built with a
+provider that has the X25519+ML-KEM hybrid kx group prepended. The
+classical X25519 group remains as a fallback for non-PQ servers.
+When <code>pq</code> is <code>false</code>, this is identical to
+<a href="fn.https_h1_client_config.html" title="fn dwara_core::security::tls::https_h1_client_config"><code>https_h1_client_config</code></a>.</dd><dt><a class="fn" href="fn.https_h1_client_config_with_auth.html" title="fn dwara_core::security::tls::https_h1_client_config_with_auth">https_<wbr>h1_<wbr>client_<wbr>config_<wbr>with_<wbr>auth</a></dt><dd>SEC-03: HTTP/1.1-ALPN rustls client config WITH client auth (mTLS
+to the upstream). Loads the client cert chain and private key from
+PEM files and installs them via <code>with_client_auth_cert</code>. Used when
+an upstream configures <code>mtls.client_cert_file</code> + <code>mtls.client_key_file</code>.
+Fails with <a href="enum.TlsError.html#variant.Io" title="variant dwara_core::security::tls::TlsError::Io"><code>TlsError::Io</code></a> when the files cannot be read or parsed.</dd><dt><a class="fn" href="fn.https_h2_client_config_with_auth.html" title="fn dwara_core::security::tls::https_h2_client_config_with_auth">https_<wbr>h2_<wbr>client_<wbr>config_<wbr>with_<wbr>auth</a></dt><dd>SEC-03: HTTP/2-ALPN rustls client config WITH client auth (mTLS to
+the upstream). Same as <a href="fn.https_h1_client_config_with_auth.html" title="fn dwara_core::security::tls::https_h1_client_config_with_auth"><code>https_h1_client_config_with_auth</code></a> but with
+<code>h2</code> ALPN and a client locked to HTTP/2.</dd><dt><a class="fn" href="fn.https_h3_client_config.html" title="fn dwara_core::security::tls::https_h3_client_config">https_<wbr>h3_<wbr>client_<wbr>config</a></dt><dd>HTTP/3-ALPN rustls client config over the given trust roots (DW-108):
+the shared shape for every outbound H3/QUIC dial — the H3 upstream
+connector and the QUIC active health probe. QUIC mandates TLS 1.3,
+so this always negotiates <code>h3</code> over the same root store the pooled
+https connector would use (#121: webpki by default, the upstream’s
+<code>trusted_ca_file</code> bundle when configured). Keeping the constructor
+here means one trust/handshake policy across the pooled H3 client and
+its probes, mirroring <a href="fn.https_h1_client_config.html" title="fn dwara_core::security::tls::https_h1_client_config"><code>https_h1_client_config</code></a>.</dd><dt><a class="fn" href="fn.install_aws_lc_rs_provider.html" title="fn dwara_core::security::tls::install_aws_lc_rs_provider">install_<wbr>aws_<wbr>lc_<wbr>rs_<wbr>provider</a></dt><dd>Install the aws-lc-rs crypto provider as the process-global rustls
+default. Idempotent: installing twice (e.g. binary + tests in one
+process) returns Ok the first time and an ignorable error afterwards.</dd><dt><a class="fn" href="fn.issuer_cn_of_leaf.html" title="fn dwara_core::security::tls::issuer_cn_of_leaf">issuer_<wbr>cn_<wbr>of_<wbr>leaf</a></dt><dd>Extract the issuer CommonName of a leaf certificate (DW-035): the
+value of the FIRST CN attribute (OID 2.5.4.3) in the issuer RDN
+sequence. Same strict UTF-8 decode as <a href="fn.subject_cn_of_leaf.html" title="fn dwara_core::security::tls::subject_cn_of_leaf"><code>subject_cn_of_leaf</code></a>; <code>None</code>
+when the issuer carries no decodable CN. THE CERTIFICATE IS ALREADY
+VERIFIED at the TLS layer when this runs; extraction only reads the
+value for the <code>X-Client-Cert-Issuer-CN</code> forwarding header.</dd><dt><a class="fn" href="fn.not_after_unix_secs.html" title="fn dwara_core::security::tls::not_after_unix_secs">not_<wbr>after_<wbr>unix_<wbr>secs</a></dt><dd>Extract the <code>notAfter</code> timestamp of a leaf certificate (DW-035) as
+Unix epoch seconds. The validity SEQUENCE holds two time values:
+<code>notBefore</code> then <code>notAfter</code>, each a UTCTime (tag 0x17, YYMMDDHHMMSSZ)
+or GeneralizedTime (tag 0x18, YYYYMMDDHHMMSSZ). Returns <code>None</code> on
+any structural shortcoming or an unparseable time. THE CERTIFICATE
+IS ALREADY VERIFIED at the TLS layer when this runs; extraction only
+reads the value for the <code>X-Client-Cert-Not-After</code> forwarding header.</dd><dt><a class="fn" href="fn.peek_client_hello_sni.html" title="fn dwara_core::security::tls::peek_client_hello_sni">peek_<wbr>client_<wbr>hello_<wbr>sni</a></dt><dd>Peek the TLS ClientHello SNI off a TCP stream WITHOUT splicing.</dd><dt><a class="fn" href="fn.resolve_passthrough.html" title="fn dwara_core::security::tls::resolve_passthrough">resolve_<wbr>passthrough</a></dt><dd>Resolve a passthrough SNI route against the gateway config.</dd><dt><a class="fn" href="fn.root_store_from_pem_file.html" title="fn dwara_core::security::tls::root_store_from_pem_file">root_<wbr>store_<wbr>from_<wbr>pem_<wbr>file</a></dt><dd>Build a rustls <code>RootCertStore</code> from a PEM file of CA certificates
+(#121). The file may carry SEVERAL certificates — a typical CA bundle
+lists an anchor plus intermediates — and every certificate in it
+becomes a trust anchor. Fails with <a href="enum.TlsError.html#variant.Io" title="variant dwara_core::security::tls::TlsError::Io"><code>TlsError::Io</code></a> when the file
+cannot be read or parsed, and with <a href="enum.TlsError.html#variant.EmptyPem" title="variant dwara_core::security::tls::TlsError::EmptyPem"><code>TlsError::EmptyPem</code></a> when it
+parses to zero certificates (an empty trust set is always a
+configuration mistake, never a valid “trust nothing” — that would
+silently fail every TLS handshake).</dd><dt><a class="fn" href="fn.sni_from_client_hello.html" title="fn dwara_core::security::tls::sni_from_client_hello">sni_<wbr>from_<wbr>client_<wbr>hello</a></dt><dd>Parse the SNI server name out of a TLS ClientHello, reassembling
+handshake fragments across records when the hello does not fit in
+one (#120).</dd><dt><a class="fn" href="fn.spki_of_leaf.html" title="fn dwara_core::security::tls::spki_of_leaf">spki_<wbr>of_<wbr>leaf</a></dt><dd>Extract the DER-encoded SubjectPublicKeyInfo of a leaf certificate by
+walking Certificate -&gt; TBSCertificate -&gt; (version?) serial, signature,
+issuer, validity, subject, SPKI. Returns the SPKI DER including its own
+SEQUENCE header (the same encoding <code>SigningKey::public_key</code> yields) or
+None on any structural shortcoming (treated as a mismatch by the
+caller, which rejects).</dd><dt><a class="fn" href="fn.subject_cn_of_leaf.html" title="fn dwara_core::security::tls::subject_cn_of_leaf">subject_<wbr>cn_<wbr>of_<wbr>leaf</a></dt><dd>Extract the subject CommonName of a leaf certificate (#124): the
+value of the FIRST CN attribute (OID 2.5.4.3) in the subject RDN
+sequence, decoded from UTF8String / PrintableString / IA5String (the
+string types CNs carry in practice). The decode is STRICT UTF-8:
+invalid CN bytes yield <code>None</code> rather than being lossy-folded to
+U+FFFD, which could collide two distinct malformed names into one
+selector. <code>None</code> also when the subject carries no CN at all — either
+way such a certificate can only match a by-fingerprint mTLS
+credential (the caller falls back to the fingerprint selector).
+Hand-rolled DER walk (no X.509 parser dependency), same substrate as
+the private SPKI extractor in this module. THE CERTIFICATE IS
+ALREADY VERIFIED at the TLS layer when this runs; extraction only
+reads the match value.</dd><dt><a class="fn" href="fn.system_root_store.html" title="fn dwara_core::security::tls::system_root_store">system_<wbr>root_<wbr>store</a></dt><dd>REL-08 (#219): the OS-native root CA store as a rustls
+<code>RootCertStore</code>. Loaded via <code>rustls-native-certs</code>, which reads the
+platform trust store (macOS keychain, Linux CA bundle, Windows root
+store). Used by upstreams that opt into <code>use_system_roots</code> instead of
+the bundled webpki set. Failures to load native certs fall back to
+the webpki set rather than failing every TLS handshake, because a
+missing OS trust store is a deployment mistake, not a security
+decision — and the operator’s intent (“trust the OS”) is best
+approximated by “trust what we have” rather than “trust nothing”.</dd><dt><a class="fn" href="fn.webpki_root_store.html" title="fn dwara_core::security::tls::webpki_root_store">webpki_<wbr>root_<wbr>store</a></dt><dd>The Mozilla (webpki) public root set as a rustls <code>RootCertStore</code>: the
+DEFAULT trust for every outbound https dial — upstream connectors,
+active health probes, and the JWKS fetcher (#121 made the per-entity
+override configurable; this remains what an entity without a
+<code>trusted_ca_file</code> verifies against). Lives here, next to the other
+root-store machinery, so all outbound callers share one definition
+instead of each rebuilding it inline.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.EndpointPicker.html" title="type dwara_core::security::tls::EndpointPicker">Endpoint<wbr>Picker</a></dt><dd>Endpoint resolver for passthrough routing: maps an upstream NAME to a
+load-balanced <code>(address, port)</code>. The dataplane caller builds it from
+the CURRENT registry (see dwara-bin’s listener), so passthrough picks
+follow config reloads; <code>Send + Sync</code> because the passthrough path runs
+on spawned tasks. <code>None</code> means “no dataplane” — the first configured
+endpoint is used.</dd></dl></section></div></main></body></html>

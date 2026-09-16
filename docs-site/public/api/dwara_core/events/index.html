@@ -1,0 +1,111 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="In-process event bus (DW-044, feature analysis section 5 “Platform”): the notice plumbing behind alert &#38; event webhooks."><title>dwara_core::events - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module events</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module events</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-it-is" title="What it is">What it is</a></li><li><a href="#emission-contract-never-backpressure-the-dataplane" title="Emission contract: never backpressure the dataplane">Emission contract: never backpressure the dataplane</a></li><li><a href="#event-kinds-and-payloads" title="Event kinds and payloads">Event kinds and payloads</a></li><li><a href="#failure-isolation" title="Failure isolation">Failure isolation</a></li><li><a href="#bus-identity-and-lifecycle" title="Bus identity and lifecycle">Bus identity and lifecycle</a></li></ul><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>events</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/events/mod.rs.html#1-698">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>In-process event bus (DW-044, feature analysis section 5 “Platform”):
+the notice plumbing behind alert &amp; event webhooks.</p>
+<h2 id="what-it-is"><a class="doc-anchor" href="#what-it-is">§</a>What it is</h2>
+<p>A bounded <code>tokio::sync::mpsc</code> channel plus cheap clone-able
+<a href="struct.Emitter.html" title="struct dwara_core::events::Emitter"><code>Emitter</code></a> handles. Subsystems that own a state machine worth
+alerting on (the circuit breaker, passive/active health, the config
+publish pipeline) emit a small <a href="struct.Event.html" title="struct dwara_core::events::Event"><code>Event</code></a> at every transition; the
+webhook deliverer (<a href="webhook/index.html" title="mod dwara_core::events::webhook"><code>webhook</code></a>) drains the channel in a background
+task and POSTs each event to the configured targets. std + tokio
+only — no dependency beyond <code>config</code> (the schema types and their
+bounds) and <code>observability</code> (delivery-outcome metrics).</p>
+<h2 id="emission-contract-never-backpressure-the-dataplane"><a class="doc-anchor" href="#emission-contract-never-backpressure-the-dataplane">§</a>Emission contract: never backpressure the dataplane</h2>
+<p><a href="struct.Emitter.html#method.emit" title="method dwara_core::events::Emitter::emit"><code>Emitter::emit</code></a> is a <code>try_send</code> onto the bounded channel. When the
+queue is full (or nobody is draining it) the event is DROPPED and the
+drop is counted (<a href="struct.EventBus.html#method.dropped_total" title="method dwara_core::events::EventBus::dropped_total"><code>EventBus::dropped_total</code></a>, surfaced as the
+<code>dwara_events_dropped_total</code> gauge at scrape time). There is no
+blocking wait, no unbounded buffer growth, and no failure mode that
+can stall the caller — emission sites sit on request paths (the
+breaker <code>check</code>/<code>report</code> wire) and on the reload path, and a
+misbehaving webhook target must never show up as gateway latency.
+The drop policy is drop-NEWEST at emit time (the oldest queued
+events keep their place in line): a slow drain sheds the burst, not
+the history.</p>
+<h2 id="event-kinds-and-payloads"><a class="doc-anchor" href="#event-kinds-and-payloads">§</a>Event kinds and payloads</h2>
+<p>Kinds are a closed set (<a href="enum.EventKind.html#associatedconstant.ALL" title="associated constant dwara_core::events::EventKind::ALL"><code>EventKind::ALL</code></a>) — a webhook’s <code>events</code>
+list is validated against it, so a config cannot subscribe to an
+event the gateway will never emit. The payload is a flat struct of
+bounded config labels and numbers (<a href="struct.EventPayload.html" title="struct dwara_core::events::EventPayload"><code>EventPayload</code></a>); there is no
+free-form field, so the serialized envelope is small by construction
+(the deliverer still enforces a hard byte cap). No request-derived
+data (paths, headers) enters a payload — identifiers are
+CONFIG-DECLARED labels only (<code>upstream</code>, and <code>consumer</code> for quota
+budgets, whose consumers are config records by construction in this
+edition) — an envelope is safe to POST to a third party by
+construction.</p>
+<p>Emission sites:</p>
+<ul>
+<li>breaker state transitions (DW-015): opened (with the rule that
+tripped), half-open, closed (<code>resilience::breaker</code>);</li>
+<li>outlier ejection and recovery (DW-012 passive + DW-013 active —
+both report through the same tracker, so both emit):
+<code>endpoint_ejected</code>, <code>endpoint_recovered</code>
+(<code>resilience::health</code>);</li>
+<li>config published (generation + content hash + route count) and
+config rejected (validation issue count) (<code>snapshot</code>);</li>
+<li>a consumer’s request budget crossing the near-limit threshold
+(DW-033): <code>quota_near_limit</code>, edge-triggered once per (consumer,
+budget, window) from the dataplane’s quota phase
+(<code>dataplane::proxy</code> — the emit lives there because the state
+domain must not import events).</li>
+</ul>
+<p>Deliberately NOT emitted (documented hook points, not gaps):</p>
+<ul>
+<li>rate-limiter eviction (#132): already observable as
+<code>dwara_rate_limiter_evictions_total</code>; an event per eviction would
+be high-frequency noise, not an alert.</li>
+</ul>
+<h2 id="failure-isolation"><a class="doc-anchor" href="#failure-isolation">§</a>Failure isolation</h2>
+<p>The deliverer (see <code>webhook</code>) runs as its own task, dispatches each
+delivery as a further task, bounds concurrent deliveries with a
+semaphore (over-cap deliveries are dropped and counted, never
+queued), and gives every delivery ONE total timeout shared by all
+its retry attempts. A slow, hung, or dead target can therefore
+consume at most <code>timeout_ms</code> of one semaphore slot — never the
+queue, never the emit path, never the dataplane.</p>
+<h2 id="bus-identity-and-lifecycle"><a class="doc-anchor" href="#bus-identity-and-lifecycle">§</a>Bus identity and lifecycle</h2>
+<p>One bus per gateway process, owned by the <code>DataPlane</code> and attached
+to the <code>ConfigState</code> it was built from (so config publish events and
+dataplane events share one queue and one deliverer). The
+<code>gateway</code> field of every envelope identifies the instance:
+<code>dwara-&lt;pid&gt;-&lt;boot unix ms&gt;</code> — unique per process start, no
+hostname dependency, stable for the process lifetime.</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="stream/index.html" title="mod dwara_core::events::stream">stream</a></dt><dd>Real-time access-record stream (DW-121, feature analysis section 5
+“Platform”): the record plumbing that mirrors the notice plumbing of
+DW-044. Where the event bus carries a handful of discrete
+operational events per minute (breaker transitions, ejections,
+config publishes), this pipeline carries ONE record per completed
+request — the raw firehose an operator points at their own
+warehouse or SIEM when the embedded analytics store (DW-043) is not
+the system of record. It complements, never replaces: the two are
+configured independently (a deployment can run either, both, or
+neither) and share nothing at runtime — different channels, different
+tasks, different failure domains.</dd><dt><a class="mod" href="webhook/index.html" title="mod dwara_core::events::webhook">webhook</a></dt><dd>Webhook delivery (DW-044, feature analysis section 5 “Platform”):
+drains the event bus and POSTs each event to the configured targets.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Emitter.html" title="struct dwara_core::events::Emitter">Emitter</a></dt><dd>A clone-able emission handle (an <code>Arc&lt;EventBus&gt;</code>). <code>Option&lt;Emitter&gt;</code>
+at every emission site: <code>None</code> (tests, unwired constructions) is a
+documented no-op, so the subsystems never need a bus to exist.</dd><dt><a class="struct" href="struct.EndpointEvents.html" title="struct dwara_core::events::EndpointEvents">Endpoint<wbr>Events</a></dt><dd><a href="struct.UpstreamEmitter.html" title="struct dwara_core::events::UpstreamEmitter"><code>UpstreamEmitter</code></a> further bound to one endpoint label (DW-044):
+held by the per-endpoint passive health tracker
+(<code>resilience::health::EndpointHealth</code>), which knows its state
+machine but not its own <code>address:port</code> (the balancer does).</dd><dt><a class="struct" href="struct.Event.html" title="struct dwara_core::events::Event">Event</a></dt><dd>One emitted event. <code>id</code> and <code>timestamp_ms</code> are assigned by the bus at
+emit time (single place), <code>gateway</code> identifies the process.</dd><dt><a class="struct" href="struct.EventBus.html" title="struct dwara_core::events::EventBus">Event<wbr>Bus</a></dt><dd>The bounded event queue plus its identity and counters. Share via
+<code>Arc</code>; emitters hold an <a href="struct.Emitter.html" title="struct dwara_core::events::Emitter"><code>Emitter</code></a> (a cheap clone of that Arc).</dd><dt><a class="struct" href="struct.EventPayload.html" title="struct dwara_core::events::EventPayload">Event<wbr>Payload</a></dt><dd>The payload of one event: a flat set of bounded labels and numbers.
+Every field is optional (each event kind sets the fields it owns);
+unset fields are omitted from the serialized envelope, and there is
+deliberately NO free-form/detail-string-from-input field — an
+envelope must stay small and safe to hand to a third party.</dd><dt><a class="struct" href="struct.UpstreamEmitter.html" title="struct dwara_core::events::UpstreamEmitter">Upstream<wbr>Emitter</a></dt><dd><a href="struct.Emitter.html" title="struct dwara_core::events::Emitter"><code>Emitter</code></a> pre-bound to an upstream label (DW-044): held by the
+per-upstream circuit breaker and balancer.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.EventKind.html" title="enum dwara_core::events::EventKind">Event<wbr>Kind</a></dt><dd>Every event kind the gateway emits (DW-044). Closed set: webhook
+<code>events</code> lists are validated against <a href="enum.EventKind.html#method.from_config" title="associated function dwara_core::events::EventKind::from_config"><code>EventKind::from_config</code></a>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.EVENT_CHANNEL_CAPACITY.html" title="constant dwara_core::events::EVENT_CHANNEL_CAPACITY">EVENT_<wbr>CHANNEL_<wbr>CAPACITY</a></dt><dd>Capacity of the event channel (DW-044). Bound chosen for alert-rate
+shapes: transition events are rare per upstream (a breaker flapping
+once per <code>open_ms</code>, ejections once per <code>eject_ms</code>), so 256 queued
+events is already a gateway in serious trouble — beyond it, drops
+(counted, gauge-exported) are the right answer, not buffering.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.EventDurability.html" title="trait dwara_core::events::EventDurability">Event<wbr>Durability</a></dt><dd>REL-14 (#249): the durability seam for the event bus. The events
+domain owns the trait; the dataplane (which already holds both the
+<code>StateStore</code> and the <code>EventBus</code>) provides a concrete
+implementation that wraps <code>StateStore</code> methods. This keeps the
+dependency direction correct: <code>events</code> does not import <code>state</code>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.generate_instance_id.html" title="fn dwara_core::events::generate_instance_id">generate_<wbr>instance_<wbr>id</a></dt><dd>Process-unique instance label: <code>dwara-&lt;pid&gt;-&lt;boot unix ms hex&gt;</code>.
+Two gateway processes on one host never share it; it carries no
+hostname (a third-party envelope reader needs process identity, not
+topology).</dd><dt><a class="fn" href="fn.refresh_event_gauges.html" title="fn dwara_core::events::refresh_event_gauges">refresh_<wbr>event_<wbr>gauges</a></dt><dd>Refresh the event-bus observation gauge at scrape time (the
+<code>dwara_rate_limiter_evictions_total</code> model: the emit path bumps a
+plain atomic, and only the scrape couples it to the registry — a
+gauge rather than a counter so the hot path stays registry-free).</dd></dl></section></div></main></body></html>

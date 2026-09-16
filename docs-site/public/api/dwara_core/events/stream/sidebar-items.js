@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_BATCH_BYTES","MAX_RECORD_BYTES"],"fn":["compile_stream_targets","refresh_stream_gauges","run_stream_flusher"],"struct":["AccessRecordStream","KafkaRecordSink","StreamRecord","StreamTargets","WebhookRecordSink"],"trait":["RecordSink"]};

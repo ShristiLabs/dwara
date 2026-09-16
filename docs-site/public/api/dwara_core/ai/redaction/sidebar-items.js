@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["builtin_pii_patterns"],"struct":["Redactor"]};

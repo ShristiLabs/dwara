@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StatusPattern","ValidationResult"],"struct":["ResponseKey","ResponseToValidate","ResponseValidator","ValidationError"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["import_openapi","is_json_spec"],"struct":["ImportResult"]};

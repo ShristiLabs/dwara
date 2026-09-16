@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["translate_ingress"],"struct":["HTTPIngressPath","Ingress","IngressBackend","IngressClass","IngressClassObjectMeta","IngressClassSpec","IngressObjectMeta","IngressRule","IngressServiceBackend","IngressSpec","IngressTls","ServiceBackendPort"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["active","ai_proxy","anomaly","balance","canary","compression","cors","discovery","graphql","grpc_web","hardening","l4","nano_service","plugin_dispatch","proxy","proxy_proto","replay","response_cache","split","transforms","translation","translation_graphql","translation_soap","upstream","upstream_h3","versioning","waf","websocket"]};

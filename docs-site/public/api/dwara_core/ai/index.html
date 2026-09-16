@@ -1,0 +1,81 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The AI provider-adapter pack (DW-075): one client dialect in, three provider dialects out."><title>dwara_core::ai - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module ai</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module ai</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#layout-1" title="Layout">Layout</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>ai</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/ai/mod.rs.html#1-615">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The AI provider-adapter pack (DW-075): one client dialect in,
+three provider dialects out.</p>
+<p>Clients send OpenAI chat-completions shaped requests to a route
+whose action is <code>ai</code>; the gateway resolves the request’s <code>model</code>
+through the <a href="struct.AiRuntime.html" title="struct dwara_core::ai::AiRuntime"><code>AiRuntime</code></a> alias table, translates the request to
+the serving provider’s wire format via that provider’s
+<a href="adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a>, places the call
+through the provider’s named UPSTREAM (the same pooling, TLS,
+timeout, breaker, and health machinery every other upstream gets),
+and translates the response back to the OpenAI shape. The provider
+model identifier never reaches the client; the client’s alias never
+reaches the provider.</p>
+<h2 id="layout-1"><a class="doc-anchor" href="#layout-1">§</a>Layout</h2>
+<ul>
+<li><a href="types/index.html" title="mod dwara_core::ai::types"><code>types</code></a> — the canonical chat vocabulary every adapter shares</li>
+<li><a href="adapter/index.html" title="mod dwara_core::ai::adapter"><code>adapter</code></a> — the <a href="adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a>
+trait, the pure-translation seam DW-076 (routing/failover)
+composes on, and the domain error type</li>
+<li><a href="adapters/index.html" title="mod dwara_core::ai::adapters"><code>adapters</code></a> — the OpenAI, Anthropic, and Gemini dialect impls</li>
+<li><a href="openai_compat/index.html" title="mod dwara_core::ai::openai_compat"><code>openai_compat</code></a> — the client-facing facade (parse/serialize)</li>
+<li><a href="sse/index.html" title="mod dwara_core::ai::sse"><code>sse</code></a> — hand-rolled SSE framing (in-house by the locked M4
+dependency decision)</li>
+<li><a href="guardrails/index.html" title="mod dwara_core::ai::guardrails"><code>guardrails</code></a> — the DW-082 guardrail engine (prompt-injection,
+PII, banned-content, output schema enforcement)</li>
+<li><a href="semantic_cache/index.html" title="mod dwara_core::ai::semantic_cache"><code>semantic_cache</code></a> — the DW-083 semantic cache
+(embedding-similarity cache for AI prompts; feature-gated behind
+the <code>semantic_cache</code> cargo feature)</li>
+<li><a href="policy/index.html" title="mod dwara_core::ai::policy"><code>policy</code></a> — the DW-085 routing-policy engine (within-request
+escalation via an external classifier, and latency-vs-cost
+static selection)</li>
+<li><a href="a2a/index.html" title="mod dwara_core::ai::a2a"><code>a2a</code></a> — the DW-114 A2A (agent-to-agent) protocol scaffold
+(adapter, Agent Card parser, stubbed task lifecycle; feature-
+gated behind the <code>a2a</code> cargo feature)</li>
+</ul>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only (the <code>ai:</code> block’s schema types). The
+transport lives in <code>dataplane</code> (<code>dataplane::ai_proxy</code>), which may
+depend on everything; DW-076’s failover wraps the call, DW-077
+wires the streaming path, DW-078/079 meter it — none of them need
+to touch adapter internals, which is the point of the trait.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.adapter_for"><code>pub use adapter::<a class="fn" href="adapter/fn.adapter_for.html" title="fn dwara_core::ai::adapter::adapter_for">adapter_for</a>;</code></dt><dt id="reexport.AiError"><code>pub use adapter::<a class="enum" href="adapter/enum.AiError.html" title="enum dwara_core::ai::adapter::AiError">AiError</a>;</code></dt><dt id="reexport.ProviderAdapter"><code>pub use adapter::<a class="trait" href="adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter">ProviderAdapter</a>;</code></dt><dt id="reexport.ProviderErrorBody"><code>pub use adapter::<a class="struct" href="adapter/struct.ProviderErrorBody.html" title="struct dwara_core::ai::adapter::ProviderErrorBody">ProviderErrorBody</a>;</code></dt><dt id="reexport.ProviderRequest"><code>pub use adapter::<a class="struct" href="adapter/struct.ProviderRequest.html" title="struct dwara_core::ai::adapter::ProviderRequest">ProviderRequest</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="a2a/index.html" title="mod dwara_core::ai::a2a">a2a</a></dt><dd>A2A (agent-to-agent) protocol support (DW-114, AI-12 #252).</dd><dt><a class="mod" href="adapter/index.html" title="mod dwara_core::ai::adapter">adapter</a></dt><dd>The <a href="adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a> trait (DW-075): the seam every provider
+dialect implements and every higher layer composes on.</dd><dt><a class="mod" href="adapters/index.html" title="mod dwara_core::ai::adapters">adapters</a></dt><dd>Provider dialect implementations (DW-075). Each module is a
+stateless <a href="adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a>
+singleton; see the module docs of each for its translation notes.</dd><dt><a class="mod" href="batch/index.html" title="mod dwara_core::ai::batch">batch</a></dt><dd>AI-04 (#194): Batch API support and half-price metering.</dd><dt><a class="mod" href="budget/index.html" title="mod dwara_core::ai::budget">budget</a></dt><dd>AI token budgets (DW-078): tokens/min and cost/day per consumer or
+per policy-shared team.</dd><dt><a class="mod" href="cost/index.html" title="mod dwara_core::ai::cost">cost</a></dt><dd>AI cost attribution (DW-079): pricing tables and per-call cost
+computation.</dd><dt><a class="mod" href="credentials/index.html" title="mod dwara_core::ai::credentials">credentials</a></dt><dd>Provider credential pools (DW-080, Ent).</dd><dt><a class="mod" href="experiments/index.html" title="mod dwara_core::ai::experiments">experiments</a></dt><dd>Prompt experimentation (DW-086): A/B model comparison, prompt
+versioning, regression evals, and feedback ingestion.</dd><dt><a class="mod" href="governance/index.html" title="mod dwara_core::ai::governance">governance</a></dt><dd>AI model governance (DW-084): per-team model allowlists and the
+shadow-audit switch.</dd><dt><a class="mod" href="guardrails/index.html" title="mod dwara_core::ai::guardrails">guardrails</a></dt><dd>AI guardrails (DW-082): prompt-injection heuristics, PII detection,
+banned-content filters, and output schema enforcement as a
+middleware chain on the AI proxy action.</dd><dt><a class="mod" href="image_fetch/index.html" title="mod dwara_core::ai::image_fetch">image_<wbr>fetch</a></dt><dd>AI-13 (#201): Gateway-side image URL fetcher.</dd><dt><a class="mod" href="ingress/index.html" title="mod dwara_core::ai::ingress">ingress</a></dt><dd>AI-05 (#195): Multi-dialect ingress parsers.</dd><dt><a class="mod" href="logging/index.html" title="mod dwara_core::ai::logging">logging</a></dt><dd>AI prompt/response logging engine (DW-081): the per-generation
+compiled logging config plus redactor.</dd><dt><a class="mod" href="mcp/index.html" title="mod dwara_core::ai::mcp">mcp</a></dt><dd>MCP gateway (DW-087): a hand-rolled Model Context Protocol
+server/router over JSON-RPC 2.0.</dd><dt><a class="mod" href="openai_compat/index.html" title="mod dwara_core::ai::openai_compat">openai_<wbr>compat</a></dt><dd>The OpenAI-compatibility facade (DW-075).</dd><dt><a class="mod" href="policy/index.html" title="mod dwara_core::ai::policy">policy</a></dt><dd>AI routing policies (DW-085): within-request escalation and
+latency-vs-cost selection. Composed over DW-076 routing.</dd><dt><a class="mod" href="redaction/index.html" title="mod dwara_core::ai::redaction">redaction</a></dt><dd>PII redaction (DW-081): scrubs PII/secrets from prompt and response
+text before it reaches the log store.</dd><dt><a class="mod" href="routing/index.html" title="mod dwara_core::ai::routing">routing</a></dt><dd>AI routing decisions (DW-076): which provider/model serves one
+request, and in what order to fail over.</dd><dt><a class="mod" href="semantic_cache/index.html" title="mod dwara_core::ai::semantic_cache">semantic_<wbr>cache</a></dt><dd>AI semantic caching (DW-083): embedding-similarity cache for AI
+prompts. A paraphrased prompt within the similarity threshold
+returns the cached response (no provider call, no token spend).</dd><dt><a class="mod" href="sse/index.html" title="mod dwara_core::ai::sse">sse</a></dt><dd>Hand-rolled SSE framing (DW-075).</dd><dt><a class="mod" href="stream/index.html" title="mod dwara_core::ai::stream">stream</a></dt><dd>Streaming translation (DW-077): provider SSE in, OpenAI SSE out,
+frame by frame.</dd><dt><a class="mod" href="token_estimator/index.html" title="mod dwara_core::ai::token_estimator">token_<wbr>estimator</a></dt><dd>Local prompt-token estimation (PERF-01): a lightweight, dependency-
+free heuristic that estimates the prompt token count of a canonical
+<a href="types/struct.ChatRequest.html" title="struct dwara_core::ai::types::ChatRequest"><code>ChatRequest</code></a> BEFORE the upstream provider is contacted. The
+estimate feeds a budget pre-check that rejects requests exceeding
+the remaining token-budget window with 429 <code>ai_budget_exceeded</code>
+BEFORE the provider call, so a holder near the limit cannot overrun
+by a large prompt.</dd><dt><a class="mod" href="types/index.html" title="mod dwara_core::ai::types">types</a></dt><dd>Canonical chat-completion types (DW-075).</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AiRuntime.html" title="struct dwara_core::ai::AiRuntime">AiRuntime</a></dt><dd>The per-generation compiled AI table (DW-075): the provider pool
+with resolved credentials plus the model alias map. Built at
+dataplane refresh from the published config; immutable once
+built.</dd><dt><a class="struct" href="struct.CompiledProvider.html" title="struct dwara_core::ai::CompiledProvider">Compiled<wbr>Provider</a></dt><dd>One compiled provider: everything a request needs after the model
+alias resolves, with the auth value already RESOLVED (DW-045
+compile-time contract — validation resolved it once at publish;
+re-resolution here keeps the runtime table self-sufficient and a
+reload picks up rotated env/file values).</dd><dt><a class="struct" href="struct.RouteTarget.html" title="struct dwara_core::ai::RouteTarget">Route<wbr>Target</a></dt><dd>One routable provider/model pair (DW-076): a failover-chain member
+or a canary version. <code>version</code> is the canary attribution label
+(None for plain chain targets).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CompiledModel.html" title="enum dwara_core::ai::CompiledModel">Compiled<wbr>Model</a></dt><dd>The compiled alias entry (DW-076): either a failover chain
+(primary first), a canary split, a routing policy (DW-085), or an
+A/B test experiment (DW-086). A policy alias composes over OTHER
+aliases’ routing plans, so it has no provider/model pair of its
+own — validation enforces that <code>routing_policy</code> is mutually
+exclusive with <code>failover</code> and <code>canary</code>. An experiment alias
+composes over OTHER aliases’ routing plans too — validation
+enforces that <code>ab_test</code> is mutually exclusive with <code>failover</code>,
+<code>canary</code>, and <code>routing_policy</code>.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SHARED_DATA_CAP_BYTES","SHARED_DATA_CAP_ENTRIES"],"enum":["PhaseResult","PluginMetricType"],"struct":["LocalResponse","PendingCallout","PluginContext","PluginInstance","PluginLimits","PluginMetric","PluginModule","WasmEngine"],"type":["SharedData"]};

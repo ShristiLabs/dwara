@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["NanoServiceError"],"fn":["deserialize_request","serialize_request","shared_handler"],"struct":["DeserializedRequest","NanoService","NanoServiceHandler","NanoServiceResponse"]};

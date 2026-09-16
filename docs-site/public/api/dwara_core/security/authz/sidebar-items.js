@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AuthzLevel","Decision"],"fn":["authorize","effective_client_ip","evaluate_one","resolve"],"struct":["AuthzChain","AuthzContext","Resolved"]};

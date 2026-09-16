@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RequestBodyOutcome","RequestBodyTransformError","ResponseBodyTransformError"],"fn":["apply_header_ops","apply_query_ops","apply_security_headers","is_json_body","mask_response_body","media_type","transform_request_body","transform_response_body"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CredentialKind","StoreError"],"fn":["sync_consumers_from_config"],"struct":["AuditRow","ConsumerRecord","CredentialRecord","EventWalRow","LeaderRow","PrincipalRow","RoleRow","StateStore","WorkspaceRow"]};

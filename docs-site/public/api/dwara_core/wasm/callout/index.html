@@ -1,0 +1,86 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Plugin HTTP callout transport (DW-167, issue #285)."><title>dwara_core::wasm::callout - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module callout</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module callout</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#guardrails-hard-caps-no-config-surface" title="Guardrails (hard caps, no config surface)">Guardrails (hard caps, no config surface)</a></li><li><a href="#failure-semantics-deliberate-deviation-from-envoy" title="Failure semantics (deliberate deviation from Envoy)">Failure semantics (deliberate deviation from Envoy)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>wasm</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">wasm</a></div><h1>Module <span>callout</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/wasm/callout.rs.html#1-630">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Plugin HTTP callout transport (DW-167, issue #285).</p>
+<p><a href="fn.perform_callout.html" title="fn dwara_core::wasm::callout::perform_callout"><code>perform_callout</code></a> executes ONE <code>proxy_http_call</code> dispatch: the
+minimal synchronous HTTP/1.1 client the wasm domain already owns
+for registry fetches (<code>super::source</code>) extended with the <code>http://</code>
+scheme (callouts usually target internal services) and arbitrary
+methods. The wasm runner stays synchronous — the ASYNC boundary is
+<code>dataplane::plugin_dispatch</code>, which wraps this function in
+<code>spawn_blocking</code>, delivers the response to the instance, and
+re-collects the phase outcome (the pause/resume model; see the
+adapter and plugin_dispatch docs).</p>
+<h3 id="guardrails-hard-caps-no-config-surface"><a class="doc-anchor" href="#guardrails-hard-caps-no-config-surface">§</a>Guardrails (hard caps, no config surface)</h3>
+<ul>
+<li><strong>Timeout</strong>: the plugin’s requested timeout (milliseconds, the
+unit the Rust SDK’s <code>dispatch_http_call</code> sends) clamped to
+<code>[CALLOUT_TIMEOUT_MIN_MS, CALLOUT_TIMEOUT_MAX_MS]</code> = [1ms, 5s].
+It is a whole-exchange wall clock: the connect budget and every
+read are clamped to the remaining time, so a target dripping one
+byte per read cannot outlive it by resetting a per-read timer.</li>
+<li><strong>Body cap</strong>: <a href="constant.CALLOUT_BODY_CAP_BYTES.html" title="constant dwara_core::wasm::callout::CALLOUT_BODY_CAP_BYTES"><code>CALLOUT_BODY_CAP_BYTES</code></a> (4 MiB) on the response
+body (Content-Length and received bytes alike). Over-cap is a
+callout error, not truncation — the plugin must not act on a
+silently shortened decision payload.</li>
+<li><strong>Head cap</strong>: <a href="constant.CALLOUT_HEAD_CAP_BYTES.html" title="constant dwara_core::wasm::callout::CALLOUT_HEAD_CAP_BYTES"><code>CALLOUT_HEAD_CAP_BYTES</code></a> (16 KiB), the same bound
+the registry fetcher uses.</li>
+<li><strong>Redirects are NOT followed</strong>: a 3xx is delivered to the plugin
+as data (the plugin decides), the same posture as webhook
+deliveries and registry fetches.</li>
+<li><strong>SSRF</strong>: the gateway <code>ssrf_filter</code> is applied at connect time
+against every RESOLVED IP (DNS rebinding mitigation), exactly as
+<code>source::https_get</code> does for registry fetches.</li>
+<li><strong>Schemes</strong>: <code>http://</code> and <code>https://</code> only; anything else fails
+validation at the hostcall (BadArgument) before any network work.</li>
+<li><strong>Request-head integrity</strong>: the request head is built by
+interpolating the plugin-supplied method, header names, values,
+and <code>:path</code> — every one of them is validated at the hostcall
+(BadArgument, fail-closed, no connection attempted): the method
+and header names must be RFC 7230 tokens, and names, values, and
+the map <code>:path</code> must carry no CR, LF, or NUL. A plugin reflecting
+client data into a callout therefore cannot smuggle a second
+request into the gateway-initiated connection (request
+splitting). <a href="fn.perform_callout.html" title="fn dwara_core::wasm::callout::perform_callout"><code>perform_callout</code></a> re-checks the same grammar as
+defense in depth (it is <code>pub</code> and callable with a hand-built
+<a href="struct.CalloutRequest.html" title="struct dwara_core::wasm::callout::CalloutRequest"><code>CalloutRequest</code></a>).</li>
+</ul>
+<h3 id="failure-semantics-deliberate-deviation-from-envoy"><a class="doc-anchor" href="#failure-semantics-deliberate-deviation-from-envoy">§</a>Failure semantics (deliberate deviation from Envoy)</h3>
+<p>Envoy invokes <code>proxy_on_http_call_response</code> with zeroed counts on a
+callout failure (timeout, refused, reset), letting the plugin
+branch on the empty maps. dwara instead FAILS THE ROUTE CLOSED: a
+callout error is a plugin failure (500 <code>plugin_failed</code>, metric
+reason <code>callout_failed</code>; the outcome itself is observable as
+<code>dwara_plugin_callouts_total{name,outcome=timeout|error}</code>). The
+plugin cannot make a fail-open decision without receiving a
+response, and dwara’s plugin posture is fail-closed end to end
+(DW-157) — a plugin whose decision input never arrived must not
+resume as if it had. Recipes wanting fail-open behavior scope it
+explicitly (short timeouts, a fallback verdict implemented without
+a callout, or an extension trait instead of a plugin).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CalloutRequest.html" title="struct dwara_core::wasm::callout::CalloutRequest">Callout<wbr>Request</a></dt><dd>One registered <code>proxy_http_call</code> dispatch, parsed and validated at
+the hostcall and performed by <a href="fn.perform_callout.html" title="fn dwara_core::wasm::callout::perform_callout"><code>perform_callout</code></a>.</dd><dt><a class="struct" href="struct.CalloutResponse.html" title="struct dwara_core::wasm::callout::CalloutResponse">Callout<wbr>Response</a></dt><dd>A completed callout response, ready to deliver to the instance.
+ANY completed status is delivered — non-2xx is data (the plugin
+decides what a 403 from its decision service means); only transport
+failures (timeout/refused/reset/caps/SSRF) are errors.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CalloutError.html" title="enum dwara_core::wasm::callout::CalloutError">Callout<wbr>Error</a></dt><dd>Why a callout could not be completed. <code>Timeout</code> gets its own metric
+outcome; every other failure is <code>Error</code>.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.CALLOUT_BODY_CAP_BYTES.html" title="constant dwara_core::wasm::callout::CALLOUT_BODY_CAP_BYTES">CALLOUT_<wbr>BODY_<wbr>CAP_<wbr>BYTES</a></dt><dd>Cap on one callout response body (bytes).</dd><dt><a class="constant" href="constant.CALLOUT_HEAD_CAP_BYTES.html" title="constant dwara_core::wasm::callout::CALLOUT_HEAD_CAP_BYTES">CALLOUT_<wbr>HEAD_<wbr>CAP_<wbr>BYTES</a></dt><dd>Cap on the callout response head while locating the blank line
+(bytes; the same bound the registry fetcher uses).</dd><dt><a class="constant" href="constant.CALLOUT_TIMEOUT_MAX_MS.html" title="constant dwara_core::wasm::callout::CALLOUT_TIMEOUT_MAX_MS">CALLOUT_<wbr>TIMEOUT_<wbr>MAX_<wbr>MS</a></dt><dd>Maximum callout timeout (the plugin’s request is clamped DOWN to
+this): a per-request edge plugin must never hold a route for long.</dd><dt><a class="constant" href="constant.CALLOUT_TIMEOUT_MIN_MS.html" title="constant dwara_core::wasm::callout::CALLOUT_TIMEOUT_MIN_MS">CALLOUT_<wbr>TIMEOUT_<wbr>MIN_<wbr>MS</a></dt><dd>Minimum callout timeout (the plugin’s request is clamped UP to
+this): a zero/near-zero timeout would make every callout fail on
+scheduling jitter alone.</dd><dt><a class="constant" href="constant.MAX_CALLOUT_ROUNDS.html" title="constant dwara_core::wasm::callout::MAX_CALLOUT_ROUNDS">MAX_<wbr>CALLOUT_<wbr>ROUNDS</a></dt><dd>Maximum callout rounds per phase per request (the loop guard,
+enforced by <code>dataplane::plugin_dispatch</code>; declared here so the
+callout vocabulary lives in one module).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.clamp_timeout_ms.html" title="fn dwara_core::wasm::callout::clamp_timeout_ms">clamp_<wbr>timeout_<wbr>ms</a></dt><dd>Clamp the plugin-requested timeout into the documented window.</dd><dt><a class="fn" href="fn.decode_chunked.html" title="fn dwara_core::wasm::callout::decode_chunked">decode_<wbr>chunked</a></dt><dd>Minimal chunked transfer decoding with a caller-supplied cap (the
+same hardened shape as <code>source::decode_chunked</code>: 1-16 ASCII hex
+digits, checked arithmetic, per-chunk and aggregate caps).</dd><dt><a class="fn" href="fn.is_head_safe.html" title="fn dwara_core::wasm::callout::is_head_safe">is_<wbr>head_<wbr>safe</a></dt><dd>Whether <code>s</code> is free of the bytes that terminate or split the
+HTTP/1.1 request head: CR, LF, and NUL. Header values and the map
+<code>:path</code> ride the head verbatim, so any of these bytes is rejected
+(a value may legally carry obs-text, which this check leaves alone).</dd><dt><a class="fn" href="fn.is_rfc7230_token.html" title="fn dwara_core::wasm::callout::is_rfc7230_token">is_<wbr>rfc7230_<wbr>token</a></dt><dd>Whether <code>s</code> is an RFC 7230 <code>token</code> (the <code>tchar</code> grammar): the
+method and every header NAME must match it. A non-token would
+smuggle framing bytes (spaces, CR/LF, control characters) into the
+interpolated request head — the request-splitting recipe.</dd><dt><a class="fn" href="fn.parse_callout_response.html" title="fn dwara_core::wasm::callout::parse_callout_response">parse_<wbr>callout_<wbr>response</a></dt><dd>Parse a raw HTTP/1.1 callout response: status line, headers, body
+framing (Content-Length, chunked, or read-to-EOF). ANY status is
+returned (non-2xx is data); redirects are deliberately not
+followed. Public for the integration tests, which pin the framing
+edge cases as pure functions (the same posture as
+<code>source::parse_response</code>).</dd><dt><a class="fn" href="fn.perform_callout.html" title="fn dwara_core::wasm::callout::perform_callout">perform_<wbr>callout</a></dt><dd>Perform one callout exchange. Synchronous by design (the async
+boundary is plugin_dispatch’s <code>spawn_blocking</code>); reuses the
+registry fetcher’s transport posture (SSRF at connect, per-read
+timeouts clamped to the deadline, <code>Connection: close</code>, read to
+EOF) with the <code>http://</code> scheme and arbitrary methods added.</dd></dl></section></div></main></body></html>

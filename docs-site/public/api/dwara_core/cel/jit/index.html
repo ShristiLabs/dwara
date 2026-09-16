@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="CEL JIT compilation via cranelift (PERF-09, #260)."><title>dwara_core::cel::jit - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module jit</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module jit</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#supported-expressions" title="Supported expressions">Supported expressions</a></li><li><a href="#architecture" title="Architecture">Architecture</a></li><li><a href="#current-status" title="Current status">Current status</a></li><li><a href="#fallback" title="Fallback">Fallback</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>cel</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">cel</a></div><h1>Module <span>jit</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/cel/jit.rs.html#1-175">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>CEL JIT compilation via cranelift (PERF-09, #260).</p>
+<p>This module provides a cranelift-based JIT compiler for CEL
+expressions. When the <code>cel-jit</code> cargo feature is enabled, the
+[<code>CelProgram</code>] can optionally JIT-compile simple CEL expressions
+to native code for faster evaluation.</p>
+<h2 id="supported-expressions"><a class="doc-anchor" href="#supported-expressions">§</a>Supported expressions</h2>
+<p>The JIT compiler supports a subset of CEL expressions:</p>
+<ul>
+<li>Boolean literals (<code>true</code>, <code>false</code>)</li>
+<li>Integer literals (<code>1</code>, <code>42</code>)</li>
+<li>String literals (<code>"hello"</code>)</li>
+<li>Identifier references (<code>request.path</code>)</li>
+<li>Comparison operators (<code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>)</li>
+<li>Logical operators (<code>&amp;&amp;</code>, <code>||</code>, <code>!</code>)</li>
+<li>The <code>startsWith</code>, <code>endsWith</code>, <code>contains</code> string functions</li>
+</ul>
+<p>Complex expressions (comprehensions, maps, structs, custom
+functions) fall back to the tree-walking interpreter.</p>
+<h2 id="architecture"><a class="doc-anchor" href="#architecture">§</a>Architecture</h2>
+<p>The JIT compiler:</p>
+<ol>
+<li>Parses the CEL expression using <code>cel-parser</code> to get the AST.</li>
+<li>Checks if the expression is supported by the JIT (simple enough).</li>
+<li>Compiles the AST to cranelift IR.</li>
+<li>Compiles the cranelift IR to native code.</li>
+<li>Returns a function pointer that can be called to evaluate the
+expression.</li>
+</ol>
+<p>The JIT-compiled function takes a context pointer and returns a
+<code>CelJitResult</code> (a tagged union of bool, i64, f64, or string).</p>
+<h2 id="current-status"><a class="doc-anchor" href="#current-status">§</a>Current status</h2>
+<p>The <code>cel-jit</code> feature gate, dependency wiring, and module structure
+are in place. The actual AST-to-cranelift-IR compilation is a future
+enhancement — the JIT currently returns <code>Unsupported</code> for all
+expressions, so evaluation falls back to the tree-walking
+interpreter. This scaffolding allows the feature to be compiled and
+tested without a full JIT implementation, and provides the
+integration point for future work.</p>
+<h2 id="fallback"><a class="doc-anchor" href="#fallback">§</a>Fallback</h2>
+<p>When the <code>cel-jit</code> feature is OFF or the expression is too complex
+for the JIT, evaluation falls back to the tree-walking interpreter
+(<code>cel-interpreter</code>). This is transparent to the caller: the
+[<code>CelProgram::evaluate</code>] API is the same regardless of whether the
+JIT is used.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CelJitProgram.html" title="struct dwara_core::cel::jit::CelJitProgram">CelJit<wbr>Program</a></dt><dd>A JIT-compiled CEL program. When the <code>cel-jit</code> feature is ON and
+the expression is simple enough, [<code>CelProgram::compile</code>] produces
+a <code>CelJitProgram</code> that can be evaluated without the tree-walking
+interpreter. When the feature is OFF or the expression is too
+complex, this is <code>None</code> and evaluation falls back to the
+interpreter.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CelJitResult.html" title="enum dwara_core::cel::jit::CelJitResult">CelJit<wbr>Result</a></dt><dd>The result of a JIT-compiled CEL evaluation. A tagged union of
+the CEL scalar types the JIT supports. The JIT-compiled function
+returns this by value.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.cel_jit_available.html" title="fn dwara_core::cel::jit::cel_jit_available">cel_<wbr>jit_<wbr>available</a></dt><dd>Check if the <code>cel-jit</code> cargo feature is compiled in.</dd><dt><a class="fn" href="fn.jit_result_to_value.html" title="fn dwara_core::cel::jit::jit_result_to_value">jit_<wbr>result_<wbr>to_<wbr>value</a></dt><dd>Convert a <code>CelJitResult</code> to a <code>cel_interpreter::Value</code>. Returns
+<code>None</code> for <code>Unsupported</code> or <code>Error</code> (the caller should fall back
+to the interpreter).</dd></dl></section></div></main></body></html>

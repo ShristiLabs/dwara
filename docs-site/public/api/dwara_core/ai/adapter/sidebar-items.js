@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AiError"],"fn":["adapter_for"],"struct":["ProviderErrorBody","ProviderRequest"],"trait":["ProviderAdapter"]};

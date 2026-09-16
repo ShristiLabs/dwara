@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ROLLUP_GRACE_MS"],"mod":["exports","insights","partition","query","rollup","schema","sketch"],"struct":["AiEvalResultRecord","AiExperimentAssignment","AiFeedbackRecord","AiGovernanceEvent","AiPromptLogRecord","AiSpendRecord","EmbeddedAnalytics","LiveRouteSnapshot","LiveSketches","LiveSnapshot","McpToolCallRecord","SampledDegradation"]};

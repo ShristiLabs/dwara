@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SpiffeError","SvidRefreshResult"],"struct":["FakeWorkloadApi","SpiffeClient","SpiffeConfig","SpiffeIdentity","SpiffeSvid","SpiffeTrustBundle"],"trait":["WorkloadApiTransport"]};

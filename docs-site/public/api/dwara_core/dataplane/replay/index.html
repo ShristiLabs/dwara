@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Replay time-travel debugging (DW-102): a PURE decision replayer."><title>dwara_core::dataplane::replay - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module replay</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module replay</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#sandbox-isolation" title="Sandbox isolation">Sandbox isolation</a></li><li><a href="#capture-source" title="Capture source">Capture source</a></li><li><a href="#diffing" title="Diffing">Diffing</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>replay</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/replay.rs.html#1-603">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Replay time-travel debugging (DW-102): a PURE decision replayer.</p>
+<p>The gateway’s request path (<code>dataplane::proxy</code>) weaves together route
+matching, authorization, rate limiting, transforms, and endpoint
+selection with live I/O (upstream dials, live GCRA counters, breaker
+state). Replay inverts that: given a captured request and a
+<a href="../../snapshot/struct.Snapshot.html" title="struct dwara_core::snapshot::Snapshot"><code>Snapshot</code></a> (a compiled config generation), it re-runs the SAME
+decision logic with NO side effects — no network, no live counters,
+no breaker state — so an operator can ask “what would this recorded
+request do under THIS config?” and diff the answer across two
+generations.</p>
+<h2 id="sandbox-isolation"><a class="doc-anchor" href="#sandbox-isolation">§</a>Sandbox isolation</h2>
+<p><a href="fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a> is pure: it reads only its inputs (<code>&amp;Snapshot</code>,
+<code>&amp;ReplayRequest</code>) and a caller-supplied <a href="struct.SimulatedCounter.html" title="struct dwara_core::dataplane::replay::SimulatedCounter"><code>SimulatedCounter</code></a> for the
+rate-limit simulation. It never touches the network, the filesystem,
+the live rate limiter, or any shared mutable gateway state. The
+rate-limit check uses a SIMULATED counter (not the live GCRA store),
+the breaker is reported from config alone (no live failure counts),
+and the endpoint pick is deterministic (the first healthy-by-config
+endpoint, no live health tracking). This is the contract that makes
+replay safe to run in CI and against candidate configs that have
+never served traffic.</p>
+<h2 id="capture-source"><a class="doc-anchor" href="#capture-source">§</a>Capture source</h2>
+<p>The request detail (method, path, redacted headers, auth identity)
+is captured by the analytics raw table (DW-043, extended in DW-102
+with optional <code>request_headers_redacted</code> and <code>auth_identity</code>
+columns). The capture is opt-in and redacted via the existing PII
+redaction patterns (<code>ai::redaction</code>); the replay CLI reads those
+rows (or an exported recording) and feeds them to <a href="fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a>.</p>
+<h2 id="diffing"><a class="doc-anchor" href="#diffing">§</a>Diffing</h2>
+<p><a href="struct.DecisionDiff.html" title="struct dwara_core::dataplane::replay::DecisionDiff"><code>DecisionDiff</code></a> compares two <a href="struct.ReplayDecision.html" title="struct dwara_core::dataplane::replay::ReplayDecision"><code>ReplayDecision</code></a>s (the same request
+under an old and a new snapshot) and reports which decision stages
+changed — the unit the <code>dwara replay</code> CLI emits per request, and the
+signal a CI gate exits non-zero on.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DecisionDiff.html" title="struct dwara_core::dataplane::replay::DecisionDiff">Decision<wbr>Diff</a></dt><dd>A per-stage diff between two <a href="struct.ReplayDecision.html" title="struct dwara_core::dataplane::replay::ReplayDecision"><code>ReplayDecision</code></a>s (the same request
+under an old and a new snapshot). Each field is <code>true</code> when that
+stage’s decision changed; <a href="struct.DecisionDiff.html#method.any" title="method dwara_core::dataplane::replay::DecisionDiff::any"><code>DecisionDiff::any</code></a> is the CI-gate
+signal (exit 1 when any stage differs).</dd><dt><a class="struct" href="struct.ReplayDecision.html" title="struct dwara_core::dataplane::replay::ReplayDecision">Replay<wbr>Decision</a></dt><dd>The outcome of one stage of the replayed decision path. Each stage
+reports what the LIVE proxy would have decided at that point, with
+no side effects applied.</dd><dt><a class="struct" href="struct.ReplayRequest.html" title="struct dwara_core::dataplane::replay::ReplayRequest">Replay<wbr>Request</a></dt><dd>One captured request fed to <a href="fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a>. The fields mirror what the
+analytics raw table stores (DW-043 + DW-102): the request shape and
+the redacted auth identity. Headers are ALREADY redacted at capture
+time (the existing PII patterns); replay never sees raw secrets.</dd><dt><a class="struct" href="struct.SimulatedCounter.html" title="struct dwara_core::dataplane::replay::SimulatedCounter">Simulated<wbr>Counter</a></dt><dd>A simulated rate-limit counter (DW-102). Replay does NOT touch the
+live GCRA store; instead the caller threads a counter that tracks
+per-key usage within a fixed window, and <a href="fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a> advances it the
+way the live limiter would. The simulation is deliberately simple
+(fixed-window, not GCRA): replay answers “would this request be
+admitted under this config’s budget?” not “what is the exact GCRA
+TAT?” — the decision boundary is what a diff cares about.</dd><dt><a class="struct" href="struct.TransformSummary.html" title="struct dwara_core::dataplane::replay::TransformSummary">Transform<wbr>Summary</a></dt><dd>A summary of the transforms that would apply to a matched route
+(DW-028). Counts (not full op lists) keep the diff output stable
+across unrelated key-order changes while still surfacing a change in
+which transforms apply.</dd><dt><a class="struct" href="struct.UpstreamPick.html" title="struct dwara_core::dataplane::replay::UpstreamPick">Upstream<wbr>Pick</a></dt><dd>The upstream endpoint a matched proxy route would dispatch to. The
+pick is deterministic for replay (the first endpoint of the resolved
+upstream, or the first split target’s first endpoint) — replay has
+no live health state, so load-balancer selection is reported as the
+resolved upstream name plus its first endpoint.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.decide.html" title="fn dwara_core::dataplane::replay::decide">decide</a></dt><dd>The pure decision function (DW-102). Re-runs the gateway’s decision
+path — route match, authz, simulated rate limit, transform
+resolution, upstream pick — against <code>snapshot</code> for <code>request</code>, with
+NO I/O and NO side effects on live gateway state. The
+<code>rate_counter</code> is the ONLY mutable state touched, and it is a
+simulated counter the caller owns (not the live limiter).</dd></dl></section></div></main></body></html>

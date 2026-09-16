@@ -1,0 +1,44 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Rollup cascade and retention (DW-043)."><title>dwara_core::analytics::rollup - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module rollup</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module rollup</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>analytics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a></div><h1>Module <span>rollup</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/rollup.rs.html#1-337">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Rollup cascade and retention (DW-043).</p>
+<p>Four granularities roll in a fixed cascade — raw → 1m → 5m → 1h →
+1d — each stage aggregating the PREVIOUS stage’s completed windows,
+never raw twice (except by deterministic recompute, see below):</p>
+<ul>
+<li>A window is COMPLETE when its end plus a safety grace (writer
+lag headroom) is in the past; the grace means a straggler record
+flushed late still lands in the window it belongs to. Rows
+arriving later than the grace are documented as rollup-lost
+(they remain queryable in <code>raw</code> until raw retention expires).</li>
+<li>Each granularity keeps a CURSOR (exclusive ms frontier) in
+<code>meta</code>, advanced in the SAME transaction as the rows it covers:
+a crash mid-cascade never double-counts.</li>
+<li>Every aggregation is a wholesale window RECOMPUTE
+(<code>INSERT OR REPLACE</code> over the window’s full source range), so
+re-running any window — after a crash, a restored backup, or a
+cursor reset — reproduces byte-identical rows. Idempotence comes
+from determinism, not from merge arithmetic (upsert-merge would
+double-count on re-run).</li>
+<li>Custom-dimension rollups aggregate the same raw range in RUST
+(the source column is a JSON object; keeping JSON out of SQL
+avoids depending on the bundled SQLite’s JSON1 build flags).</li>
+</ul>
+<p>Retention deletes expired rows per granularity (raw by <code>ts_ms</code>,
+rollups by <code>window_start</code>) and incrementally vacuums, which is the
+bounded-disk half of the done-when: pages return to the file
+system without a full VACUUM ever blocking the writer.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.GRANULARITIES_MS.html" title="constant dwara_core::analytics::rollup::GRANULARITIES_MS">GRANULARITIES_<wbr>MS</a></dt><dd>The four granularities, in cascade order (index = the <code>gran</code>
+column value stored in the rollup tables).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.cascade_range.html" title="fn dwara_core::analytics::rollup::cascade_range">cascade_<wbr>range</a></dt><dd>Aggregate the finer table’s <code>[lo, hi)</code> into the next coarser
+granularity, wholesale. Every stored column merges by SUM (or MAX
+for the max), which is exactly why the schema stores NON-cumulative
+bucket counts and additive sums.</dd><dt><a class="fn" href="fn.cursor.html" title="fn dwara_core::analytics::rollup::cursor">cursor</a></dt><dd>Read a cursor (0 when never set).</dd><dt><a class="fn" href="fn.roll_cascade.html" title="fn dwara_core::analytics::rollup::roll_cascade">roll_<wbr>cascade</a></dt><dd>One cascade stage: aggregate granularity <code>from</code>’s completed windows
+into granularity <code>to</code> (<code>from + 1</code>). Wholesale recompute per coarse
+window, cursor-guarded exactly like the raw pass.</dd><dt><a class="fn" href="fn.roll_raw_range.html" title="fn dwara_core::analytics::rollup::roll_raw_range">roll_<wbr>raw_<wbr>range</a></dt><dd>Aggregate raw <code>[lo, hi)</code> into <code>rollup_fixed</code>/<code>rollup_dim</code> at
+granularity 0, wholesale over the range (idempotent recompute).
+Split from <a href="fn.roll_raw_to_1m.html" title="fn dwara_core::analytics::rollup::roll_raw_to_1m"><code>roll_raw_to_1m</code></a> so tests can drive exact ranges.</dd><dt><a class="fn" href="fn.roll_raw_to_1m.html" title="fn dwara_core::analytics::rollup::roll_raw_to_1m">roll_<wbr>raw_<wbr>to_<wbr>1m</a></dt><dd>One raw→1m pass: aggregate raw rows in <code>[cursor, frontier)</code> into
+completed 1-minute windows, recompute-style. <code>frontier</code> must be the
+end of the last COMPLETE window (the caller computes it with the
+grace). Returns the number of 1m windows written.</dd><dt><a class="fn" href="fn.sweep_retention.html" title="fn dwara_core::analytics::rollup::sweep_retention">sweep_<wbr>retention</a></dt><dd>Retention sweep: delete expired rows per table and incrementally
+vacuum up to <code>vacuum_pages</code> pages. For the <code>raw</code> table, only
+intra-day rows older than the retention are deleted (SCALE-09
+#188: daily partition tables are dropped by
+<code>partition::drop_expired_partitions</code>, which is O(1) DROP TABLE
+vs O(n) DELETE). Returns rows deleted.</dd><dt><a class="fn" href="fn.window_of.html" title="fn dwara_core::analytics::rollup::window_of">window_<wbr>of</a></dt><dd>Window start (floor to granularity) of a timestamp.</dd></dl></section></div></main></body></html>

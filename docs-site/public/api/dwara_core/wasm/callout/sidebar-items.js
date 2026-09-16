@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CALLOUT_BODY_CAP_BYTES","CALLOUT_HEAD_CAP_BYTES","CALLOUT_TIMEOUT_MAX_MS","CALLOUT_TIMEOUT_MIN_MS","MAX_CALLOUT_ROUNDS"],"enum":["CalloutError"],"fn":["clamp_timeout_ms","decode_chunked","is_head_safe","is_rfc7230_token","parse_callout_response","perform_callout"],"struct":["CalloutRequest","CalloutResponse"]};

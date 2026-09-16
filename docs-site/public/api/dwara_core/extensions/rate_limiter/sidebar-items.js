@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GCRA_STORE_SHARDS"],"enum":["RateLimitOutcome"],"fn":["denied_outcome"],"struct":["GcraOutcome","GcraRateLimiter","GcraWindowSpec","InMemoryRateLimiter","RateDecision","RateLimitEngine","RateLimitEvaluation","RateLimitKeyContext"],"trait":["RateLimiter"]};

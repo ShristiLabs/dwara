@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TranslationError"],"struct":["TranslatedRequest","TranslatedResponse","TranslationBody","TranslationRegistry"],"trait":["ProtocolTranslator"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["EXPORT_DELAY_MS","EXPORT_TICK_MS","FAILURE_RETRY_MS","MAX_CATCHUP_WINDOWS"],"enum":["ExportFormat","WindowKind"],"fn":["effective_formats","effective_window","last_closed_window","list_runs","run_due","run_export"],"struct":["ExportRun","ManualRunBody","QuotaBudget","QuotaFigures","SpendByModel","StatementRow"]};

@@ -1,0 +1,66 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Route-scoped response caching grammar (DW-037, feature analysis 5-Protocol “Response caching”): the config shape of a route’s cache policy and the compiled form the dataplane’s response cache consumes."><title>dwara_core::config::cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#posture-explicit-opt-in-buffering-bounded" title="Posture: explicit opt-in buffering, bounded">Posture: explicit opt-in buffering, bounded</a></li><li><a href="#variance-model-configured--policy-derived-not-response-driven" title="Variance model: configured + policy-derived, not response-driven">Variance model: configured + policy-derived, not response-driven</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">config</a></div><h1>Module <span>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/config/cache.rs.html#1-282">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Route-scoped response caching grammar (DW-037, feature analysis
+5-Protocol “Response caching”): the config shape of a route’s cache
+policy and the compiled form the dataplane’s response cache consumes.</p>
+<p>This is config-contract grammar in the same sense as <code>transforms.rs</code>
+(DW-028) and <code>versioning.rs</code> (DW-048): validation
+(<code>snapshot::validate</code>) and the runtime (<code>dataplane::response_cache</code>)
+must agree on ONE parsing of these values, so the grammar lives in
+<code>config</code>, the lowest consuming domain.</p>
+<h3 id="posture-explicit-opt-in-buffering-bounded"><a class="doc-anchor" href="#posture-explicit-opt-in-buffering-bounded">§</a>Posture: explicit opt-in buffering, bounded</h3>
+<p>The dataplane buffers nothing by default; a cache entry is a
+buffered response body. Presence of the <code>cache</code> block is therefore
+the opt-in (the same presence-means-enabled rule as <code>transforms</code>,
+<code>compression</code>, and <code>masking</code>), and the buffering is capped by
+<code>max_body_bytes</code> per entry: a response that would cross the cap is
+passed through UNSTORED and streams exactly as if no cache existed
+(see <code>dataplane::response_cache</code> for the full cacheability matrix).</p>
+<h3 id="variance-model-configured--policy-derived-not-response-driven"><a class="doc-anchor" href="#variance-model-configured--policy-derived-not-response-driven">§</a>Variance model: configured + policy-derived, not response-driven</h3>
+<p>RFC 9111 lets a response’s own <code>Vary</code> drive what a shared cache
+keys on. dwara’s cache key must be derivable from the REQUEST alone
+(the backing <code>CacheStore</code> extension trait is an opaque key-value
+seam — no entry enumeration, so no
+two-level “hash, then vary” lookup is possible). The variance
+dimension is therefore DECLARED, not discovered:</p>
+<ul>
+<li>the operator lists extra request headers in <code>vary</code>;</li>
+<li>the snapshot compile folds in the headers the gateway’s own
+policies already promise to vary by: <code>Accept</code> when the route
+selects on <code>match.accept</code> (DW-048), <code>Origin</code> when the route
+carries a CORS policy (DW-027), and <code>Accept-Encoding</code> never
+(cached bodies are identity; compression re-negotiates per
+request on replay).</li>
+</ul>
+<p>A response whose <code>Vary</code> names anything OUTSIDE the effective set is
+not stored (the cache cannot prove it would key correctly), and
+<code>Vary: *</code> never stores. The union of everything the key folds in is
+stamped on cached responses through the decoration tail’s existing
+<code>Vary</code> merges, so replays advertise exactly what they varied by.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CompiledRouteCache.html" title="struct dwara_core::config::cache::CompiledRouteCache">Compiled<wbr>Route<wbr>Cache</a></dt><dd>The compiled per-route cache policy (DW-037): validated values
+resolved into the exact durations, bounds, and the EFFECTIVE vary
+set (configured entries plus the policy-derived <code>Accept</code>/<code>Origin</code>
+folds), lowercased and in deterministic order. Built once at
+snapshot compile (<code>RouteTable</code>), never per request.</dd><dt><a class="struct" href="struct.RouteCache.html" title="struct dwara_core::config::cache::RouteCache">Route<wbr>Cache</a></dt><dd>Route-scoped response caching policy (DW-037). Absent (the
+default): the route’s responses are never cached, buffered, or
+stamped with cache headers — bytes flow exactly as before. Presence
+opts the route’s GET traffic into the local response cache behind
+the <code>CacheStore</code> extension seam (extensions domain).</dd><dt><a class="struct" href="struct.RouteCacheCoalescing.html" title="struct dwara_core::config::cache::RouteCacheCoalescing">Route<wbr>Cache<wbr>Coalescing</a></dt><dd>Request-coalescing knobs (DW-038). Presence of the block on a
+route’s <code>cache</code> is the opt-in (the same presence-means-enabled rule
+as every other block); this struct carries the one bound the
+behavior needs.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_CACHE_MAX_BODY_BYTES.html" title="constant dwara_core::config::cache::DEFAULT_CACHE_MAX_BODY_BYTES">DEFAULT_<wbr>CACHE_<wbr>MAX_<wbr>BODY_<wbr>BYTES</a></dt><dd>Default <code>cache.max_body_bytes</code> (DW-037): 1 MiB per entry — large
+enough for typical JSON payloads, small enough that a full store of
+them stays cheap. Validation bounds the configurable range around it.</dd><dt><a class="constant" href="constant.DEFAULT_COALESCE_WAIT_MS.html" title="constant dwara_core::config::cache::DEFAULT_COALESCE_WAIT_MS">DEFAULT_<wbr>COALESCE_<wbr>WAIT_<wbr>MS</a></dt><dd>Default <code>cache.coalescing.wait_ms</code> (DW-038): 5 s — comfortably above
+a typical upstream fetch so a follower normally out-waits the leader
+instead of piling its own call on top (the wait bound exists for the
+pathological leader, not the common one).</dd><dt><a class="constant" href="constant.MAX_CACHE_MAX_BODY_BYTES.html" title="constant dwara_core::config::cache::MAX_CACHE_MAX_BODY_BYTES">MAX_<wbr>CACHE_<wbr>MAX_<wbr>BODY_<wbr>BYTES</a></dt><dd>Upper bound for <code>cache.max_body_bytes</code> (DW-037): 16 MiB. A cache
+entry is a buffered body; the ceiling keeps one route’s policy from
+opting the gateway into buffering near-streaming payloads.</dd><dt><a class="constant" href="constant.MAX_CACHE_STALE_SECS.html" title="constant dwara_core::config::cache::MAX_CACHE_STALE_SECS">MAX_<wbr>CACHE_<wbr>STALE_<wbr>SECS</a></dt><dd>Upper bound for <code>cache.stale_while_revalidate_secs</code> (DW-037): 24
+hours, symmetric with the TTL bound.</dd><dt><a class="constant" href="constant.MAX_CACHE_TTL_SECS.html" title="constant dwara_core::config::cache::MAX_CACHE_TTL_SECS">MAX_<wbr>CACHE_<wbr>TTL_<wbr>SECS</a></dt><dd>Upper bound for <code>cache.ttl_secs</code> (DW-037): 24 hours. Freshness
+beyond a day is an origin’s job (CDN), not a gateway’s local cache.</dd><dt><a class="constant" href="constant.MAX_CACHE_VARY_HEADERS.html" title="constant dwara_core::config::cache::MAX_CACHE_VARY_HEADERS">MAX_<wbr>CACHE_<wbr>VARY_<wbr>HEADERS</a></dt><dd>Maximum number of <code>vary</code> entries (DW-037): the vary set multiplies
+the key space per route; eight extra dimensions is already generous.</dd><dt><a class="constant" href="constant.MAX_COALESCE_WAIT_MS.html" title="constant dwara_core::config::cache::MAX_COALESCE_WAIT_MS">MAX_<wbr>COALESCE_<wbr>WAIT_<wbr>MS</a></dt><dd>Upper bound for <code>cache.coalescing.wait_ms</code> (DW-038): 60 s. A follower
+parked longer than a minute is a stuck request from the client’s
+point of view; the route’s own timeouts bound the leader, so a wait
+beyond them only delays the inevitable fail-open.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.forbidden_vary_reason.html" title="fn dwara_core::config::cache::forbidden_vary_reason">forbidden_<wbr>vary_<wbr>reason</a></dt><dd>Header names that may never appear in <code>cache.vary</code>, with the reason
+validation reports. Checked case-insensitively against the
+lowercased name. Grammar helper in the house style of <code>net.rs</code> /
+<code>transforms.rs</code>: validation (snapshot) and compile agree on this
+one parsing.</dd></dl></section></div></main></body></html>

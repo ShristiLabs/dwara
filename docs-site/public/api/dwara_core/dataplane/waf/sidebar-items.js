@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WafBody","WafFilter","WafTarget"],"fn":["crs_from_gateway","inspect_body","should_inspect_body"],"struct":["BodyInspectionResult","CompiledCrsRule","CrsGeneration","CrsResult","WafGeneration","WafMatch"]};

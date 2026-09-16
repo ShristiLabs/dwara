@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check","current_usage"],"struct":["BudgetUsage"]};

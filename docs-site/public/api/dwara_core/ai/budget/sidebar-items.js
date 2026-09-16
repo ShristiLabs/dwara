@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BudgetKind","BudgetVerdict"],"fn":["consumer_policies_of","cost_micros","listener_policies_of","service_policies_of"],"struct":["AiBudgetEngine","BudgetGuard","BudgetLedger"]};

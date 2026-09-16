@@ -1,0 +1,134 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Schema-validation limits: numeric bounds the config compiler enforces and runtime code must respect."><title>dwara_core::config::limits - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module limits</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module limits</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">config</a></div><h1>Module <span>limits</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/config/limits.rs.html#1-256">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Schema-validation limits: numeric bounds the config compiler enforces
+and runtime code must respect.</p>
+<p>These constants are part of the CONFIG CONTRACT (a value validation
+rejects can never reach the runtime), so they live beside the schema
+rather than in the modules that also use them at runtime: validation
+(<code>snapshot::validate</code>) and the runtime consumers (the balancer’s ring
+construction, the slow-start clamp, the retry parameter resolution)
+all read the same numbers from here.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_LICENSE_GRACE_PERIOD_DAYS.html" title="constant dwara_core::config::limits::DEFAULT_LICENSE_GRACE_PERIOD_DAYS">DEFAULT_<wbr>LICENSE_<wbr>GRACE_<wbr>PERIOD_<wbr>DAYS</a></dt><dd>Default grace period (days) after a license expires before the gate
+degrades to OSS (DW-032). Configurable via
+<code>gateway.license.grace_period_days</code>; 0 means no grace (immediate
+degradation on expiry). Lives in config (the lowest domain) so both
+extensions::licensing (the gate) and snapshot::validate (the bounds
+check) can read it without an upward import.</dd><dt><a class="constant" href="constant.KETAMA_VNODES.html" title="constant dwara_core::config::limits::KETAMA_VNODES">KETAMA_<wbr>VNODES</a></dt><dd>Ketama vnode count per unit of endpoint weight (a weight-1 endpoint
+gets 160 vnodes; a weight-w endpoint gets <code>160 * w</code> — footprint is
+additive, so adding an endpoint never resizes existing segments).</dd><dt><a class="constant" href="constant.MAGLEV_TABLE_SIZE.html" title="constant dwara_core::config::limits::MAGLEV_TABLE_SIZE">MAGLEV_<wbr>TABLE_<wbr>SIZE</a></dt><dd>Maglev lookup table size (DP-07, #236). Must be a prime number for
+the Maglev permutation algorithm to work correctly. 65537 is the
+default used by Google’s Maglev paper and Envoy.</dd><dt><a class="constant" href="constant.MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS.html" title="constant dwara_core::config::limits::MAX_CONFIG_CONVERGENCE_DRIFT_CHECK_MS">MAX_<wbr>CONFIG_<wbr>CONVERGENCE_<wbr>DRIFT_<wbr>CHECK_<wbr>MS</a></dt><dd>Validation ceiling on
+<code>gateway.config_convergence.drift_check_interval_ms</code> (DW-054): five
+minutes is the longest an operator should go without a drift report
+(beyond that a divergent instance serves stale config for too long
+before anyone notices).</dd><dt><a class="constant" href="constant.MAX_CONFIG_CONVERGENCE_POLL_MS.html" title="constant dwara_core::config::limits::MAX_CONFIG_CONVERGENCE_POLL_MS">MAX_<wbr>CONFIG_<wbr>CONVERGENCE_<wbr>POLL_<wbr>MS</a></dt><dd>Validation ceiling on <code>gateway.config_convergence.poll_interval_ms</code>
+(DW-054): one minute is the longest convergence lag an operator
+should tolerate (the done-when targets sub-second convergence; a
+poll this slow is a misconfiguration).</dd><dt><a class="constant" href="constant.MAX_DNS_DISCOVERY_REFRESH_S.html" title="constant dwara_core::config::limits::MAX_DNS_DISCOVERY_REFRESH_S">MAX_<wbr>DNS_<wbr>DISCOVERY_<wbr>REFRESH_<wbr>S</a></dt><dd>Validation ceiling on <code>upstreams[].dns_discovery.refresh_interval_s</code>
+(DW-042): one hour is the longest an operator should go without
+noticing a stale endpoint set (beyond that the TTL-driven refresh
+is the better mechanism).</dd><dt><a class="constant" href="constant.MAX_FAULT_ABORT_STATUS.html" title="constant dwara_core::config::limits::MAX_FAULT_ABORT_STATUS">MAX_<wbr>FAULT_<wbr>ABORT_<wbr>STATUS</a></dt><dt><a class="constant" href="constant.MAX_FAULT_DELAY_MS.html" title="constant dwara_core::config::limits::MAX_FAULT_DELAY_MS">MAX_<wbr>FAULT_<wbr>DELAY_<wbr>MS</a></dt><dd>Validation bound on <code>routes[].fault_injection.delay.fixed_ms</code>
+(DW-062): the maximum injectable delay. Above 5 minutes the upstream
+is almost certainly dead and a timeout or breaker is the right tool,
+not a fault-injection delay.</dd><dt><a class="constant" href="constant.MAX_HAPPY_EYEBALLS_MS.html" title="constant dwara_core::config::limits::MAX_HAPPY_EYEBALLS_MS">MAX_<wbr>HAPPY_<wbr>EYEBALLS_<wbr>MS</a></dt><dd>Validation bound for <code>upstreams[].timeouts.happy_eyeballs_ms</code>
+(DW-030, 10 minutes — the slow-start bound’s twin rationale: a racing
+delay past this no longer races anything, it serializes dials behind a
+sleeper). <code>0</code> is legal and disables racing instead.</dd><dt><a class="constant" href="constant.MAX_HEDGE_AFTER_MS.html" title="constant dwara_core::config::limits::MAX_HEDGE_AFTER_MS">MAX_<wbr>HEDGE_<wbr>AFTER_<wbr>MS</a></dt><dt><a class="constant" href="constant.MAX_HEDGE_COPIES.html" title="constant dwara_core::config::limits::MAX_HEDGE_COPIES">MAX_<wbr>HEDGE_<wbr>COPIES</a></dt><dd>Validation bound on <code>retries.hedge.hedge_max</code> (DW-063): at most this
+many speculative copies per request. Each copy consumes an
+endpoint slot and a retry-budget charge, so the cap bounds the
+amplification factor.</dd><dt><a class="constant" href="constant.MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS.html" title="constant dwara_core::config::limits::MAX_HTTP2_KEEP_ALIVE_INTERVAL_MS">MAX_<wbr>HTTP2_<wbr>KEEP_<wbr>ALIVE_<wbr>INTERVAL_<wbr>MS</a></dt><dd>Validation ceiling on
+<code>upstreams[].pool.http2_keep_alive_interval_ms</code> (DP-03): ten
+minutes is the longest PING interval worth configuring (beyond
+that an intervening proxy’s idle timeout fires first, defeating
+the keep-alive).</dd><dt><a class="constant" href="constant.MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS.html" title="constant dwara_core::config::limits::MAX_HTTP2_KEEP_ALIVE_TIMEOUT_MS">MAX_<wbr>HTTP2_<wbr>KEEP_<wbr>ALIVE_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Validation ceiling on
+<code>upstreams[].pool.http2_keep_alive_timeout_ms</code> (DP-03): ten
+minutes is the longest a client should wait for a PING ACK before
+closing (beyond that the connection is effectively dead and a
+reconnect is the right tool).</dd><dt><a class="constant" href="constant.MAX_LICENSE_GRACE_PERIOD_DAYS.html" title="constant dwara_core::config::limits::MAX_LICENSE_GRACE_PERIOD_DAYS">MAX_<wbr>LICENSE_<wbr>GRACE_<wbr>PERIOD_<wbr>DAYS</a></dt><dd>Maximum configurable grace period (days) after license expiry
+(DW-032). <code>gateway.license.grace_period_days</code> is validated to
+0..=this.</dd><dt><a class="constant" href="constant.MAX_NONCE_CACHE_ENTRIES_PER_SHARD.html" title="constant dwara_core::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD">MAX_<wbr>NONCE_<wbr>CACHE_<wbr>ENTRIES_<wbr>PER_<wbr>SHARD</a></dt><dd>Runtime bound on the replay-nonce entries the HMAC request-signing
+nonce cache (DW-036, <code>security::authn</code>) holds PER SHARD. Not a
+schema bound — a process-lifetime memory guarantee under nonce
+flood, exactly the GCRA cap’s rationale: entries expire after twice
+the clock-skew window anyway, and the cap only binds when an
+attacker floods nonces faster than expiry retires them (a fixed
+constant rather than an ops knob).</dd><dt><a class="constant" href="constant.MAX_OIDC_INTROSPECTION_CACHE_TTL_S.html" title="constant dwara_core::config::limits::MAX_OIDC_INTROSPECTION_CACHE_TTL_S">MAX_<wbr>OIDC_<wbr>INTROSPECTION_<wbr>CACHE_<wbr>TTL_<wbr>S</a></dt><dd>Validation ceiling on
+<code>gateway.oidc_providers[].introspection_cache_ttl_s</code> (DW-034): one
+hour is the longest a cached <code>active: true</code> introspection should be
+trusted without re-checking (a revoked token would otherwise keep
+authenticating for an hour after revocation).</dd><dt><a class="constant" href="constant.MAX_POOL_IDLE_TIMEOUT_MS.html" title="constant dwara_core::config::limits::MAX_POOL_IDLE_TIMEOUT_MS">MAX_<wbr>POOL_<wbr>IDLE_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Validation ceiling on <code>upstreams[].pool.pool_idle_timeout_ms</code>
+(DP-03): ten minutes is the longest an idle connection should
+linger before the pool reaps it (beyond that the upstream or an
+intervening proxy has almost certainly reaped it already, and a
+stale pooled connection is a p99 regression source).</dd><dt><a class="constant" href="constant.MAX_POOL_MAX_CONCURRENT_STREAMS.html" title="constant dwara_core::config::limits::MAX_POOL_MAX_CONCURRENT_STREAMS">MAX_<wbr>POOL_<wbr>MAX_<wbr>CONCURRENT_<wbr>STREAMS</a></dt><dd>Validation ceiling on <code>upstreams[].pool.max_concurrent_streams</code>
+(DP-03): one million concurrent streams per connection is well
+above any real h2 peer’s advertised limit, so this only catches a
+typo. The floor is 1 (a zero-concurrency client can never send).</dd><dt><a class="constant" href="constant.MAX_POOL_MAX_IDLE_PER_HOST.html" title="constant dwara_core::config::limits::MAX_POOL_MAX_IDLE_PER_HOST">MAX_<wbr>POOL_<wbr>MAX_<wbr>IDLE_<wbr>PER_<wbr>HOST</a></dt><dd>Validation ceiling on <code>upstreams[].pool.pool_max_idle_per_host</code>
+(DP-03): the per-host idle fraction of the per-upstream
+<code>connection_cap</code>. 1024 is well above any reasonable cap, so this
+only catches a typo (a mistyped config that would allocate an
+unbounded “bounded” idle set).</dd><dt><a class="constant" href="constant.MAX_RATE_LIMITER_KEYS_PER_SHARD.html" title="constant dwara_core::config::limits::MAX_RATE_LIMITER_KEYS_PER_SHARD">MAX_<wbr>RATE_<wbr>LIMITER_<wbr>KEYS_<wbr>PER_<wbr>SHARD</a></dt><dd>Runtime bound on the per-key GCRA state a rate-limiter window holds
+PER SHARD of its keyed store (see <code>extensions::rate_limiter</code>). Not a
+schema bound — no config value is checked against it — but a
+process-lifetime memory guarantee: an <code>[ip]</code>-selector limiter under
+key spray can hold at most <code>shards * this</code> keys per window per rule,
+after which idlest-first eviction takes over (a deliberately fixed
+constant rather than an ops knob; revisit if operators need to tune).</dd><dt><a class="constant" href="constant.MAX_REDIS_CONNECTION_TIMEOUT_MS.html" title="constant dwara_core::config::limits::MAX_REDIS_CONNECTION_TIMEOUT_MS">MAX_<wbr>REDIS_<wbr>CONNECTION_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Validation ceiling on <code>gateway.redis_rate_limiter.connection_timeout_ms</code>
+(DW-031): 30 seconds is the longest a startup connection should
+stall the gateway (beyond that the operator should fix their Redis,
+not widen the timeout).</dd><dt><a class="constant" href="constant.MAX_REDIS_KEY_TTL_S.html" title="constant dwara_core::config::limits::MAX_REDIS_KEY_TTL_S">MAX_<wbr>REDIS_<wbr>KEY_<wbr>TTL_<wbr>S</a></dt><dd>Validation ceiling on <code>gateway.redis_rate_limiter.key_ttl_s</code>
+(DW-031): 7 days is the longest a stale rate-limit key should
+linger in Redis (beyond that the operator should lower it to keep
+Redis memory bounded under key spray).</dd><dt><a class="constant" href="constant.MAX_RETRY_ATTEMPTS.html" title="constant dwara_core::config::limits::MAX_RETRY_ATTEMPTS">MAX_<wbr>RETRY_<wbr>ATTEMPTS</a></dt><dd>Validation bound on <code>retries.attempts</code> (mirrored in <code>snapshot::validate</code>).</dd><dt><a class="constant" href="constant.MAX_RETRY_TOTAL_DEADLINE_MS.html" title="constant dwara_core::config::limits::MAX_RETRY_TOTAL_DEADLINE_MS">MAX_<wbr>RETRY_<wbr>TOTAL_<wbr>DEADLINE_<wbr>MS</a></dt><dd>Validation ceiling on <code>retries.total_deadline_ms</code> (REL-01): the
+cross-attempt wall-clock cap including backoff delays. Ten minutes is
+the longest a single request’s retry storm should extend tail latency
+(beyond that the per-upstream circuit breaker and timeouts are the
+right tool, not a wider retry deadline). Absent means unbounded (the
+v1 default, kept for backwards compatibility); a present <code>0</code> is
+rejected at validation (omit the field for unbounded).</dd><dt><a class="constant" href="constant.MAX_RING_VNODES.html" title="constant dwara_core::config::limits::MAX_RING_VNODES">MAX_<wbr>RING_<wbr>VNODES</a></dt><dd>Validation bound on total ip_hash ring size (<code>sum(weight) * 160</code>).
+Keeps ring construction cheap and the BTreeMap small even for skewed
+weight sets.</dd><dt><a class="constant" href="constant.MAX_SLOW_START_MS.html" title="constant dwara_core::config::limits::MAX_SLOW_START_MS">MAX_<wbr>SLOW_<wbr>START_<wbr>MS</a></dt><dd>Validation bound for <code>upstreams[].slow_start_ms</code> (10 minutes): the ramp
+window is per-endpoint-entry, and unbounded windows would keep recycled
+addresses permanently underweighted.</dd><dt><a class="constant" href="constant.MAX_STREAM_BATCH_RECORDS.html" title="constant dwara_core::config::limits::MAX_STREAM_BATCH_RECORDS">MAX_<wbr>STREAM_<wbr>BATCH_<wbr>RECORDS</a></dt><dd>Validation bound on <code>gateway.analytics_stream.batch_max</code> (DW-121):
+records per flushed batch ceiling (with the byte cap, whichever
+comes first — the batch is the delivery unit, so this is also the
+per-delivery record-count bound).</dd><dt><a class="constant" href="constant.MAX_STREAM_BUFFER.html" title="constant dwara_core::config::limits::MAX_STREAM_BUFFER">MAX_<wbr>STREAM_<wbr>BUFFER</a></dt><dd>Validation bound on <code>gateway.analytics_stream.buffer</code> (DW-121): the
+ceiling on records queued between the dataplane and the flusher.
+Every queued record is an owned copy of the access record, so the
+buffer is the firehose’s whole memory story — this bound keeps a
+mistyped config from allocating an unbounded “bounded” queue.</dd><dt><a class="constant" href="constant.MAX_STREAM_FLUSH_MS.html" title="constant dwara_core::config::limits::MAX_STREAM_FLUSH_MS">MAX_<wbr>STREAM_<wbr>FLUSH_<wbr>MS</a></dt><dd>Validation bound on <code>gateway.analytics_stream.flush_ms</code> (DW-121):
+the batch-latency ceiling (one minute — the same shape as the
+webhook timeout ceiling: a batch older than this is a backlogged
+pipeline, not a tuning knob).</dd><dt><a class="constant" href="constant.MAX_WEBHOOK_ATTEMPTS.html" title="constant dwara_core::config::limits::MAX_WEBHOOK_ATTEMPTS">MAX_<wbr>WEBHOOK_<wbr>ATTEMPTS</a></dt><dd>Validation bound on <code>gateway.webhooks[].max_attempts</code> (DW-044):
+deliveries retry at most this many times in total, so a dead target
+cannot occupy its delivery task (or the retry budget) indefinitely.</dd><dt><a class="constant" href="constant.MAX_WEBHOOK_TIMEOUT_MS.html" title="constant dwara_core::config::limits::MAX_WEBHOOK_TIMEOUT_MS">MAX_<wbr>WEBHOOK_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Validation bound on <code>gateway.webhooks[].timeout_ms</code> (DW-044): one
+minute is the largest per-delivery budget worth waiting on an ALERT
+(the gateway is not a durable queue; anything slower should be an
+event sink, not a webhook).</dd><dt><a class="constant" href="constant.MAX_WEBSOCKET_FRAMES_PER_SEC.html" title="constant dwara_core::config::limits::MAX_WEBSOCKET_FRAMES_PER_SEC">MAX_<wbr>WEBSOCKET_<wbr>FRAMES_<wbr>PER_<wbr>SEC</a></dt><dd>Validation bound on <code>routes[].websocket.max_frames_per_sec</code>
+(DW-039): one hundred thousand frames per second sustained is the
+most an operator should need to allow (a chatty app ticks far
+below it; above it the policing itself becomes the load).</dd><dt><a class="constant" href="constant.MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS.html" title="constant dwara_core::config::limits::MIN_CONFIG_CONVERGENCE_DRIFT_CHECK_MS">MIN_<wbr>CONFIG_<wbr>CONVERGENCE_<wbr>DRIFT_<wbr>CHECK_<wbr>MS</a></dt><dd>Validation floor on
+<code>gateway.config_convergence.drift_check_interval_ms</code> (DW-054): below
+one second the drift check would race the poll and report transient
+mid-convergence divergence as drift (noise).</dd><dt><a class="constant" href="constant.MIN_CONFIG_CONVERGENCE_POLL_MS.html" title="constant dwara_core::config::limits::MIN_CONFIG_CONVERGENCE_POLL_MS">MIN_<wbr>CONFIG_<wbr>CONVERGENCE_<wbr>POLL_<wbr>MS</a></dt><dd>Validation floor on <code>gateway.config_convergence.poll_interval_ms</code>
+(DW-054): below 100 ms the convergence poll would hammer the backend
+faster than another instance can publish a generation, and the
+round-trip itself dominates the interval.</dd><dt><a class="constant" href="constant.MIN_DNS_DISCOVERY_REFRESH_S.html" title="constant dwara_core::config::limits::MIN_DNS_DISCOVERY_REFRESH_S">MIN_<wbr>DNS_<wbr>DISCOVERY_<wbr>REFRESH_<wbr>S</a></dt><dd>Validation floor on <code>upstreams[].dns_discovery.refresh_interval_s</code>
+(DW-042): below 1 second the discovery task would re-resolve faster
+than DNS can meaningfully change, hammering the name server.</dd><dt><a class="constant" href="constant.MIN_FAULT_ABORT_STATUS.html" title="constant dwara_core::config::limits::MIN_FAULT_ABORT_STATUS">MIN_<wbr>FAULT_<wbr>ABORT_<wbr>STATUS</a></dt><dd>Validation bound on <code>routes[].fault_injection.abort.status</code>
+(DW-062): the HTTP status range for abort injection.</dd><dt><a class="constant" href="constant.MIN_HEDGE_AFTER_MS.html" title="constant dwara_core::config::limits::MIN_HEDGE_AFTER_MS">MIN_<wbr>HEDGE_<wbr>AFTER_<wbr>MS</a></dt><dd>Validation bounds on <code>retries.hedge.hedge_after_ms</code> (DW-063): the
+tail-latency threshold before a speculative copy is sent. Below 1 ms
+is pointless (the copy would race immediately); above 5 minutes the
+upstream is almost certainly dead and a retry or breaker is the
+right tool, not a hedge.</dd><dt><a class="constant" href="constant.MIN_OIDC_INTROSPECTION_CACHE_TTL_S.html" title="constant dwara_core::config::limits::MIN_OIDC_INTROSPECTION_CACHE_TTL_S">MIN_<wbr>OIDC_<wbr>INTROSPECTION_<wbr>CACHE_<wbr>TTL_<wbr>S</a></dt><dd>Validation floor on <code>gateway.oidc_providers[].introspection_cache_ttl_s</code>
+(DW-034): below 1 second the introspection cache would expire before
+the next request can benefit, degenerating into a per-request IdP
+call (the cache exists precisely to avoid that).</dd><dt><a class="constant" href="constant.MIN_REDIS_CONNECTION_TIMEOUT_MS.html" title="constant dwara_core::config::limits::MIN_REDIS_CONNECTION_TIMEOUT_MS">MIN_<wbr>REDIS_<wbr>CONNECTION_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Validation floor on <code>gateway.redis_rate_limiter.connection_timeout_ms</code>
+(DW-031): below 100 ms a connection attempt is too aggressive for a
+network round-trip (the timeout would fire before DNS resolution
+completes on many setups).</dd><dt><a class="constant" href="constant.MIN_REDIS_KEY_TTL_S.html" title="constant dwara_core::config::limits::MIN_REDIS_KEY_TTL_S">MIN_<wbr>REDIS_<wbr>KEY_<wbr>TTL_<wbr>S</a></dt><dd>Validation floor on <code>gateway.redis_rate_limiter.key_ttl_s</code> (DW-031):
+below 1 second keys would expire before the GCRA bucket can refill
+for any non-trivial rate, making the limiter ineffective.</dd><dt><a class="constant" href="constant.MIN_STREAM_BUFFER.html" title="constant dwara_core::config::limits::MIN_STREAM_BUFFER">MIN_<wbr>STREAM_<wbr>BUFFER</a></dt><dd>Validation bound on <code>gateway.analytics_stream.buffer</code> (DW-121): the
+firehose channel’s capacity floor. Below this a single flush tick of
+bursty traffic would spill into emit-time drops that no buffer
+tuning could have absorbed.</dd><dt><a class="constant" href="constant.MIN_STREAM_FLUSH_MS.html" title="constant dwara_core::config::limits::MIN_STREAM_FLUSH_MS">MIN_<wbr>STREAM_<wbr>FLUSH_<wbr>MS</a></dt><dd>Validation floor on <code>gateway.analytics_stream.flush_ms</code> (DW-121):
+below 100 ms the flusher degenerates into per-record delivery, which
+the batch knob exists to prevent.</dd></dl></section></div></main></body></html>

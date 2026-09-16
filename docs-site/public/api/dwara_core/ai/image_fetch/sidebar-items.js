@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fetch_remote_images","has_remote_images"],"struct":["ImageFetchConfig"]};

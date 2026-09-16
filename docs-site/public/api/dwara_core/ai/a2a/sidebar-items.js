@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["A2AError","TaskLifecycle"],"fn":["a2a_providers","compile_a2a","handle_a2a_request"],"struct":["A2AAdapter","A2ASession","A2AStub","AgentCard","AgentCardParser","CompiledA2a","CompiledA2aAgent","TaskStateMachine"]};

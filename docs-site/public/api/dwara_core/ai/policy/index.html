@@ -1,0 +1,35 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI routing policies (DW-085): within-request escalation and latency-vs-cost selection. Composed over DW-076 routing."><title>dwara_core::ai::policy - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module policy</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module policy</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>policy</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/policy.rs.html#1-425">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI routing policies (DW-085): within-request escalation and
+latency-vs-cost selection. Composed over DW-076 routing.</p>
+<p>Two policy kinds:</p>
+<ul>
+<li><strong>FallbackChain</strong>: calls an external classifier service to
+estimate prompt complexity. Simple prompts (score &lt; threshold)
+route to the cheap model; complex prompts (score &gt;= threshold)
+escalate to the costlier model. On classifier error, fails open
+to the cheap model (the safe default).</li>
+<li><strong>LatencyCost</strong>: static config-based selection. Candidates are
+sorted at compile time by the configured preference (cost,
+latency, or balanced); the policy returns the best candidate
+deterministically (no runtime metrics needed).</li>
+</ul>
+<p>A policy composes over DW-076 routing: the candidate aliases it
+names (<code>cheap</code>, <code>escalate_to</code>, or <code>candidates[].model</code>) are
+themselves plain chain/canary aliases. The policy resolves each
+alias to its PRIMARY <a href="../struct.RouteTarget.html" title="struct dwara_core::ai::RouteTarget"><code>RouteTarget</code></a> at compile time (the first
+chain entry or the first canary version), so the runtime
+evaluation returns a flat candidate list the dataplane walks with
+the same failover loop as a plain chain.</p>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only. The classifier HTTP call reuses
+the same <code>hyper_util</code> client pattern as the DW-083 semantic cache
+(no new dependencies).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LiveLatencyTracker.html" title="struct dwara_core::ai::policy::LiveLatencyTracker">Live<wbr>Latency<wbr>Tracker</a></dt><dd>AI-15 (#203): Live latency tracker for LatencyCost policies.
+Maintains a rolling window of latency observations per model alias.
+Thread-safe (wrapped in Arc<Mutex>).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CompiledRoutingPolicy.html" title="enum dwara_core::ai::policy::CompiledRoutingPolicy">Compiled<wbr>Routing<wbr>Policy</a></dt><dd>A compiled routing policy (DW-085). Built at AiRuntime compile
+time from the config block; immutable once built. The
+<a href="enum.CompiledRoutingPolicy.html#method.evaluate" title="method dwara_core::ai::policy::CompiledRoutingPolicy::evaluate"><code>evaluate</code></a> method returns the candidate list to
+walk (the same shape as <a href="../struct.AiRuntime.html#method.route" title="method dwara_core::ai::AiRuntime::route"><code>AiRuntime::route</code></a>)
+plus a <a href="enum.PolicyDecision.html" title="enum dwara_core::ai::policy::PolicyDecision"><code>PolicyDecision</code></a> the dataplane records as a metric.</dd><dt><a class="enum" href="enum.PolicyDecision.html" title="enum dwara_core::ai::policy::PolicyDecision">Policy<wbr>Decision</a></dt><dd>The decision a routing policy made for one request (DW-085). The
+dataplane records this as a metric (the <code>ai</code> domain cannot import
+<code>observability</code> — the dependency direction forbids it — so the
+decision travels back to the caller, which records it).</dd></dl></section></div></main></body></html>

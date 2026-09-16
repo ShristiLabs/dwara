@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DiffEntry"],"fn":["apply","apply_crud","export","format_diff","gateway_to_hcl","gateway_to_state","plan","plan_diff","state_from_json","state_to_gateway","state_to_json","state_to_yaml"],"struct":["AdminClient","TfInstance","TfResource","TfState"]};

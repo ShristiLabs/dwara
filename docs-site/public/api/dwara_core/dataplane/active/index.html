@@ -1,0 +1,86 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Active health checks (DW-013, feature analysis 4.5)."><title>dwara_core::dataplane::active - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module active</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module active</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#probe-mechanics" title="Probe mechanics">Probe mechanics</a></li><li><a href="#timing" title="Timing">Timing</a></li><li><a href="#reporting-model-precedence-over-passive" title="Reporting model (precedence over passive)">Reporting model (precedence over passive)</a></li><li><a href="#task-lifecycle" title="Task lifecycle">Task lifecycle</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>active</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/active.rs.html#1-629">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Active health checks (DW-013, feature analysis 4.5).</p>
+<p>Passive health (DW-012) watches real traffic; active health PROBES. For
+every upstream that configures <code>active_health</code> (and therefore the
+passive <code>health</code> block), one probe loop task per endpoint runs:</p>
+<div class="example-wrap"><pre class="language-text"><code>loop { sleep(interval + uniform(0..jitter)); probe; report }</code></pre></div><h2 id="probe-mechanics"><a class="doc-anchor" href="#probe-mechanics">§</a>Probe mechanics</h2>
+<p>Probes go DIRECTLY to the endpoint (<code>address:port</code>), bypassing load
+balancing and the pooled upstream client — a probe must examine one
+specific endpoint, not whoever the balancer would pick. Each <code>http</code>
+probe speaks HTTP/1.1 over its own connection (plaintext toward <code>http1</code>
+upstreams, rustls over the SAME trust roots as the pooled connector —
+webpki by default, the upstream’s <code>trusted_ca_file</code> bundle when
+configured, #121 — with the endpoint address as server name toward
+<code>https</code>/<code>http2</code> upstreams), issues <code>GET {path}</code> with
+<code>Connection: close</code>, and classifies the FIRST status line it reads:
+2xx = success; anything else (3xx included — redirects are not
+followed — 4xx, 5xx, truncation, timeout, transport error) = failure.
+<code>tcp</code> probes succeed when the TCP connect completes within
+<code>timeout_ms</code>. Documented limitation: <code>http2</code>-protocol upstreams that
+refuse HTTP/1.1 on a separate connection will read as failing; use
+<code>kind: tcp</code> for those.</p>
+<h2 id="timing"><a class="doc-anchor" href="#timing">§</a>Timing</h2>
+<p>Each cycle sleeps <code>interval</code> + uniform(0..<code>jitter</code>) BEFORE probing, so
+the realized period is interval + jitter + probe duration and the tick
+drifts late by that sum per cycle (no fixed-wallclock scheduling); the
+jitter exists to keep probe storms from synchronizing across endpoints.</p>
+<h2 id="reporting-model-precedence-over-passive"><a class="doc-anchor" href="#reporting-model-precedence-over-passive">§</a>Reporting model (precedence over passive)</h2>
+<p>Probe results report into the SAME per-endpoint
+<a href="../../resilience/health/struct.EndpointHealth.html" title="struct dwara_core::resilience::health::EndpointHealth"><code>crate::resilience::health::EndpointHealth</code></a> tracker the passive
+checker and the load balancer use, so both systems feed one ejection
+state and the existing pick filter removes failing endpoints from
+rotation:</p>
+<ul>
+<li><strong>Both run concurrently.</strong> Either signal can eject: a passive report
+ejects at the passive <code>consecutive_failures</code> threshold; an active
+report ejects at <code>failure_threshold</code>. They share the tracker’s
+consecutive-failure streak, so the last report’s parameters decide
+whether that streak ejects — the coherent reading is “either can
+eject, on its own threshold, from one shared streak”.</li>
+<li><strong>Active reports use the consecutive path only.</strong> Probe reports go
+through <a href="../../resilience/health/struct.EndpointHealth.html#method.report_probe" title="method dwara_core::resilience::health::EndpointHealth::report_probe"><code>EndpointHealth::report_probe</code></a>, which never inserts an
+observation into the rolling window — synthetic probes must not be
+mixed into real-traffic ratios — and the probe’s report parameters
+additionally disable the failure-ratio/volume rule
+(<code>failure_min_volume = u32::MAX</code>) as a second line of defense. The
+passive window/eject/half-open parameters stay in force.</li>
+<li><strong>Ejection</strong> follows the passive model: after <code>failure_threshold</code>
+consecutive failed probes the endpoint leaves rotation for
+<code>health.eject_ms</code>. Probe failures while already ejected leave the
+window alone (they cannot extend it).</li>
+<li><strong>Recovery</strong> is probe-driven: <code>success_threshold</code> consecutive
+successful probes report a success, and a success observed on an
+ejected (or half-open) tracker restores it outright — with active
+health on, a healthy probe streak re-admits the endpoint even before
+<code>eject_ms</code> expires, which is the point of probing. A probe success
+below the threshold is reported only when the endpoint is currently
+available (it just resets the failure streak; it never re-admits).
+Best-effort under races, exactly like the rest of the tracker.</li>
+</ul>
+<h2 id="task-lifecycle"><a class="doc-anchor" href="#task-lifecycle">§</a>Task lifecycle</h2>
+<p><a href="struct.ActiveProbes.html" title="struct dwara_core::dataplane::active::ActiveProbes"><code>ActiveProbes</code></a> owns one [<code>tokio::task::JoinSet</code>] for every probe
+loop. The operator (dwara-bin) calls <a href="struct.ActiveProbes.html#method.respawn" title="method dwara_core::dataplane::active::ActiveProbes::respawn"><code>ActiveProbes::respawn</code></a> after
+every snapshot swap (startup and each reload): all previous loops are
+aborted and new ones spawned for the new generation’s upstreams.
+Endpoints whose <code>address:port</code> persists across the swap keep their
+tracker (the balancer carries it, DW-011/DW-012 semantics), so an
+ejection streak survives a reload even though the probe task restarts.
+Dropping <a href="struct.ActiveProbes.html" title="struct dwara_core::dataplane::active::ActiveProbes"><code>ActiveProbes</code></a> (or calling <a href="struct.ActiveProbes.html#method.abort_all" title="method dwara_core::dataplane::active::ActiveProbes::abort_all"><code>ActiveProbes::abort_all</code></a>)
+aborts every loop — the graceful-shutdown path.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ActiveParams.html" title="struct dwara_core::dataplane::active::ActiveParams">Active<wbr>Params</a></dt><dd>Resolved (validated) active-probe parameters, copied into each probe
+loop so a config rebuild cannot change a running loop mid-flight.</dd><dt><a class="struct" href="struct.ActiveProbes.html" title="struct dwara_core::dataplane::active::ActiveProbes">Active<wbr>Probes</a></dt><dd>Owns every active-probe loop task for the running generation. Call
+<a href="struct.ActiveProbes.html#method.respawn" title="method dwara_core::dataplane::active::ActiveProbes::respawn"><code>ActiveProbes::respawn</code></a> on startup and after every snapshot swap;
+dropping it (or shutdown) aborts all loops.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.catch_unwind_future.html" title="fn dwara_core::dataplane::active::catch_unwind_future">catch_<wbr>unwind_<wbr>future</a></dt><dd><code>catch_unwind</code> for futures (std has no <code>FutureExt::catch_unwind</code>):
+each poll of <code>fut</code> runs under <code>catch_unwind</code>, so a panic raised at any
+await point inside <code>fut</code> surfaces as <code>Err</code> instead of unwinding the
+loop task.</dd><dt><a class="fn" href="fn.next_below.html" title="fn dwara_core::dataplane::active::next_below">next_<wbr>below</a></dt><dd>Public for testing the probe-jitter bound contract.</dd><dt><a class="fn" href="fn.probe_once.html" title="fn dwara_core::dataplane::active::probe_once">probe_<wbr>once</a></dt><dd>One direct probe of <code>address:port</code>, bounded by <code>timeout</code> (connect plus
+response for http). <code>tls</code> is the upstream’s outbound TLS client config:
+Some for <code>https</code>/<code>http2</code> upstreams (built from the SAME root store as
+the pooled connector — webpki by default, the upstream’s
+<code>trusted_ca_file</code> bundle when configured, #121 — with HTTP/1.1 ALPN),
+None for plaintext <code>http1</code> upstreams. <code>happy</code> is the upstream’s
+resolved happy-eyeballs delay (DW-030): probes dial through the same
+RFC 8305 racing as the pooled connector, so a dual-stack endpoint’s
+probe does not silently behave differently from its traffic.
+Returns whether the endpoint answered healthy.</dd><dt><a class="fn" href="fn.report_params.html" title="fn dwara_core::dataplane::active::report_params">report_<wbr>params</a></dt><dd>Report parameters for probe outcomes: the passive window/eject/half-open
+parameters with the ACTIVE thresholds substituted and the ratio rule
+disabled (see the module docs).</dd></dl></section></div></main></body></html>

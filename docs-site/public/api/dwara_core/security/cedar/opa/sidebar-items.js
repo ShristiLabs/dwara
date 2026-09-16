@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OpaDecision","OpaError"],"struct":["OpaClient","OpaRequest"]};

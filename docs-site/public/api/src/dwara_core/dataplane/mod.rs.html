@@ -1,0 +1,107 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/dwara-core/src/dataplane/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">dwara_core/dataplane/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Dataplane bounded context: the request-serving path.
+<a href=#2 id=2 data-nosnippet>2</a>//!
+<a href=#3 id=3 data-nosnippet>3</a>//! Assembles the reverse-proxy core ([`proxy`]), pooled upstream clients
+<a href=#4 id=4 data-nosnippet>4</a>//! ([`upstream`], with the RFC 8305 happy-eyeballs dial of DW-030),
+<a href=#5 id=5 data-nosnippet>5</a>//! per-upstream load balancing ([`balance`]), active health probing
+<a href=#6 id=6 data-nosnippet>6</a>//! ([`active`] — it drives the upstream registry's balancer trackers,
+<a href=#7 id=7 data-nosnippet>7</a>//! which is dataplane lifecycle), DNS-based dynamic upstream discovery
+<a href=#8 id=8 data-nosnippet>8</a>//! ([`discovery`] — DW-042, background tasks that resolve and watch
+<a href=#9 id=9 data-nosnippet>9</a>//! DNS records, updating the endpoint set live), config convergence
+<a href=#10 id=10 data-nosnippet>10</a>//! (`convergence` — DW-054, ent feature only, background task that
+<a href=#11 id=11 data-nosnippet>11</a>//! polls a shared backend so instances converge to the highest
+<a href=#12 id=12 data-nosnippet>12</a>//! generation and drift is reported), the protocol
+<a href=#13 id=13 data-nosnippet>13</a>//! hardening applied to
+<a href=#14 id=14 data-nosnippet>14</a>//! every serving surface ([`hardening`], plus the route-scoped request
+<a href=#15 id=15 data-nosnippet>15</a>//! limits of DW-027), the PROXY protocol acceptance of DW-030
+<a href=#16 id=16 data-nosnippet>16</a>//! ([`proxy_proto`]), the route-scoped response edge policies of DW-027
+<a href=#17 id=17 data-nosnippet>17</a>//! ([`cors`], [`compression`]), the API versioning aids of DW-048
+<a href=#18 id=18 data-nosnippet>18</a>//! ([`versioning`]), the request/response transforms and
+<a href=#19 id=19 data-nosnippet>19</a>//! security-header injection of DW-028 ([`transforms`]), and the local
+<a href=#20 id=20 data-nosnippet>20</a>//! response cache of DW-037 ([`response_cache`], behind the
+<a href=#21 id=21 data-nosnippet>21</a>//! `extensions::cache::CacheStore` seam), and the AI proxy action of
+<a href=#22 id=22 data-nosnippet>22</a>//! DW-075 ([`ai_proxy`], which drives the `ai` domain's adapters over
+<a href=#23 id=23 data-nosnippet>23</a>//! the provider's upstream). This is the top of the core
+<a href=#24 id=24 data-nosnippet>24</a>//! dependency graph: it may depend on every other domain; nothing
+<a href=#25 id=25 data-nosnippet>25</a>//! depends on it.
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a></span><span class="kw">pub mod </span>active;
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">pub mod </span>ai_proxy;
+<a href=#29 id=29 data-nosnippet>29</a><span class="kw">pub mod </span>anomaly;
+<a href=#30 id=30 data-nosnippet>30</a><span class="kw">pub mod </span>balance;
+<a href=#31 id=31 data-nosnippet>31</a><span class="kw">pub mod </span>canary;
+<a href=#32 id=32 data-nosnippet>32</a><span class="kw">pub mod </span>compression;
+<a href=#33 id=33 data-nosnippet>33</a><span class="kw">pub mod </span>cors;
+<a href=#34 id=34 data-nosnippet>34</a><span class="comment">// DW-054: config convergence coordinator (ent feature only). The
+<a href=#35 id=35 data-nosnippet>35</a>// module compiles only when the `ent` cargo feature is enabled; OSS
+<a href=#36 id=36 data-nosnippet>36</a>// builds never pull in the redis dependency. Lives in the dataplane
+<a href=#37 id=37 data-nosnippet>37</a>// (the top of the core dependency graph) because it orchestrates the
+<a href=#38 id=38 data-nosnippet>38</a>// snapshot publish pipeline + the convergence backend trait +
+<a href=#39 id=39 data-nosnippet>39</a>// observability, and `snapshot` may not import `extensions`.
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="attr">#[cfg(feature = <span class="string">"ent"</span>)]
+<a href=#41 id=41 data-nosnippet>41</a></span><span class="kw">pub mod </span>convergence;
+<a href=#42 id=42 data-nosnippet>42</a><span class="comment">// DW-099: GraphQL awareness (query depth/complexity limits +
+<a href=#43 id=43 data-nosnippet>43</a>// persisted-query enforcement). Feature-gated behind the `graphql`
+<a href=#44 id=44 data-nosnippet>44</a>// cargo feature; the module compiles only when the feature is enabled.
+<a href=#45 id=45 data-nosnippet>45</a>// The config schema is always present (so configs round-trip without
+<a href=#46 id=46 data-nosnippet>46</a>// the feature), but the runtime check is feature-gated.
+<a href=#47 id=47 data-nosnippet>47</a></span><span class="kw">pub mod </span>discovery;
+<a href=#48 id=48 data-nosnippet>48</a><span class="comment">// DW-101: gRPC-Web framing translation + JSON-to-gRPC transcoding.
+<a href=#49 id=49 data-nosnippet>49</a>// Feature-gated behind the `grpc_web` cargo feature; the module
+<a href=#50 id=50 data-nosnippet>50</a>// compiles only when the feature is enabled. The config schema is
+<a href=#51 id=51 data-nosnippet>51</a>// always present (so configs round-trip without the feature), but the
+<a href=#52 id=52 data-nosnippet>52</a>// runtime translation is feature-gated.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">pub mod </span>graphql;
+<a href=#54 id=54 data-nosnippet>54</a><span class="kw">pub mod </span>grpc_web;
+<a href=#55 id=55 data-nosnippet>55</a><span class="kw">pub mod </span>hardening;
+<a href=#56 id=56 data-nosnippet>56</a><span class="comment">// DW-106: WASM route handlers (nano-services). Feature-gated behind
+<a href=#57 id=57 data-nosnippet>57</a>// the `nano_services` cargo feature (which pulls in `wasm`); the module
+<a href=#58 id=58 data-nosnippet>58</a>// compiles only when the feature is enabled. The config schema is
+<a href=#59 id=59 data-nosnippet>59</a>// always present (so configs round-trip without the feature), but the
+<a href=#60 id=60 data-nosnippet>60</a>// runtime handler is feature-gated. When the feature is off the action
+<a href=#61 id=61 data-nosnippet>61</a>// is accepted but inert (validation warns, the route returns 502).
+<a href=#62 id=62 data-nosnippet>62</a></span><span class="kw">pub mod </span>nano_service;
+<a href=#63 id=63 data-nosnippet>63</a><span class="comment">// DW-157: request-path plugin dispatch. Wires the route `plugins`
+<a href=#64 id=64 data-nosnippet>64</a>// list into the live request path — the fail-closed health gate over
+<a href=#65 id=65 data-nosnippet>65</a>// the plugin lifecycle, per-request WASM instantiation, the unified
+<a href=#66 id=66 data-nosnippet>66</a>// plugin chain (native + WASM in config order), and the four phase
+<a href=#67 id=67 data-nosnippet>67</a>// points (request_headers before authn, request_body before the
+<a href=#68 id=68 data-nosnippet>68</a>// action, response_headers before masking, response_body after
+<a href=#69 id=69 data-nosnippet>69</a>// masking). Compiles unconditionally; routes without plugins take the
+<a href=#70 id=70 data-nosnippet>70</a>// untouched fast path.
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub mod </span>plugin_dispatch;
+<a href=#72 id=72 data-nosnippet>72</a><span class="kw">pub mod </span>proxy;
+<a href=#73 id=73 data-nosnippet>73</a><span class="kw">pub mod </span>proxy_proto;
+<a href=#74 id=74 data-nosnippet>74</a><span class="comment">// DW-102: replay time-travel debugging (pure decision replayer).
+<a href=#75 id=75 data-nosnippet>75</a></span><span class="kw">pub mod </span>replay;
+<a href=#76 id=76 data-nosnippet>76</a><span class="kw">pub mod </span>response_cache;
+<a href=#77 id=77 data-nosnippet>77</a><span class="kw">pub mod </span>split;
+<a href=#78 id=78 data-nosnippet>78</a><span class="comment">// DW-100: protocol translation framework. The general
+<a href=#79 id=79 data-nosnippet>79</a>// ProtocolTranslator trait + the REST&lt;-&gt;GraphQL translator compile
+<a href=#80 id=80 data-nosnippet>80</a>// under the `protocol_translation` cargo feature (which implies
+<a href=#81 id=81 data-nosnippet>81</a>// `grpc_web` so the REST&lt;-&gt;gRPC translator reuses the DW-101 engine).
+<a href=#82 id=82 data-nosnippet>82</a>// The SOAP/XML translator is further gated behind the `soap` feature
+<a href=#83 id=83 data-nosnippet>83</a>// for binary size. The config schema is always present (so configs
+<a href=#84 id=84 data-nosnippet>84</a>// round-trip without the feature), but the runtime translation is
+<a href=#85 id=85 data-nosnippet>85</a>// feature-gated.
+<a href=#86 id=86 data-nosnippet>86</a></span><span class="kw">pub mod </span>transforms;
+<a href=#87 id=87 data-nosnippet>87</a><span class="kw">pub mod </span>translation;
+<a href=#88 id=88 data-nosnippet>88</a><span class="kw">pub mod </span>translation_graphql;
+<a href=#89 id=89 data-nosnippet>89</a><span class="kw">pub mod </span>translation_soap;
+<a href=#90 id=90 data-nosnippet>90</a><span class="comment">// DW-103: L4 TCP/UDP proxying with SNI routing reuse. Feature-gated
+<a href=#91 id=91 data-nosnippet>91</a>// behind the `l4` cargo feature; the module compiles only when the
+<a href=#92 id=92 data-nosnippet>92</a>// feature is enabled. The config schema (ListenerProtocol::Tcp/Udp +
+<a href=#93 id=93 data-nosnippet>93</a>// L4Config) is always present so configs round-trip without the
+<a href=#94 id=94 data-nosnippet>94</a>// feature, but the runtime dispatcher is feature-gated. When the
+<a href=#95 id=95 data-nosnippet>95</a>// feature is off, validation warns that the listener is inert.
+<a href=#96 id=96 data-nosnippet>96</a></span><span class="kw">pub mod </span>l4;
+<a href=#97 id=97 data-nosnippet>97</a><span class="kw">pub mod </span>upstream;
+<a href=#98 id=98 data-nosnippet>98</a><span class="comment">// DW-108: HTTP/3 (QUIC) upstream transport. Feature-gated behind the
+<a href=#99 id=99 data-nosnippet>99</a>// `h3` cargo feature; the module compiles only when the feature is
+<a href=#100 id=100 data-nosnippet>100</a>// enabled (it pulls in quinn + h3 + h3-quinn). When the feature is off,
+<a href=#101 id=101 data-nosnippet>101</a>// `protocol: h3` upstreams are accepted at validation but inert (every
+<a href=#102 id=102 data-nosnippet>102</a>// dispatch fails closed with UpstreamError::H3Unavailable).
+<a href=#103 id=103 data-nosnippet>103</a></span><span class="kw">pub mod </span>upstream_h3;
+<a href=#104 id=104 data-nosnippet>104</a><span class="kw">pub mod </span>versioning;
+<a href=#105 id=105 data-nosnippet>105</a><span class="kw">pub mod </span>waf;
+<a href=#106 id=106 data-nosnippet>106</a><span class="kw">pub mod </span>websocket;
+</code></pre></div></section></main></body></html>

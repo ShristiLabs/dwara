@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Listener binding and serving."><title>dwara::listeners - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module listeners</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara/index.html">dwara</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module listeners</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara</a></div><h1>Module <span>listeners</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara/listeners.rs.html#1-961">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Listener binding and serving.</p>
+<p>Listener modes (DW-007, feature analysis 4.10 / 4.13):</p>
+<ul>
+<li><code>http</code> listener: cleartext; hyper-util’s auto builder sniffs the
+HTTP/2 preface, so HTTP/1.1 and h2c (prior knowledge) both work.</li>
+<li><code>https</code> + <code>tls.mode terminate</code>: rustls (aws-lc-rs provider) with
+TLS 1.3 + 1.2, ALPN <code>h2</code>/<code>http/1.1</code>, SNI certificate selection
+(single pair = fallback; <code>certificates</code> entries matched by SNI).</li>
+<li><code>https</code> + <code>tls.mode passthrough</code>: the ClientHello is peeked, SNI is
+matched against <code>tls.sni_routes</code>, and the raw TLS bytes are spliced
+bidirectionally to the first endpoint of the matched upstream
+(load balancing is DW-011). A non-TLS client, missing SNI, or an
+unmatched name has its connection closed.</li>
+</ul>
+<p>Every accept task runs under panic supervision (#120): a panicked
+accept loop is respawned on the same bound socket, up to
+<a href="constant.MAX_LISTENER_RESPAWNS.html" title="constant dwara::listeners::MAX_LISTENER_RESPAWNS"><code>MAX_LISTENER_RESPAWNS</code></a> times, after which the listener is given up
+on with an ERROR log (the process and the other listeners keep
+running). The supervisor itself lives in
+<a href="../../dwara_core/supervision/index.html" title="mod dwara_core::supervision"><code>dwara_core::supervision</code></a> and is shared with the admin accept loop
+(#130); only the listener budget and wiring live here.</p>
+<p>PROXY protocol (DW-030): a listener with <code>proxy_protocol: true</code> has
+a v1/v2 header read as the first bytes of every connection — before
+the TLS handshake in terminate mode (the L4 LB wraps the whole
+stream) — and the header’s source address becomes the peer the whole
+pipeline sees (ACL, rate keys, XFF/X-Real-IP). Malformed headers fail
+closed with a 400 envelope; see <a href="fn.proxy_phase.html" title="fn dwara::listeners::proxy_phase"><code>proxy_phase</code></a> and
+<code>dwara_core::dataplane::proxy_proto</code> for the frozen policy.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BoundListener.html" title="struct dwara::listeners::BoundListener">Bound<wbr>Listener</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Cloneable so the panic supervisor (#120) can hand a fresh copy to
+every respawned incarnation of the accept loop.</dd><dt><a class="struct" href="struct.SpliceDrain.html" title="struct dwara::listeners::SpliceDrain">Splice<wbr>Drain</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>In-flight passthrough and L4 splice tracker for graceful drain on
+shutdown (#175, REL-04). Passthrough (SNI passthrough TLS) and L4
+(TCP splice) connections are raw byte relays: the gateway does NOT
+terminate TLS, so it cannot emit a TLS <code>close_notify</code> alert (it does
+not hold the session keys). The drain is therefore a bounded wait:
+in-flight splices are tracked here, and on shutdown the process
+waits for them to complete naturally (the peer closes, the idle
+timeout fires, or the bidirectional copy returns) up to the shutdown
+deadline; whatever remains at the deadline is force-closed by
+process exit (the same posture as the HTTP graceful drain).</dd><dt><a class="struct" href="struct.SpliceGuard.html" title="struct dwara::listeners::SpliceGuard">Splice<wbr>Guard</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>RAII guard deregistering one in-flight splice from a <a href="struct.SpliceDrain.html" title="struct dwara::listeners::SpliceDrain"><code>SpliceDrain</code></a>
+on drop. Created by <a href="struct.SpliceDrain.html#method.track" title="method dwara::listeners::SpliceDrain::track"><code>SpliceDrain::track</code></a>; moved into the spawned
+splice task.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ListenerMode.html" title="enum dwara::listeners::ListenerMode">Listener<wbr>Mode</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Runtime face of one bound listener: what to do with each accepted
+connection.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_LISTENER_RESPAWNS.html" title="constant dwara::listeners::MAX_LISTENER_RESPAWNS">MAX_<wbr>LISTENER_<wbr>RESPAWNS</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>#120 panic policy: how many times a listener whose accept loop
+panicked is respawned before the listener is given up on. Total per
+listener for the process lifetime (a simple bounded budget; a
+crash-looping listener stops after this many respawns instead of
+spinning forever).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.acceptors_per_listener.html" title="fn dwara::listeners::acceptors_per_listener">acceptors_<wbr>per_<wbr>listener</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Number of concurrent acceptor tasks per listener (#271).</dd><dt><a class="fn" href="fn.bind_listener.html" title="fn dwara::listeners::bind_listener">bind_<wbr>listener</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Bind one configured listener into its runtime face. Fails startup on
+bind errors or unusable TLS material (a gateway must not boot serving
+the wrong certificates).</dd><dt><a class="fn" href="fn.proxy_phase.html" title="fn dwara::listeners::proxy_phase">proxy_<wbr>phase</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>PROXY protocol phase for one accepted connection (DW-030). Reads the
+v1/v2 header (when the listener is a <code>proxy_protocol</code> listener) and
+returns the EFFECTIVE peer address plus any bytes read past the
+header (a sender pipelining TLS records / the HTTP head behind the
+PROXY line) for replay in front of the stream. Returns None when the
+connection was rejected and closed: a malformed header is answered
+with the 400 error envelope (fail closed — never handed to HTTP
+parsing), a stalled or dropped header read closes silently. The
+deadline is the DW-023 slowloris header timeout — the same attack
+class, one layer earlier (a partial PROXY line cannot be handed on,
+so this is a WHOLE-header bound, not per-read).</dd><dt><a class="fn" href="fn.run_listener.html" title="fn dwara::listeners::run_listener">run_<wbr>listener</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Per-listener accept loop with its own backlog flush (the DW-006 drain
+sequence, per listener). Returns when shutdown is signalled and the
+backlog is flushed. Takes the socket behind an <code>Arc</code> shared with the
+panic supervisor (#120): a respawned incarnation accepts on the SAME
+bound socket instead of re-binding (no port-loss window, no bind
+race with lingering state).</dd><dt><a class="fn" href="fn.run_listener_supervised.html" title="fn dwara::listeners::run_listener_supervised">run_<wbr>listener_<wbr>supervised</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Bind the supervision of one listener’s accept task (#120): every
+respawn reuses the same bound socket (shared <code>Arc</code>) and clones of
+the serve plumbing, so a panicked accept loop cannot kill a listener
+silently. The supervisor is <a href="../../dwara_core/supervision/fn.supervise_panics.html" title="fn dwara_core::supervision::supervise_panics"><code>dwara_core::supervision::supervise_panics</code></a>
+(shared with the admin accept loop since #130); its semantics tests
+live beside it in dwara-core.</dd><dt><a class="fn" href="fn.serve_http_tls.html" title="fn dwara::listeners::serve_http_tls">serve_<wbr>http_<wbr>tls</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Serve one (possibly TLS-terminated) connection with the proxy dataplane.
+Upgrades are enabled on the inbound connection so WebSocket-style 101
+tunnels can be spliced (generic tunneling; see dwara-core’s proxy docs).
+<code>client_cert</code> is the VERIFIED client certificate when the TLS layer
+requested one (#124); it rides the request extensions to the
+authenticator’s ambient mTLS family.</dd></dl></section></div></main></body></html>

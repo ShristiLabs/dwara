@@ -1,0 +1,152 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request/response transformation grammar (DW-028): the config shapes for header/query manipulation and JSON-pointer body transforms, the shared JSON-Pointer grammar validation and the runtime agree on, and the security-header injection policy (feature analysis 4.12 and the 5-Security “security header injection” row)."><title>dwara_core::config::transforms - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module transforms</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module transforms</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#the-streaming-contract-the-issues-done-when" title="The streaming contract (the issue’s done-when)">The streaming contract (the issue’s done-when)</a></li><li><a href="#pointer-semantics-why-strict" title="Pointer semantics (why strict)">Pointer semantics (why strict)</a></li><li><a href="#security-headers-vs-the-decoration-tail" title="Security headers vs the decoration tail">Security headers vs the decoration tail</a></li><li><a href="#response-field-masking-dw-029--the-security-sharp-edge" title="Response field masking (DW-029) — the security sharp edge">Response field masking (DW-029) — the security sharp edge</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>config</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">config</a></div><h1>Module <span>transforms</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/config/transforms.rs.html#1-948">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request/response transformation grammar (DW-028): the config shapes
+for header/query manipulation and JSON-pointer body transforms, the
+shared JSON-Pointer grammar validation and the runtime agree on, and
+the security-header injection policy (feature analysis 4.12 and the
+5-Security “security header injection” row).</p>
+<p>This is config-contract grammar in the same sense as <code>net.rs</code> (the
+IP/CIDR vocabulary) and <code>versioning.rs</code> (the HTTP-date and media-type
+vocabularies): validation (<code>snapshot::validate</code>) and the runtime
+(<code>dataplane::transforms</code>) must agree on ONE parsing of these strings,
+so the grammar lives in <code>config</code>, the lowest consuming domain.</p>
+<h3 id="the-streaming-contract-the-issues-done-when"><a class="doc-anchor" href="#the-streaming-contract-the-issues-done-when">§</a>The streaming contract (the issue’s done-when)</h3>
+<p>“Streaming is preserved unless a transform explicitly buffers.” The
+surface splits exactly along that line:</p>
+<ul>
+<li>Header and query ops, and security headers, never touch a body:
+streaming responses (SSE, upgrades, chunked downloads) pass with
+zero buffering, exactly as before.</li>
+<li>A JSON body transform is the one EXPLICITLY BUFFERING transform:
+it opts the route in, applies only to JSON bodies (content-type
+gated), and buffers at most <code>max_bytes</code> — a hard cap enforced both
+against a declared <code>Content-Length</code> and against the live stream.
+Over-cap bodies fail CLOSED (413 request-side, 502 response-side),
+never “transform what fit” and never silently pass through: a
+skipped policy transform is a fail-open data leak in the masking
+direction (DW-029 builds on this machinery).</li>
+</ul>
+<h3 id="pointer-semantics-why-strict"><a class="doc-anchor" href="#pointer-semantics-why-strict">§</a>Pointer semantics (why strict)</h3>
+<p>A <code>set</code>/<code>remove</code> whose JSON Pointer does not resolve at runtime is an
+ERROR, not a skip. Pointer misses are schema drift, and in the
+redaction direction (remove the secret field) a silent miss is
+exactly the leak the policy exists to prevent. Strictness costs
+operators a 400/502 on drifted contracts; leniency would cost them
+their data. The error names the offending pointer server-side only
+(the client envelope carries a generic message).</p>
+<h3 id="security-headers-vs-the-decoration-tail"><a class="doc-anchor" href="#security-headers-vs-the-decoration-tail">§</a>Security headers vs the decoration tail</h3>
+<p>Security headers are an EDGE property of every response the route
+emits — action responses and gateway short-circuits alike (a 401
+without <code>X-Content-Type-Options: nosniff</code> is a real, if minor, gap;
+contrast deprecation stamps, which announce API lifecycle and are
+deliberately absent from short-circuits). They REPLACE any
+upstream-sent values: the gateway is the source of truth for its
+edge policy, the same rule as the deprecation and <code>X-RateLimit-*</code>
+headers. They apply last in the response decoration tail, after
+operator transforms: an operator who needs per-route-exception
+behavior omits the field here and sets it via transforms.</p>
+<h3 id="response-field-masking-dw-029--the-security-sharp-edge"><a class="doc-anchor" href="#response-field-masking-dw-029--the-security-sharp-edge">§</a>Response field masking (DW-029) — the security sharp edge</h3>
+<p><a href="struct.Masking.html" title="struct dwara_core::config::transforms::Masking"><code>Masking</code></a> redacts JSON fields on the way OUT, per consumer group
+(the mass-assignment/data-leak guard). It reuses the buffering and
+pointer machinery above with ONE posture change: every gate that the
+DW-028 body transform treats as pass-through (an already-encoded
+body, a non-JSON content type) is, for masking, a REJECTION — the
+gateway cannot prove fields absent from bytes it cannot parse, and a
+skipped masking policy is exactly the leak the policy exists to
+prevent. Over-cap, invalid JSON, and unresolved pointers fail the
+same way (502), the strictness the pointer rules above already
+argue for. Masking runs FIRST in the response decoration tail —
+before the DW-028 body transform and before compression (DW-027) —
+so no later stage can resurrect a redacted value: once the sentinel
+replaces the secret, the original bytes exist nowhere in the
+gateway.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BodyTransform.html" title="struct dwara_core::config::transforms::BodyTransform">Body<wbr>Transform</a></dt><dd>A body transform (DW-028). The <code>json</code> variant is the whole of v1:
+any other body transform family (templating, XML) would be a new
+variant here — the wrapper exists so adding one does not reshape
+the config surface.</dd><dt><a class="struct" href="struct.CompiledJsonTransform.html" title="struct dwara_core::config::transforms::CompiledJsonTransform">Compiled<wbr>Json<wbr>Transform</a></dt><dd>Snapshot-compiled form of a <a href="struct.JsonBodyTransform.html" title="struct dwara_core::config::transforms::JsonBodyTransform"><code>JsonBodyTransform</code></a> (DW-028): every
+op’s pointer parsed once at snapshot-compile time; the request path
+applies tokens, never re-parsing config strings. Validation
+guarantees every pointer parses, so compilation drops nothing on
+any publishable config; a <code>None</code>-producing parse is skipped with
+the same unreachable-skip contract as the CORS/compression
+compilations.</dd><dt><a class="struct" href="struct.CompiledMasking.html" title="struct dwara_core::config::transforms::CompiledMasking">Compiled<wbr>Masking</a></dt><dd>Snapshot-compiled form of a <a href="struct.Masking.html" title="struct dwara_core::config::transforms::Masking"><code>Masking</code></a> policy (DW-029): every
+pointer parsed once at snapshot-compile time. The effective pointer
+set is resolved per request (the floor plus the authenticated
+consumer’s groups — the union rule), which is why groups stay a map
+here rather than being flattened at compile time.</dd><dt><a class="struct" href="struct.HeaderOps.html" title="struct dwara_core::config::transforms::HeaderOps">Header<wbr>Ops</a></dt><dd>Header manipulation ops (DW-028). Applied in ONE deterministic
+order regardless of YAML key order: <code>set</code> (replace all values of the
+name with one value), then <code>add</code> (append one value, keeping any
+existing values), then <code>rename</code> (move every value of <code>from</code> to
+<code>to</code>), then <code>remove</code> (drop every value of the name) — so <code>remove</code>
+can clean up what earlier ops placed, and <code>rename</code> sees both
+upstream and just-set values. Maps iterate in sorted key order
+(BTreeMap), making multi-entry application deterministic.</dd><dt><a class="struct" href="struct.JsonBodyTransform.html" title="struct dwara_core::config::transforms::JsonBodyTransform">Json<wbr>Body<wbr>Transform</a></dt><dd>JSON-pointer body transform (DW-028): RFC 6901 pointers against a
+parsed JSON document, applied in listed order (each op sees the
+previous op’s result). THIS IS THE EXPLICITLY BUFFERING TRANSFORM —
+the only place in the transforms surface that reads a body. Hard
+rules, enforced by <code>dataplane::transforms</code>:</dd><dt><a class="struct" href="struct.JsonPointer.html" title="struct dwara_core::config::transforms::JsonPointer">Json<wbr>Pointer</a></dt><dd>A parsed RFC 6901 JSON pointer (DW-028): the compiled form the
+runtime applies and validation checks, so the two can never
+disagree on what <code>/items/0</code> means. Built once at snapshot compile;
+the raw config string never reaches the request path (the same
+precompute contract as the CORS/compression/deprecation tables).</dd><dt><a class="struct" href="struct.Masking.html" title="struct dwara_core::config::transforms::Masking">Masking</a></dt><dd>Response field masking policy (DW-029, feature analysis 5-Security
+“response field masking”): RFC 6901 pointers whose values are
+replaced with the fixed <a href="constant.MASKED_VALUE.html" title="constant dwara_core::config::transforms::MASKED_VALUE"><code>MASKED_VALUE</code></a> sentinel on the route’s
+responses, before any other body-handling stage. The
+mass-assignment/data-leak guard: a field named here NEVER reaches
+the client, whatever the upstream put in it.</dd><dt><a class="struct" href="struct.QueryOps.html" title="struct dwara_core::config::transforms::QueryOps">Query<wbr>Ops</a></dt><dd>Query-string manipulation ops (DW-028), applied to the forwarded
+request’s query. The original query is split into pairs WITHOUT
+decoding (each pair’s key and value stay byte-verbatim, so untouched
+parameters — including their exact percent-encoding — survive); only
+pairs a named op touches are re-encoded (new values are
+percent-encoded by the gateway). Ops apply in the same deterministic
+order as header ops: <code>set</code>, <code>add</code>, <code>rename</code>, <code>remove</code>.</dd><dt><a class="struct" href="struct.RequestTransforms.html" title="struct dwara_core::config::transforms::RequestTransforms">Request<wbr>Transforms</a></dt><dd>Request-side transforms (DW-028).</dd><dt><a class="struct" href="struct.ResponseTransforms.html" title="struct dwara_core::config::transforms::ResponseTransforms">Response<wbr>Transforms</a></dt><dd>Response-side transforms (DW-028), applied to the route’s action
+responses (proxy, redirect, respond) — not to gateway
+short-circuits (limits, authn/authz, rate limits, maintenance,
+sheds), which describe the request, not the upstream’s output.</dd><dt><a class="struct" href="struct.SecurityHeaders.html" title="struct dwara_core::config::transforms::SecurityHeaders">Security<wbr>Headers</a></dt><dd>Security-header injection policy (DW-028, feature analysis
+5-Security “security header injection”). Each field that is present
+injects (REPLACING any upstream-sent value — the gateway is the
+source of truth at its edge) exactly one standard hardening header
+on every response the route emits, including gateway
+short-circuits (401/403/413/429/503, CORS preflights): unlike
+deprecation stamps, these harden every byte the edge sends, and a
+browser parsing an error page deserves the same guarantees as one
+parsing a 200.</dd><dt><a class="struct" href="struct.Transforms.html" title="struct dwara_core::config::transforms::Transforms">Transforms</a></dt><dd>Route-scoped request and response transforms (DW-028, feature
+analysis 4.12). Absent (the default): the gateway forwards bytes and
+headers untouched. Presence opts the route’s traffic into the
+declared manipulations — nothing here applies to any other route.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CompiledJsonOp.html" title="enum dwara_core::config::transforms::CompiledJsonOp">Compiled<wbr>Json<wbr>Op</a></dt><dd>One compiled op.</dd><dt><a class="enum" href="enum.FrameOptions.html" title="enum dwara_core::config::transforms::FrameOptions">Frame<wbr>Options</a></dt><dd>The <code>X-Frame-Options</code> value (DW-028).</dd><dt><a class="enum" href="enum.JsonOp.html" title="enum dwara_core::config::transforms::JsonOp">JsonOp</a></dt><dd>One JSON-pointer operation (DW-028). <code>set</code> writes any JSON value at
+the pointer (creating the final key in an object parent that must
+already exist; replacing an existing element in an array parent);
+<code>remove</code> deletes the addressed value. The ROOT pointer (<code>""</code>) is
+valid for <code>set</code> (whole-document replacement) and rejected for
+<code>remove</code> by validation (a body with no document is not a state this
+transform can produce).</dd><dt><a class="enum" href="enum.JsonTransformError.html" title="enum dwara_core::config::transforms::JsonTransformError">Json<wbr>Transform<wbr>Error</a></dt><dd>Why a compiled transform failed on a document (DW-028). The
+offending pointer rides along for the server-side log; the client
+envelope stays generic.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MASKED_VALUE.html" title="constant dwara_core::config::transforms::MASKED_VALUE">MASKED_<wbr>VALUE</a></dt><dd>The value a masked field is replaced with (DW-029): the JSON string
+<code>"***"</code> (the feature analysis row’s <code>JSON paths -&gt; ***</code>). FIXED, not
+configurable — the sentinel is a fixed marker the client can rely
+on (a value the gateway itself chose and documents) and identical
+on every route, so nothing about a masked response depends on
+per-route config a client cannot see. One ambiguity is inherent
+and documented: source data that is literally <code>"***"</code> at a masked
+position is indistinguishable from the sentinel — treat every
+<code>"***"</code> at a configured pointer as masked (the operator docs carry
+the same caveat). Operators who need a different shape on a
+specific route combine masking with a DW-028 response transform
+(which runs after masking and sees the sentinel).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.is_forbidden_request_header.html" title="fn dwara_core::config::transforms::is_forbidden_request_header">is_<wbr>forbidden_<wbr>request_<wbr>header</a></dt><dd>Header names no REQUEST-side header op may touch (DW-028). Framing
+(<code>content-length</code>, <code>transfer-encoding</code>) is rebuilt by the forward
+pipeline from the actual body — an op that forced a disagreeing
+value would be a request-smuggling primitive aimed at the upstream,
+the exact class the pre-parse sniff exists to stop on the inbound
+side. The rest is the hop-by-hop class (RFC 9110 section 7.6.1 plus
+the legacy keep-alive/proxy spellings): the gateway strips and, for
+upgrades, re-adds <code>connection</code>/<code>upgrade</code> itself. <code>host</code> is not the
+operator’s either — the gateway names the origin it dials (see
+<code>UpstreamHandle::send_with_hash_key</code>).</dd><dt><a class="fn" href="fn.is_forbidden_response_header.html" title="fn dwara_core::config::transforms::is_forbidden_response_header">is_<wbr>forbidden_<wbr>response_<wbr>header</a></dt><dd>Header names no RESPONSE-side header op may touch (DW-028): the
+framing/hop-by-hop class plus <code>content-encoding</code>, which only the
+compression pipeline may manage — an op that stripped it without
+decoding would corrupt the body, and one that added it would
+misdescribe bytes it did not encode.</dd><dt><a class="fn" href="fn.is_json_media_type.html" title="fn dwara_core::config::transforms::is_json_media_type">is_<wbr>json_<wbr>media_<wbr>type</a></dt><dd>Is <code>media_type</code> (the part before any <code>;</code>, already lowercased) a
+JSON media type this gateway will body-transform (DW-028)? Exactly
+the <code>application/json</code> type and the structured-syntax suffix family
+<code>application/&lt;*+json&gt;</code> (an <code>application/vnd.acme+json</code> body IS a
+JSON body); parameters are the caller’s business (stripped before
+this check). No other type family carries the <code>+json</code> suffix in
+practice, and widening to <code>text/json</code>-style one-offs buys nothing.</dd></dl></section></div></main></body></html>

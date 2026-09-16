@@ -1,0 +1,45 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Raw table daily partitioning and retention automation (SCALE-09, #188)."><title>dwara_core::analytics::partition - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module partition</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module partition</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design" title="Design">Design</a></li><li><a href="#why-same-file-partitions-not-separate-files" title="Why same-file partitions, not separate files">Why same-file partitions, not separate files</a></li></ul><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>analytics</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">analytics</a></div><h1>Module <span>partition</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/analytics/partition.rs.html#1-399">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Raw table daily partitioning and retention automation (SCALE-09,
+#188).</p>
+<p>The embedded analytics store’s <code>raw</code> table grows unbounded under
+high sustained throughput between retention prunes. This module
+rotates the raw table daily into partition tables (<code>raw_YYYYMMDD</code>)
+within the same SQLite database, making retention enforcement O(1)
+(DROP TABLE) instead of O(n) (DELETE rows + incremental vacuum).</p>
+<h2 id="design"><a class="doc-anchor" href="#design">§</a>Design</h2>
+<ul>
+<li>The <code>raw</code> table is always the CURRENT day’s partition. The
+writer inserts into <code>raw</code> unchanged.</li>
+<li>At daily boundaries, <code>maybe_rotate</code> renames <code>raw</code> to
+<code>raw_YYYYMMDD</code> (yesterday’s date) and creates a new empty <code>raw</code>
+table with the full schema.</li>
+<li>A <code>raw_all</code> view UNION ALLs the <code>raw</code> table and all
+<code>raw_YYYYMMDD</code> partition tables, so the rollup and query layers
+read across all partitions without per-query changes.</li>
+<li><code>drop_expired_partitions</code> drops <code>raw_YYYYMMDD</code> tables older than
+the raw retention period (O(1) DROP TABLE).</li>
+<li>The <code>raw_partitions</code> meta table tracks partition names and their
+date boundaries for introspection.</li>
+</ul>
+<h2 id="why-same-file-partitions-not-separate-files"><a class="doc-anchor" href="#why-same-file-partitions-not-separate-files">§</a>Why same-file partitions, not separate files</h2>
+<p>The issue proposed separate SQLite files. Same-file partition
+tables achieve the same O(1) retention and bounded raw table size
+while avoiding the complexity of ATTACH/DETACH, cross-file
+transactions, and connection management. SQLite’s DROP TABLE is
+O(1) (the pages are simply freed to the file’s free list), and
+incremental vacuum reclaims them. The <code>raw_all</code> view provides
+cross-partition querying without dynamic SQL.</p>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.SCHEMA_V11.html" title="constant dwara_core::analytics::partition::SCHEMA_V11">SCHEMA_<wbr>V11</a></dt><dd>The <code>raw_partitions</code> meta table (schema v11, SCALE-09 #188):
+tracks the partition table name and the date it covers. One row
+per rotated partition. The current day’s <code>raw</code> table is NOT listed
+here (it is the active partition; it will be listed when it is
+rotated).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.drop_expired_partitions.html" title="fn dwara_core::analytics::partition::drop_expired_partitions">drop_<wbr>expired_<wbr>partitions</a></dt><dd>Drop partition tables older than the raw retention period. Returns
+the number of partitions dropped. Each drop is O(1) (SQLite frees
+the table’s pages to the file’s free list; incremental vacuum
+reclaims them).</dd><dt><a class="fn" href="fn.list_partitions.html" title="fn dwara_core::analytics::partition::list_partitions">list_<wbr>partitions</a></dt><dd>List all active partition names (including the current <code>raw</code>
+table), ordered by name. Useful for introspection and diagnostics.</dd><dt><a class="fn" href="fn.maybe_rotate.html" title="fn dwara_core::analytics::partition::maybe_rotate">maybe_<wbr>rotate</a></dt><dd>Check if the current <code>raw</code> table has rows from a previous day. If
+so, rename it to <code>raw_YYYYMMDD</code> (the previous day’s date), create
+a fresh <code>raw</code> table, record the partition, and refresh the
+<code>raw_all</code> view. Returns the partition name if a rotation
+happened, <code>None</code> otherwise.</dd><dt><a class="fn" href="fn.refresh_raw_all_view.html" title="fn dwara_core::analytics::partition::refresh_raw_all_view">refresh_<wbr>raw_<wbr>all_<wbr>view</a></dt><dd>Recreate the <code>raw_all</code> view as the UNION ALL of the <code>raw</code> table
+and all <code>raw_YYYYMMDD</code> partition tables. Called after each
+rotation and after dropping expired partitions.</dd></dl></section></div></main></body></html>

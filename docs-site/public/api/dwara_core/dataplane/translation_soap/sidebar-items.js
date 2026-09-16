@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SoapDirection","XmlChild"],"struct":["SoapTranslator","XmlElement"]};

@@ -1,0 +1,101 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Analytics bounded context (DW-043): the embedded analytics store."><title>dwara_core::analytics - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module analytics</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module analytics</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#write-path-never-blocks-the-dataplane" title="Write path (never blocks the dataplane)">Write path (never blocks the dataplane)</a></li><li><a href="#the-sink-seam" title="The sink seam">The sink seam</a></li><li><a href="#custom-dimensions" title="Custom dimensions">Custom dimensions</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>analytics</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/analytics/mod.rs.html#1-2292">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Analytics bounded context (DW-043): the embedded analytics store.</p>
+<p>Observability answers “is it healthy right now”; analytics answers
+“what happened over time, to whom, and why”. This domain owns the
+DURABLE side of that question: a local SQLite database (separate
+file from the state store, DW-018 — different lifecycle, different
+write pattern, independent bounded-disk story) holding raw access
+records for a short retention window and additive rollup tables at
+1m/5m/1h/1d granularities with per-granularity retention, plus the
+query surface over them (dashboard series, Top-N, structured
+query) served by the admin API, and the scheduled usage-report
+exports (DW-120, <a href="exports/index.html" title="mod dwara_core::analytics::exports"><code>exports</code></a>) that turn the same rollups into
+durable per-consumer statements.</p>
+<h2 id="write-path-never-blocks-the-dataplane"><a class="doc-anchor" href="#write-path-never-blocks-the-dataplane">§</a>Write path (never blocks the dataplane)</h2>
+<p>The dataplane’s <code>DataPlane</code> (see <code>dataplane::proxy</code>) holds an
+<a href="struct.EmbeddedAnalytics.html" title="struct dwara_core::analytics::EmbeddedAnalytics"><code>EmbeddedAnalytics</code></a> (set once at startup when the config carries
+an <code>analytics</code> block) and calls <a href="struct.EmbeddedAnalytics.html#method.record" title="method dwara_core::analytics::EmbeddedAnalytics::record"><code>EmbeddedAnalytics::record</code></a> at
+request completion — a <code>try_send</code> onto a bounded channel. When the
+channel is full the record is DROPPED (counted, logged throttled):
+the analytics pipeline must never slow or block a request, the same
+fire-and-forget posture DW-121’s record stream
+(<code>events::stream</code>, a sibling pipeline that ships each record to an
+external sink instead of the local store) holds. A background
+writer drains the channel in batched transactions.</p>
+<h2 id="the-sink-seam"><a class="doc-anchor" href="#the-sink-seam">§</a>The sink seam</h2>
+<p>The M1 extension contract
+<code>extensions::analytics::AnalyticsSink</code> is the OSS/Ent seam (feature
+analysis 11.4): the embedded store implements it (over the richer
+per-request fields DW-043 added to <code>extensions::analytics::Event</code>).
+DW-121’s raw-record firehose is NOT an implementation of this
+contract — it streams the completion-time access record (which
+carries <code>request_id</code> and the redacted path the extension event
+deliberately omits) through its own sink seam in <code>events::stream</code>.
+The federated analytics pipeline (DW-095, SCALE-07 #186) IS an
+implementation of this contract: <code>cp_dp::analytics::FederatedAnalyticsSink</code>
+batches events on the edge and ships them to the controller over
+gRPC; the controller’s <code>EmbeddedCollector</code> forwards them to the
+aggregate <code>EmbeddedAnalytics</code> store, tagging each event with the
+originating <code>edge_id</code> for fleet-wide query filtering.</p>
+<h2 id="custom-dimensions"><a class="doc-anchor" href="#custom-dimensions">§</a>Custom dimensions</h2>
+<p>Config-declared dimensions extracted from request HEADERS at
+completion-time capture (e.g. <code>x-plan</code> -&gt; dimension <code>plan</code>): they
+ride the <a href="../observability/struct.AccessRecord.html" title="struct dwara_core::observability::AccessRecord"><code>AccessRecord</code></a> into
+raw rows (a JSON object column) and aggregate into their own
+narrow rollup table. They are analytics-only — deliberately NOT
+added to the access log, whose field list is redacted by
+construction and stays that way.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.DEFAULT_RETENTION_MS"><code>pub use crate::config::<a class="constant" href="../config/constant.ANALYTICS_DEFAULT_RETENTION_MS.html" title="constant dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS">ANALYTICS_DEFAULT_RETENTION_MS</a> as DEFAULT_RETENTION_MS;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="exports/index.html" title="mod dwara_core::analytics::exports">exports</a></dt><dd>Scheduled usage-report exports (DW-120).</dd><dt><a class="mod" href="insights/index.html" title="mod dwara_core::analytics::insights">insights</a></dt><dd>ML traffic insights (DW-092): EWMA-based capacity forecasting and
+seasonal-baseline anomaly detection over the live sketch window
+rotations.</dd><dt><a class="mod" href="partition/index.html" title="mod dwara_core::analytics::partition">partition</a></dt><dd>Raw table daily partitioning and retention automation (SCALE-09,
+#188).</dd><dt><a class="mod" href="query/index.html" title="mod dwara_core::analytics::query">query</a></dt><dd>Read side of the analytics store (DW-043): dashboard series, Top-N
+reports, and the structured query endpoint’s translator.</dd><dt><a class="mod" href="rollup/index.html" title="mod dwara_core::analytics::rollup">rollup</a></dt><dd>Rollup cascade and retention (DW-043).</dd><dt><a class="mod" href="schema/index.html" title="mod dwara_core::analytics::schema">schema</a></dt><dd>Analytics store schema (DW-043).</dd><dt><a class="mod" href="sketch/index.html" title="mod dwara_core::analytics::sketch">sketch</a></dt><dd>Percentile sketches (PERF-09, #242): a DDSketch-based
+bounded-memory mergeable quantile sketch with relative-error
+guarantees, replacing the previous ring-buffer + nearest-rank
+approach in the live sketches.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AiEvalResultRecord.html" title="struct dwara_core::analytics::AiEvalResultRecord">AiEval<wbr>Result<wbr>Record</a></dt><dd>One AI eval result record (DW-086): the per-case record written to
+the <code>ai_eval_results</code> table when an eval is run via the admin API.
+A PLAIN DTO — the admin endpoint constructs it from the eval
+runner’s output.</dd><dt><a class="struct" href="struct.AiExperimentAssignment.html" title="struct dwara_core::analytics::AiExperimentAssignment">AiExperiment<wbr>Assignment</a></dt><dd>One AI experiment assignment record (DW-086): the per-request
+record written to the <code>ai_experiment_assignments</code> table when a
+request is served by an A/B test alias. A PLAIN DTO — deliberately
+not importing <code>ai::experiments</code> (the analytics domain may not
+import the <code>ai</code> domain; see <code>scripts/check_deps.py</code>).</dd><dt><a class="struct" href="struct.AiFeedbackRecord.html" title="struct dwara_core::analytics::AiFeedbackRecord">AiFeedback<wbr>Record</a></dt><dd>One AI feedback record (DW-086): the per-feedback record written
+to the <code>ai_feedback</code> table when feedback is ingested via the admin
+API.</dd><dt><a class="struct" href="struct.AiGovernanceEvent.html" title="struct dwara_core::analytics::AiGovernanceEvent">AiGovernance<wbr>Event</a></dt><dd>One AI governance audit event (DW-084): the per-check record
+written to the <code>ai_governance_events</code> table. A PLAIN DTO —
+deliberately not importing <code>ai::governance</code> (the analytics domain
+may not import the <code>ai</code> domain; see <code>scripts/check_deps.py</code>). The
+dataplane converts from <code>ai::governance::GovernanceVerdict</code> at the
+call site.</dd><dt><a class="struct" href="struct.AiPromptLogRecord.html" title="struct dwara_core::analytics::AiPromptLogRecord">AiPrompt<wbr>LogRecord</a></dt><dd>One AI prompt/response log record (DW-081): the per-request
+capture written to the <code>ai_prompt_logs</code> table. A PLAIN DTO —
+deliberately not importing <code>ai::types</code> (the analytics domain may
+not import the <code>ai</code> domain; see <code>scripts/check_deps.py</code>). The
+dataplane serializes and redacts the <code>ChatRequest</code>/<code>ChatResponse</code>
+at the call site, passing the redacted JSON strings here. Capture
+is opt-in (privacy-first); the redaction pass runs BEFORE the
+record is offered.</dd><dt><a class="struct" href="struct.AiSpendRecord.html" title="struct dwara_core::analytics::AiSpendRecord">AiSpend<wbr>Record</a></dt><dd>One AI spend record (DW-079): the per-request spend dimensions
+written to the <code>ai_spend</code> table. A PLAIN DTO — deliberately not
+importing <code>ai::types::Usage</code> (the analytics domain may not import
+the <code>ai</code> domain; see <code>scripts/check_deps.py</code>). The dataplane
+converts from <code>ai::types::Usage</code> at the call site.</dd><dt><a class="struct" href="struct.EmbeddedAnalytics.html" title="struct dwara_core::analytics::EmbeddedAnalytics">Embedded<wbr>Analytics</a></dt><dd>The embedded analytics store (DW-043): SQLite file + bounded
+channel + background writer. Rollup/retention workers are spawned
+by <a href="struct.EmbeddedAnalytics.html#method.spawn_workers" title="method dwara_core::analytics::EmbeddedAnalytics::spawn_workers"><code>EmbeddedAnalytics::spawn_workers</code></a>.</dd><dt><a class="struct" href="struct.LiveRouteSnapshot.html" title="struct dwara_core::analytics::LiveRouteSnapshot">Live<wbr>Route<wbr>Snapshot</a></dt><dd>One route’s snapshot from the current live window (DW-092).</dd><dt><a class="struct" href="struct.LiveSketches.html" title="struct dwara_core::analytics::LiveSketches">Live<wbr>Sketches</a></dt><dd>Live in-process sketches (DW-092): sub-second-freshness per-route
+rolling window with counts, errors, and capped latency samples.
+Maintained inside <a href="struct.EmbeddedAnalytics.html" title="struct dwara_core::analytics::EmbeddedAnalytics"><code>EmbeddedAnalytics</code></a> and updated synchronously
+on every <code>record()</code> call — never blocks the dataplane (atomics for
+counts, a short mutex over a capped vector for samples). When the
+window expires, the completed window’s aggregates are handed to
+the insights engine (if attached) for forecasting and anomaly
+detection.</dd><dt><a class="struct" href="struct.LiveSnapshot.html" title="struct dwara_core::analytics::LiveSnapshot">Live<wbr>Snapshot</a></dt><dd>A snapshot of the current live window across all routes (DW-092).
+Returned by <a href="struct.EmbeddedAnalytics.html#method.live_snapshot" title="method dwara_core::analytics::EmbeddedAnalytics::live_snapshot"><code>EmbeddedAnalytics::live_snapshot</code></a>.</dd><dt><a class="struct" href="struct.McpToolCallRecord.html" title="struct dwara_core::analytics::McpToolCallRecord">McpTool<wbr>Call<wbr>Record</a></dt><dd>One MCP tool call record (DW-087): the per-call record written to
+the <code>mcp_tool_calls</code> table when a tool call is proxied through the
+MCP gateway. A PLAIN DTO — deliberately not importing <code>ai::mcp</code>
+(the analytics domain may not import the <code>ai</code> domain; see
+<code>scripts/check_deps.py</code>). The dataplane constructs it at the call
+site.</dd><dt><a class="struct" href="struct.SampledDegradation.html" title="struct dwara_core::analytics::SampledDegradation">Sampled<wbr>Degradation</a></dt><dd>REL-10 (#221): sampled degradation parameters, resolved from
+<code>AnalyticsConfig::sampled_degradation</code> at store build time. Stored
+inline in <code>EmbeddedAnalytics</code> so the offer path reads them without
+indirection.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ROLLUP_GRACE_MS.html" title="constant dwara_core::analytics::ROLLUP_GRACE_MS">ROLLUP_<wbr>GRACE_<wbr>MS</a></dt><dd>Completion GRACE: a fine window is rolled only once its end is at
+least this far in the past — headroom for the writer’s flush tick
+and batch latency, so a straggler record still lands in the window
+it belongs to. Records later than the grace are documented as
+rollup-lost (they remain in <code>raw</code> until raw retention expires).</dd></dl></section></div></main></body></html>

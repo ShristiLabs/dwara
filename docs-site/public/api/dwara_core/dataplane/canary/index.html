@@ -1,0 +1,55 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Auto-canary analysis (DW-091): metrics-driven promotion/rollback of canary split weights."><title>dwara_core::dataplane::canary - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module canary</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module canary</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#lifecycle" title="Lifecycle">Lifecycle</a></li><li><a href="#step-semantics" title="Step semantics">Step semantics</a></li><li><a href="#guards" title="Guards">Guards</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>canary</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/canary.rs.html#1-604">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Auto-canary analysis (DW-091): metrics-driven promotion/rollback of
+canary split weights.</p>
+<p>A <a href="struct.CanaryController.html" title="struct dwara_core::dataplane::canary::CanaryController"><code>CanaryController</code></a> holds per-group state (one group per service
+split or AI model alias that configures <code>canary_analysis</code>). The
+controller maintains its OWN per-version sliding windows for error
+rate and latency (no new Prometheus histograms) using atomic
+counters and a bounded <code>VecDeque</code> of latency samples — the same
+lightweight pattern as the resilience domain’s <code>AdaptiveController</code>
+(DW-089) and the balancer’s <code>PeakEwmaTracker</code>.</p>
+<h2 id="lifecycle"><a class="doc-anchor" href="#lifecycle">§</a>Lifecycle</h2>
+<p>Compiled once per config generation from the <code>canary_analysis</code>
+blocks on service splits and AI model aliases; shared via <code>Arc</code>
+from the dataplane generation. <code>record_outcome</code> runs on the
+response path (after the upstream exchange resolves) and
+<code>evaluate</code> runs on the background <a href="struct.CanaryRunner.html" title="struct dwara_core::dataplane::canary::CanaryRunner"><code>CanaryRunner</code></a> loop. Weight
+changes are TRANSIENT: the runner calls
+<code>DataPlane::apply_service_split_weights</code> /
+<code>apply_ai_canary_weights</code>, which clone the current generation’s
+split/runtime, rebuild with new weights, and ArcSwap-store. A
+config reload rebuilds the generation from the published config,
+reverting any transient weight changes (the controller’s sliding
+windows reset with the generation, like the adaptive controller).</p>
+<h2 id="step-semantics"><a class="doc-anchor" href="#step-semantics">§</a>Step semantics</h2>
+<p>Configurable step in weight units. Promote: increase canary weight
+by <code>step</code> (up to <code>total_weight</code>). Rollback: decrease by <code>step</code>
+(down to 0). Severe regression (&gt;2x the rollback threshold):
+immediate rollback to 0. The total weight stays constant: when
+the canary weight changes, the baseline absorbs the difference,
+preserving the hash distribution for existing sessions (the
+DW-040 invariant).</p>
+<h2 id="guards"><a class="doc-anchor" href="#guards">§</a>Guards</h2>
+<ul>
+<li><strong>Cooldown</strong>: after one adjustment, the next is suppressed until
+<code>cooldown_seconds</code> elapses.</li>
+<li><strong>min_requests</strong>: the controller does not act until at least
+<code>min_requests</code> total observations (baseline + canary) have been
+recorded.</li>
+<li><strong>Disabled</strong>: a <code>canary_analysis</code> block with <code>enabled: false</code>
+compiles no group (the fast path: <code>record_outcome</code> and
+<code>evaluate</code> are no-ops).</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CanaryAction.html" title="struct dwara_core::dataplane::canary::CanaryAction">Canary<wbr>Action</a></dt><dd>One evaluation result: the controller recommends adjusting
+<code>group</code>’s canary weight to <code>new_canary_weight</code> for the given
+<code>reason</code>.</dd><dt><a class="struct" href="struct.CanaryController.html" title="struct dwara_core::dataplane::canary::CanaryController">Canary<wbr>Controller</a></dt><dd>The per-generation canary analysis controller (DW-091). Compiled
+once per config generation from the <code>canary_analysis</code> blocks on
+service splits and AI model aliases; shared via <code>Arc</code> from the
+dataplane generation. <code>record_outcome</code> runs on the response path
+and <code>evaluate</code> runs on the background <a href="struct.CanaryRunner.html" title="struct dwara_core::dataplane::canary::CanaryRunner"><code>CanaryRunner</code></a> loop.</dd><dt><a class="struct" href="struct.CanaryRunner.html" title="struct dwara_core::dataplane::canary::CanaryRunner">Canary<wbr>Runner</a></dt><dd>The background canary evaluation loop (DW-091). Spawned by
+dwara-bin after the dataplane is initialized; periodically calls
+<code>CanaryController::evaluate</code>, applies the returned actions through
+the dataplane’s transient weight-swap methods, and emits
+<code>CanaryPromoted</code> / <code>CanaryRolledBack</code> events. Dropping the runner
+(or shutdown) aborts the loop.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CanaryKind.html" title="enum dwara_core::dataplane::canary::CanaryKind">Canary<wbr>Kind</a></dt><dd>Whether a canary group is a service-level split or an AI model
+canary (DW-091). Determines which <code>apply_*_weights</code> method the
+runner calls.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,296 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request authentication (DW-019, feature analysis section 4.6; pepper and mTLS hardening per #124; HMAC request signing per DW-036)."><title>dwara_core::security::authn - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module authn</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module authn</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#hmac-request-signing-dw-036" title="HMAC request signing (DW-036)">HMAC request signing (DW-036)</a><ul><li><a href="#wire-format" title="Wire format">Wire format</a></li><li><a href="#canonical-string-v1--the-interop-contract" title="Canonical string (v1) — the interop contract">Canonical string (v1) — the interop contract</a></li><li><a href="#verification-order-and-failure-posture" title="Verification order and failure posture">Verification order and failure posture</a></li><li><a href="#replay-window-boundary-single-instance-m2" title="Replay window boundary (single instance, M2)">Replay window boundary (single instance, M2)</a></li></ul></li><li><a href="#hardening-notes-residual-risks-and-the-road-to-closing-them" title="Hardening notes (residual risks and the road to closing them)">Hardening notes (residual risks and the road to closing them)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>authn</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/authn.rs.html#1-2648">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request authentication (DW-019, feature analysis section 4.6; pepper
+and mTLS hardening per #124; HMAC request signing per DW-036).</p>
+<p>Five credential families behind one <a href="trait.Authenticator.html" title="trait dwara_core::security::authn::Authenticator"><code>Authenticator</code></a> trait:</p>
+<ul>
+<li><strong>API keys</strong>: <code>X-API-Key: &lt;key&gt;</code>. The lookup SELECTOR is
+<code>hex(sha256(key))</code> — never the plaintext key — and the stored hash is
+<code>hmac-sha256:&lt;hex(HMAC-SHA256(pepper, key))&gt;</code> when the deployment
+configures a credential pepper (#124) or legacy
+<code>sha256:&lt;hex(sha256(key))&gt;</code> otherwise, verified with a
+constant-time comparison (<code>subtle</code>) in either case. Optional
+memory-hard verification: a credential whose stored hash is a PHC
+string (<code>$argon2id$...</code>, admin-supplied through the state store) is
+verified with argon2id. Trade-off (documented choice):
+sha256/HMAC+ct-compare is the pragmatic gateway standard — an
+argon2 verify is memory-hard and tens of milliseconds, far too slow
+for a per-request hot path, so config-declared keys are always
+fast-path hashed at seed time and argon2id is opt-in per credential.</li>
+<li><strong>Basic</strong>: <code>Authorization: Basic base64(user:pass)</code>. The username is
+the selector (<code>hex(sha256(user))</code>, the same selector space as API
+keys) and the password is verified against the stored hash through
+the SAME hashing path as API keys (peppered when a pepper is
+configured). Basic credentials therefore live in the state store
+(config declares API keys, not username/password pairs); the
+resolved identity is reported with kind <code>api_key</code>. REQUIREMENT:
+store-managed Basic credentials must store argon2id PHC strings
+(<code>$argon2id$...</code>) — a human-chosen password hashed with plain
+unsalted sha256 is offline-dictionary bait (see the hardening notes
+below). Note also that usernames remain enumerable: the selector is
+a deterministic hash of the username with no secret input, so an
+attacker with the store can confirm username guesses offline.</li>
+<li><strong>JWT</strong>: <code>Authorization: Bearer &lt;token&gt;</code>, verified per
+<a href="../../config/struct.JwtProvider.html" title="struct dwara_core::config::JwtProvider"><code>JwtProvider</code></a> config: JWKS fetched from
+the provider’s URL, cached, refreshed after <code>refresh_secs</code> (the
+refresh happens BEFORE a stale cached set is used, so retired issuer
+keys cannot keep verifying forever; a failed refresh degrades to the
+cached keys, and a RECENTLY failed refresh backs off for
+<code>min(5s, refresh_secs)</code> — subsequent stale lookups skip the fetch
+and answer from the cache immediately, so a down/slow endpoint
+cannot chain every Bearer request through a serialized 5s fetch
+timeout) AND on an unknown <code>kid</code> (rotation: a fresh key id
+appearing mid-flight triggers a re-fetch and the token then verifies
+— no restart, no failure). Refresh-triggered (unknown-kid) fetches
+are throttled to one per <code>min(5s, refresh_secs)</code> — forged random-kid
+tokens cannot drive a JWKS fetch storm. <code>iss</code>/<code>exp</code>/<code>nbf</code> are
+validated with <code>leeway_secs</code> skew tolerance, and <code>aud</code> is validated
+ONLY when the provider configures an audience (#124, maintainer
+decision): a provider without <code>audience</code> accepts tokens that carry
+any (or no) <code>aud</code> claim; the algorithm allowlist (default
+RS256/ES256) is enforced BEFORE any signature work (<code>none</code> and
+<code>HS*</code> are asymmetric-confusion bait and never allowed).</li>
+<li><strong>mTLS</strong> (#124): the client certificate of the connection itself.
+On a TERMINATE listener with <code>client_ca_file</code> set, the TLS layer
+verifies any presented certificate against that bundle (rustls;
+an unverified certificate fails the handshake and never reaches
+authn) and the listener forwards the verified certificate here as a
+<a href="struct.ClientCertificate.html" title="struct dwara_core::security::authn::ClientCertificate"><code>ClientCertificate</code></a>. The credential record maps it to a consumer:
+an <code>mtls</code> credential’s SELECTOR is its match value — the subject
+CommonName when the credential is configured <code>by subject</code>, or the
+certificate’s SHA-256 fingerprint when <code>by fingerprint</code> — and a
+presented certificate matches when its subject CN or fingerprint
+equals that selector. Passthrough listeners never speak HTTP, and
+cleartext listeners have no certificates, so the family is inert
+there by construction.</li>
+<li><strong>HMAC request signing</strong> (DW-036): a per-request signature over the
+request line, payload digest, timestamp, and nonce, presented in
+the <code>X-Dwara-*</code> header family — see the dedicated section below
+for the canonical-string contract (interop depends on it).</li>
+</ul>
+<p>Accepted formats (composite dispatch on request shape): <code>X-API-Key</code>
+wins over <code>Authorization</code>; within <code>Authorization</code>, <code>Basic</code> and
+<code>Bearer</code> are distinguished by the scheme token; a presented
+<code>X-Dwara-Signature</code> engages the HMAC family after the
+<code>Authorization</code> schemes; the client certificate is the AMBIENT
+family — consulted only when NO header credential was presented (a
+header expresses explicit intent and wins; the certificate is
+connection-level context). A <code>Bearer</code> header with no JWT provider
+stays pass-through (not interpreted), so such a request still falls
+through to the HMAC headers and then the certificate family. A
+gateway with NO consumers and NO JWT providers has authentication
+disabled: the authenticator resolves <code>Anonymous</code> for everything and
+<code>Authorization</code> is forwarded upstream untouched (pass-through mode).
+Once ANY credential is configured, the gateway INTERPRETS
+<code>Authorization</code> — except that <code>Bearer</code> stays pass-through unless a
+JWT provider exists (a gateway fronting an OAuth-protected upstream
+without its own JWT config must keep forwarding tokens).</p>
+<h2 id="hmac-request-signing-dw-036"><a class="doc-anchor" href="#hmac-request-signing-dw-036">§</a>HMAC request signing (DW-036)</h2>
+<p>A consumer with an <code>hmac</code> credential (<code>key_id</code> + <code>secret</code>, the secret
+inline or a <code>${...}</code> reference, DW-045) signs every request. The
+secret never becomes a stored hash: recomputing an HMAC needs the
+raw key bytes, so the RESOLVED secret lives only in this module’s
+in-memory key map (zeroized on drop) and the state store never sees
+an <code>hmac</code> row. The pepper (#124) does not apply — it guards stored
+hashes, and there is none.</p>
+<h3 id="wire-format"><a class="doc-anchor" href="#wire-format">§</a>Wire format</h3>
+<p>Five request headers, all REQUIRED when <code>X-Dwara-Signature</code> is
+presented (any missing or malformed one is a 401, like any other
+presented-but-invalid credential):</p>
+<div><table><thead><tr><th>Header</th><th>Content</th></tr></thead><tbody>
+<tr><td><code>X-Dwara-Key-Id</code></td><td>the credential’s <code>key_id</code> (public selector; 1..=128 visible-ASCII bytes)</td></tr>
+<tr><td><code>X-Dwara-Timestamp</code></td><td>decimal Unix epoch seconds of signing (digits only)</td></tr>
+<tr><td><code>X-Dwara-Nonce</code></td><td>opaque client string, 16..=256 visible-ASCII bytes, unique per request within the replay window (use &gt;= 128 bits of entropy)</td></tr>
+<tr><td><code>X-Dwara-Body-Sha256</code></td><td>lowercase hex SHA-256 of the request body (the empty body signs <code>e3b0c4...b855</code>, SHA-256 of the empty string)</td></tr>
+<tr><td><code>X-Dwara-Signature</code></td><td>lowercase hex HMAC-SHA256(secret, canonical string)</td></tr>
+</tbody></table>
+</div>
+<p>The custom <code>X-Dwara-*</code> family (not an <code>Authorization</code> scheme)
+follows the codebase’s <code>X-API-Key</code> precedent: discrete headers make
+each signed element explicit and keep the signature material
+inspectable without parsing a parameterized scheme. Like the other
+credential headers they are forwarded upstream untouched (only
+<code>X-Consumer-*</code> are stripped).</p>
+<h3 id="canonical-string-v1--the-interop-contract"><a class="doc-anchor" href="#canonical-string-v1--the-interop-contract">§</a>Canonical string (v1) — the interop contract</h3>
+<p>A version line followed by the seven signed elements, each pair
+joined by exactly one <code>\n</code> byte (no trailing newline). No element
+may itself contain <code>\n</code> — the
+grammar guarantees it (visible ASCII excludes control characters,
+the timestamp is digits, the digest is hex, and hyper’s parser
+rejects raw control bytes in a request target):</p>
+<div class="example-wrap"><pre class="language-text"><code>dwara-hmac-v1
+&lt;key id&gt;            the X-Dwara-Key-Id value, exactly as presented
+&lt;method&gt;            the HTTP method, uppercased (GET, POST, ...)
+&lt;path&gt;              the request path EXACTLY as received: percent-encoding preserved, no normalization
+&lt;query&gt;             the raw query string as received (no leading &#39;?&#39;), or an EMPTY line when absent
+&lt;timestamp&gt;         the X-Dwara-Timestamp value, exactly as presented
+&lt;nonce&gt;             the X-Dwara-Nonce value, exactly as presented
+&lt;body digest&gt;       the X-Dwara-Body-Sha256 value, exactly as presented</code></pre></div>
+<p>Design decisions, each load-bearing:</p>
+<ul>
+<li><strong>Path/query exactly as received.</strong> The signer cannot know what
+normalization a proxy chain might apply, so the only lossless
+contract is the raw bytes the client put on the wire; the gateway
+re-reads them from its parsed (but un-normalized) request target.
+Query ORDER is signed: <code>?a=1&amp;b=2</code> and <code>?b=2&amp;a=1</code> are different
+canonical strings.</li>
+<li><strong>Body by digest, carried in a signed header.</strong> Signing the body
+inline would require buffering it (the gateway hashes nothing
+until it streams); the digest header lets the gateway verify the
+MAC over headers only and then enforce the digest while STREAMING
+the body to the upstream — zero buffering, any body size, and the
+stream is aborted (401 to the client, truncated request to the
+upstream) the moment the final byte’s hash disagrees. A tampered
+body therefore never completes upstream. The route’s
+<code>max_body_bytes</code> (DW-027) composes with this: the digesting
+wrapper sits inside the route’s limit wrapper, so an over-cap
+body is still rejected 413 first.</li>
+<li><strong>No other headers in v1.</strong> The signed set binds the request
+line (method/path/query), the payload (digest), freshness
+(timestamp), uniqueness (nonce), and identity (key id). The
+<code>Host</code> header is NOT signed: it is a routing input, so a party
+able to tamper headers between signer and gateway (a non-TLS
+listener or an untrusted proxy hop) could retarget a validly
+signed request to a different host-matched route while MAC and
+digest still verify — TLS termination makes that party mostly
+hypothetical, and the gateway rebuilds Host from the upstream
+pick, so no cross-host forwarding occurs. <code>Content-Type</code> and
+friends are not authn inputs here, and signing arbitrary header
+lists drags in header-selection and canonicalization ambiguity
+every signer must replicate exactly. The versioned first line
+leaves room for a v2 with opt-in header (including Host)
+coverage without breaking v1 signers.</li>
+</ul>
+<h3 id="verification-order-and-failure-posture"><a class="doc-anchor" href="#verification-order-and-failure-posture">§</a>Verification order and failure posture</h3>
+<ol>
+<li>Header presence/format parse (401 on any malformed element).</li>
+<li>Timestamp inside <code>±max_clock_skew_secs</code> (default 300s, the §4.6
+recommendation; gateway <code>hmac_auth</code> block, validated 1..=3600).
+Checked BEFORE any HMAC work — an expired window is not a MAC
+problem, and refusing early keeps the hot path cheap for
+stale traffic. Outside the window: 401.</li>
+<li>Key lookup, then <code>HMAC-SHA256(secret, canonical)</code> compared to
+the presented signature with <code>subtle::ConstantTimeEq</code> over the
+full 32-byte digests — no early return on a byte mismatch. A
+key-miss computes a dummy HMAC first (fixed zero key) so the
+timing shape of “unknown key” matches “wrong signature” and
+key-existence is not readable from latency; both answer the
+same 401 shape as every other family.</li>
+<li>Nonce replay check, AFTER a successful MAC: the nonce is
+remembered under <code>key_id + '\n' + nonce</code> for twice the skew
+window (a timestamp stays acceptable for at most one full
+window after its request was first seen, so the doubled TTL
+covers the boundary with margin). A remembered nonce inside
+its TTL: 401. Burned only on VALID signatures — junk traffic
+cannot flood legitimate nonces out of the cache.</li>
+</ol>
+<h3 id="replay-window-boundary-single-instance-m2"><a class="doc-anchor" href="#replay-window-boundary-single-instance-m2">§</a>Replay window boundary (single instance, M2)</h3>
+<p>The nonce cache is in-memory, sharded (<code>NONCE_CACHE_SHARDS</code> locks,
+the GCRA store’s pattern), TTL-expired, and capped at
+<a href="../../config/limits/constant.MAX_NONCE_CACHE_ENTRIES_PER_SHARD.html" title="constant dwara_core::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD"><code>crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD</code></a>
+entries per shard with soonest-expiry-first eviction — under a
+nonce flood the cache degrades fail-open to eviction (the
+documented GCRA trade: an availability DoS must not become a
+gateway outage), and replay protection is only as strong as the
+cache’s retention. It is also PER-INSTANCE: dwara M2 is a
+single-process deployment, and a multi-instance fleet behind one
+VIP would let a replayed request hit a cold instance. A shared
+nonce store is the enterprise/Redis seam (DW-031’s world), not
+this module’s; the boundary is documented here so operators do not
+mistake per-instance replay protection for fleet-wide.</p>
+<p>Identity-to-consumer mapping: API keys and Basic map via the credential
+record; JWTs map via the provider’s <code>consumer</code> binding, or by matching
+a consumer’s <code>jwt</code> credential <code>issuer</code> (with audience containment when
+the credential lists audiences) against the token’s <code>iss</code>; client
+certificates map via the <code>mtls</code> credential match value. Every resolved
+identity carries the consumer’s GROUPS (config consumers from the
+config record, store-managed consumers from the store’s
+<code>consumers.groups</code>, #124) so group-based authorization applies
+uniformly.</p>
+<p>Consumer-identity headers (spoof prevention): the proxy strips every
+client-supplied <code>X-Consumer-*</code> header and injects a trusted
+<code>X-Consumer-Name</code> upstream when authentication resolved a consumer —
+see <code>proxy</code> (the strip/inject lives on the forward path).</p>
+<h2 id="hardening-notes-residual-risks-and-the-road-to-closing-them"><a class="doc-anchor" href="#hardening-notes-residual-risks-and-the-road-to-closing-them">§</a>Hardening notes (residual risks and the road to closing them)</h2>
+<p>The stored-hash fast path is UNSALTED sha256 when no pepper is
+configured, and the selector is always unsalted sha256 of the
+presented material. That is deliberate for machine-generated config
+keys (constant-time, index-friendly, and a search over the stored
+hashes is not a dictionary attack when the key is 256 bits of
+entropy), but it leaves a residual offline-dictionary risk for WEAK
+secrets: an attacker who exfiltrates the store can brute-force
+low-entropy keys or passwords against the unsalted selectors/hashes
+at sha256 speed, offline, and confirm username guesses via the
+deterministic Basic selector. Mitigations in place: the DB file is
+mode 0600, hashes/selectors are redacted from <code>Debug</code>, store-managed
+credentials may use argon2id PHC strings (REQUIRED for Basic
+passwords), and — #124 — a per-deployment PEPPER turns every NEW
+stored hash into <code>hmac-sha256:&lt;hex&gt;</code> so a DB leak alone cannot verify
+guesses (the search also needs the pepper, held outside the DB).
+The pepper is resolved through the <code>SecretSource</code> extension seam
+ABOVE this domain (the binary resolves it and threads raw bytes
+down; <code>security</code> must not import <code>extensions</code>), is never logged,
+never appears in <code>Debug</code> output, and never appears in error text.
+Transition semantics: legacy <code>sha256:&lt;hex&gt;</code> entries keep verifying;
+on SUCCESSFUL legacy verification with a pepper configured, the
+store row is re-hashed to the peppered format in place (no
+credential re-issue needed); <code>hmac-sha256:</code> entries with NO pepper
+configured fail closed (legacy-only mode) with a clear log line.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AuthnRequest.html" title="struct dwara_core::security::authn::AuthnRequest">Authn<wbr>Request</a></dt><dd>The request material an <a href="trait.Authenticator.html" title="trait dwara_core::security::authn::Authenticator"><code>Authenticator</code></a> may consume (DW-036):
+headers plus the request TARGET — method, path, query — the HMAC
+family signs. Borrowed for one authenticate call; the request body
+is deliberately NOT here (authn never buffers; the HMAC body digest
+is enforced on the forward path, see <a href="struct.Identity.html#structfield.body_digest" title="field dwara_core::security::authn::Identity::body_digest"><code>Identity::body_digest</code></a>).</dd><dt><a class="struct" href="struct.ClientCertificate.html" title="struct dwara_core::security::authn::ClientCertificate">Client<wbr>Certificate</a></dt><dd>The VERIFIED client certificate of a connection, as the authenticator
+consumes it (#124, DW-035). Built by the TLS frontend from the
+certificate rustls already verified against the listener’s
+<code>client_ca_file</code>; the match VALUES (subject CN, fingerprint) double
+as credential selectors, so <code>Debug</code> redacts them (the
+selector-redaction precedent). DW-035 extends it with the issuer CN,
+not-after timestamp, and colon-separated fingerprint needed for the
+<code>X-Client-Cert-*</code> forwarding headers and the gateway-level mTLS
+consumer mapping.</dd><dt><a class="struct" href="struct.CompositeAuthenticator.html" title="struct dwara_core::security::authn::CompositeAuthenticator">Composite<wbr>Authenticator</a></dt><dd>The gateway’s single authenticator: dispatches on the request’s
+credential shape (X-API-Key / Basic / Bearer / verified client
+certificate) and consults the credential registry plus the configured
+JWT providers.</dd><dt><a class="struct" href="struct.HmacCredential.html" title="struct dwara_core::security::authn::HmacCredential">Hmac<wbr>Credential</a></dt><dd>One HMAC signing key as the authenticator holds it (DW-036). The
+secret is the RESOLVED config value (inline or <code>${...}</code> reference,
+resolved at build time): raw key bytes, never a hash, never logged,
+zeroized when the last holder drops. Manual <code>Debug</code> redacts it.</dd><dt><a class="struct" href="struct.Identity.html" title="struct dwara_core::security::authn::Identity">Identity</a></dt><dd>The resolved caller identity of one request. <code>None</code> (from
+<a href="trait.Authenticator.html#tymethod.authenticate" title="method dwara_core::security::authn::Authenticator::authenticate"><code>Authenticator::authenticate</code></a>) is Anonymous — no credential family
+applied.</dd><dt><a class="struct" href="struct.JwksCacheEntry.html" title="struct dwara_core::security::authn::JwksCacheEntry">Jwks<wbr>Cache<wbr>Entry</a></dt><dd>Shared JWKS cache for one provider URL: the cached key set plus the
+refresh bookkeeping. Entries live on the dataplane keyed by URL, so a
+config reload reuses the cache (rotation state survives reloads).</dd><dt><a class="struct" href="struct.JwtVerifier.html" title="struct dwara_core::security::authn::JwtVerifier">JwtVerifier</a></dt><dd>One configured JWT provider at runtime: config + HTTP client + cache.</dd><dt><a class="struct" href="struct.KnownCredential.html" title="struct dwara_core::security::authn::KnownCredential">Known<wbr>Credential</a></dt><dd>One verifiable credential as the authenticator sees it.</dd><dt><a class="struct" href="struct.NonceCache.html" title="struct dwara_core::security::authn::NonceCache">Nonce<wbr>Cache</a></dt><dd>Per-instance replay-nonce store (DW-036): sharded keyed TTL map, the
+GCRA shard store’s shape (<code>GcraShardStore</code>). <a href="struct.NonceCache.html#method.check_and_insert" title="method dwara_core::security::authn::NonceCache::check_and_insert"><code>Self::check_and_insert</code></a>
+is the single critical section — one shard lock covers the
+expired-read and the insert, so two concurrent presentations of one
+nonce linearize (exactly one wins). Entries expire after the
+caller-supplied TTL (twice the clock-skew window, set per insert so a
+skew change on reload applies to new nonces without rebuilding the
+cache); a shard at
+<a href="../../config/limits/constant.MAX_NONCE_CACHE_ENTRIES_PER_SHARD.html" title="constant dwara_core::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD"><code>crate::config::limits::MAX_NONCE_CACHE_ENTRIES_PER_SHARD</code></a> entries
+first drops expired entries, then evicts soonest-expiry-first (the
+documented fail-open-under-flood trade; see the module docs).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AuthError.html" title="enum dwara_core::security::authn::AuthError">Auth<wbr>Error</a></dt><dd>Authentication failure. <code>Invalid</code> is a caller-side problem (401);
+<code>Unavailable</code> is a gateway-side problem (500).</dd><dt><a class="enum" href="enum.CredentialRegistry.html" title="enum dwara_core::security::authn::CredentialRegistry">Credential<wbr>Registry</a></dt><dd>Where credential records come from: the state store (hot-cached; the
+<code>DWARA_STATE_DB</code> deployment) or config consumers hashed in-memory at
+startup. Both paths unify behind one lookup API (a private
+selector-keyed search shared by the API-key, Basic, and mTLS paths).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.CONSUMER_HEADER_PREFIX.html" title="constant dwara_core::security::authn::CONSUMER_HEADER_PREFIX">CONSUMER_<wbr>HEADER_<wbr>PREFIX</a></dt><dd>Whether the gateway treats <code>X-Consumer-*</code> request headers as spoof
+material: always — the proxy strips them and injects its own.</dd><dt><a class="constant" href="constant.NONCE_CACHE_SHARDS.html" title="constant dwara_core::security::authn::NONCE_CACHE_SHARDS">NONCE_<wbr>CACHE_<wbr>SHARDS</a></dt><dd>Number of independent shard locks in the nonce cache. Fixed (not
+CPU-count-derived) so the worst-case entry bound
+(<code>NONCE_CACHE_SHARDS * MAX_NONCE_CACHE_ENTRIES_PER_SHARD</code>) is the
+same number on every machine — the GCRA store’s rationale.</dd><dt><a class="constant" href="constant.X_CONSUMER_NAME.html" title="constant dwara_core::security::authn::X_CONSUMER_NAME">X_<wbr>CONSUMER_<wbr>NAME</a></dt><dd>The trusted consumer-identity header the gateway injects upstream.</dd><dt><a class="constant" href="constant.X_DWARA_BODY_SHA256.html" title="constant dwara_core::security::authn::X_DWARA_BODY_SHA256">X_<wbr>DWARA_<wbr>BODY_<wbr>SHA256</a></dt><dt><a class="constant" href="constant.X_DWARA_KEY_ID.html" title="constant dwara_core::security::authn::X_DWARA_KEY_ID">X_<wbr>DWARA_<wbr>KEY_<wbr>ID</a></dt><dt><a class="constant" href="constant.X_DWARA_NONCE.html" title="constant dwara_core::security::authn::X_DWARA_NONCE">X_<wbr>DWARA_<wbr>NONCE</a></dt><dt><a class="constant" href="constant.X_DWARA_SIGNATURE.html" title="constant dwara_core::security::authn::X_DWARA_SIGNATURE">X_<wbr>DWARA_<wbr>SIGNATURE</a></dt><dd>The <code>X-Dwara-*</code> header family (DW-036). See the module docs for the
+canonical-string contract; these consts are the single source of the
+header names so the verifier and the challenge cannot drift.</dd><dt><a class="constant" href="constant.X_DWARA_TIMESTAMP.html" title="constant dwara_core::security::authn::X_DWARA_TIMESTAMP">X_<wbr>DWARA_<wbr>TIMESTAMP</a></dt></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.Authenticator.html" title="trait dwara_core::security::authn::Authenticator">Authenticator</a></dt><dd>One pluggable authenticator (dyn-compatible seam). <code>Ok(None)</code> is
+Anonymous; <code>Err(AuthError::Invalid(..))</code> means a credential was
+PRESENTED and rejected.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.canonical_string.html" title="fn dwara_core::security::authn::canonical_string">canonical_<wbr>string</a></dt><dd>Build the canonical string (DW-036 v1). The elements are the
+PRESENTED header values and the request target EXACTLY as received —
+the signer’s bytes and the verifier’s bytes must agree without any
+normalization step (see the module docs for the grammar and the
+rationale). Public because the grammar is the interop contract:
+tests re-implement it independently to pin the documentation, and
+operators may build signing tooling against the same function the
+gateway verifies with.</dd><dt><a class="fn" href="fn.parse_algorithms.html" title="fn dwara_core::security::authn::parse_algorithms">parse_<wbr>algorithms</a></dt><dd>Public for testing the JWT algorithm-allowlist contract.</dd><dt><a class="fn" href="fn.verify_secret.html" title="fn dwara_core::security::authn::verify_secret">verify_<wbr>secret</a></dt><dd>Verify a presented secret against a stored hash, in constant time for
+the fast paths (<code>subtle::ConstantTimeEq</code> over the encoded digests —
+comparing hex strings byte-wise is length-equal and timing-uniform).
+Supported formats: <code>hmac-sha256:&lt;hex&gt;</code> (#124; verified ONLY when a
+<code>pepper</code> is configured — a missing pepper fails closed for peppered
+entries), legacy <code>sha256:&lt;hex&gt;</code> (always verified, pepper or not: the
+transition keeps old rows valid), and PHC argon2id strings
+(<code>$argon2id$...</code>, pepper-independent). Unknown formats verify false
+(never accept).</dd></dl></section></div></main></body></html>

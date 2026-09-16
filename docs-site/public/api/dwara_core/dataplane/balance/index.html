@@ -1,0 +1,84 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Per-upstream load balancing (DW-011, feature analysis 4.3)."><title>dwara_core::dataplane::balance - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module balance</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module balance</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>balance</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/balance.rs.html#1-1608">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Per-upstream load balancing (DW-011, feature analysis 4.3).</p>
+<p>One <a href="struct.UpstreamLb.html" title="struct dwara_core::dataplane::balance::UpstreamLb"><code>UpstreamLb</code></a> per upstream holds the endpoint set behind an
+[<code>ArcSwap</code>] (<code>LbState</code>), so <a href="struct.UpstreamLb.html#method.pick" title="method dwara_core::dataplane::balance::UpstreamLb::pick"><code>UpstreamLb::pick</code></a> is lock-free: it loads
+the current state snapshot and runs the configured algorithm with no
+mutex on the hot path. Endpoint mutation happens only on config reload
+via <a href="struct.UpstreamLb.html#method.rebuild" title="method dwara_core::dataplane::balance::UpstreamLb::rebuild"><code>UpstreamLb::rebuild</code></a>, which swaps in a new state atomically —
+in-flight requests holding an older state keep working against it.</p>
+<p>Algorithms (config <code>load_balancer</code>):</p>
+<ul>
+<li><code>round_robin</code> — smooth weighted round-robin (the nginx algorithm):
+each pick adds every endpoint’s effective weight to its running
+<code>current_weight</code>, selects the maximum, and subtracts the total from
+the winner. The result interleaves endpoints deterministically in
+proportion to their weights (weights {5,1,2} produce the classic
+<code>a a b a c a a</code> pattern) with period = sum of weights; over any full
+period each endpoint is picked exactly its weight many times.</li>
+<li><code>least_requests</code> — the endpoint with the fewest in-flight requests
+(see the inflight counters below) wins; ties break to the lowest
+index. Slow start is NOT applied here (documented choice: least-conn
+balances on observed load, not weights; a ramping endpoint naturally
+receives traffic only when others are busier, which is the same
+conservative effect without inventing a weight model).</li>
+<li><code>random</code> — “power of two choices”: two distinct endpoints are drawn
+uniformly at random and the one with the lower in-flight count wins
+(ties to the lower index). With large fan-out this converges to
+least-conn at a fraction of the coordination cost.</li>
+<li><code>ip_hash</code> — consistent hashing (ketama): each endpoint is hashed onto
+a ring with vnode count per unit of weight (<a href="../../config/limits/constant.KETAMA_VNODES.html" title="constant dwara_core::config::limits::KETAMA_VNODES"><code>KETAMA_VNODES</code></a> = 160
+per weight unit, so a weight-w endpoint gets 160*w vnodes); a pick
+hashes its key (the client IP, plumbed by the proxy) and takes the
+first ring entry at or after that hash. Because vnodes are additive
+(no max-normalization), adding or removing an endpoint remaps only
+~1/(n+1) of keys for equal weights and keys between unchanged
+endpoints stay put. Ring and key hashing use an inline, fully
+specified FNV-1a hash with a murmur3-style finalizer — stable
+across Rust versions, unlike <code>DefaultHasher</code> (SipHash), which
+makes no cross-version stability guarantee and would silently
+remap every sticky session after a toolchain bump. Slow start is
+NOT applied to the ring (documented
+choice: rebuilding a ring mid-ramp would remap keys; consistency is
+the point of the algorithm). With no key (e.g. the TLS-passthrough
+path) ip_hash falls back to smooth weighted round-robin.</li>
+</ul>
+<p>In-flight counting: every endpoint carries an <code>AtomicU64</code> in-flight
+counter. The upstream handle increments the picked endpoint’s counter
+at dispatch and decrements when the response (headers) resolves — NOT
+when the streaming body completes, which the pool cannot observe
+without wrapping bodies (documented approximation; it biases
+least-conn/random-2 slightly optimistic during long streams).</p>
+<p>Slow start (<code>slow_start_ms</code>, default 0 = off): an endpoint entering the
+set ramps its effective weight from a floor of 1 to its configured
+weight over the window, measured from the moment it entered the set.
+The ramp applies to smooth WRR and (through weights) ip_hash vnode
+counts are exempt as above. Endpoints already in the set when
+slow_start is newly enabled do NOT ramp — their carried entry instant
+predates the window; only genuinely new addresses ramp.
+Recovery-ramp after a health failure is
+future work (DW-015 owns health state) — the effective-weight function
+is the same one that integration will call.</p>
+<p>Hot endpoint sets / weight changes without restart: config reload
+rebuilds the registry and calls <a href="struct.UpstreamLb.html#method.rebuild" title="method dwara_core::dataplane::balance::UpstreamLb::rebuild"><code>UpstreamLb::rebuild</code></a> with the new
+endpoint list. Endpoints whose <code>address:port</code> is unchanged KEEP their
+in-flight counter, <code>current_weight</code> (WRR phase), and slow-start entry
+instant; new addresses start fresh (in-flight 0, full slow-start ramp
+if configured). Documented reset semantics: removed endpoints drop
+their state outright; re-adding one later is a fresh entry.</p>
+<p>Randomness for <code>random</code> (random-2) is a process-local xorshift64* seed
+under a CAS loop — no <code>rand</code> dependency, adequate uniformity for two
+choices.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Dispatch.html" title="struct dwara_core::dataplane::balance::Dispatch">Dispatch</a></dt><dd>One dispatch’s pick: the endpoint chosen, its <code>address:port</code>, the
+passive-health report handle (DW-012), and the in-flight guard for the
+same snapshot the pick came from. Dropping the <code>Dispatch</code> (after the
+response headers resolve) releases the guard.</dd><dt><a class="struct" href="struct.InflightGuard.html" title="struct dwara_core::dataplane::balance::InflightGuard">Inflight<wbr>Guard</a></dt><dd>Drops =&gt; decrement of the endpoint’s in-flight counter. Holds an <code>Arc</code>
+to the state it counted in, so a concurrent rebuild never strays the
+decrement onto a different endpoint set.</dd><dt><a class="struct" href="struct.PeakEwmaTracker.html" title="struct dwara_core::dataplane::balance::PeakEwmaTracker">Peak<wbr>Ewma<wbr>Tracker</a></dt><dd>Peak-EWMA latency tracker (DW-090): one per endpoint when the
+upstream’s algorithm is <code>peak_ewma</code>. Holds the current EWMA cost
+(<code>cost_ns</code>, in nanoseconds) and the timestamp of the last update
+(<code>stamp</code>, in nanoseconds since the Unix epoch) as atomics so
+<a href="struct.UpstreamLb.html#method.record_latency" title="method dwara_core::dataplane::balance::UpstreamLb::record_latency"><code>UpstreamLb::record_latency</code></a> is lock-free on the hot path. Carried
+across rebuilds by <code>address:port</code> (exactly like <code>inflight</code> and
+<code>health</code>): the live tracker survives a config reload so a latency
+history accumulated under one generation is not thrown away by the
+next.</dd><dt><a class="struct" href="struct.UpstreamLb.html" title="struct dwara_core::dataplane::balance::UpstreamLb">Upstream<wbr>Lb</a></dt><dd>A load balancer for one upstream: lock-free picks over an atomically
+swappable endpoint set. Share via <code>Arc</code>; cheap to read from any task.</dd></dl></section></div></main></body></html>

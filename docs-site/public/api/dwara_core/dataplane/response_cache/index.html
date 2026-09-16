@@ -1,0 +1,203 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Local response cache engine (DW-037, feature analysis 5-Protocol “Response caching”)."><title>dwara_core::dataplane::response_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module response_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module response_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#where-it-sits-in-the-pipeline" title="Where it sits in the pipeline">Where it sits in the pipeline</a></li><li><a href="#cacheability-deterministic-closed-rules" title="Cacheability (deterministic, closed rules)">Cacheability (deterministic, closed rules)</a></li><li><a href="#keys" title="Keys">Keys</a></li><li><a href="#freshness-stale-while-revalidate-etag" title="Freshness, stale-while-revalidate, ETag">Freshness, stale-while-revalidate, ETag</a></li><li><a href="#request-coalescing-dw-038" title="Request coalescing (DW-038)">Request coalescing (DW-038)</a></li><li><a href="#invalidations-why-epochs" title="Invalidations (why epochs)">Invalidations (why epochs)</a></li><li><a href="#reload-behavior" title="Reload behavior">Reload behavior</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>response_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/response_cache.rs.html#1-2220">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Local response cache engine (DW-037, feature analysis 5-Protocol
+“Response caching”).</p>
+<p>Sits behind the <a href="../../extensions/cache/trait.CacheStore.html" title="trait dwara_core::extensions::cache::CacheStore"><code>CacheStore</code></a> extension seam
+(DW-004): the engine owns HTTP semantics — keys,
+cacheability, freshness, revalidation, purge — while the backend is
+an opaque byte store (OSS ships the moka-backed <a href="../../extensions/cache/struct.MokaCache.html" title="struct dwara_core::extensions::cache::MokaCache"><code>MokaCache</code></a>;
+DW-068 swaps in Redis behind the same trait). Cache errors degrade
+to misses, never request failures.</p>
+<h3 id="where-it-sits-in-the-pipeline"><a class="doc-anchor" href="#where-it-sits-in-the-pipeline">§</a>Where it sits in the pipeline</h3><div class="example-wrap"><pre class="language-text"><code>... authn -&gt; authz -&gt; rate limit -&gt; cap admission
+  -&gt; CACHE LOOKUP (hit/stale: replay; miss: fall through)
+  -&gt; proxy action -&gt; masking (DW-029) -&gt; body/header transforms (DW-028)
+  -&gt; CACHE STORE (post-mask, post-transform bytes; pre-compression)
+  -&gt; compression (DW-027) -&gt; versioning stamps (DW-048) -&gt; CORS (DW-027)
+  -&gt; security headers (DW-028) -&gt; rate headers</code></pre></div>
+<p>The two placements are load-bearing:</p>
+<ul>
+<li>LOOKUP runs after authn/authz/rate limiting on purpose: a replay
+is still client traffic (it consumed a rate-limit token and an
+admission slot, and the consumer’s identity is part of the key),
+and no policy may be bypassed by a hit. It runs before the
+breaker/endpoint pick because a hit contacts no upstream.</li>
+<li>STORE writes the POST-masking, POST-transform bytes keyed per
+consumer: replayed bytes are exactly what the same consumer would
+have received (masking and transforms are route-scoped, so replay
+consistency holds — pinned by test: a transform change invalidates
+old entries). Stored bodies are IDENTITY (never compressed —
+DW-027’s compression re-negotiates per request on replay), and
+the decoration tail from compression onward re-runs on every
+replay: security headers, masking-era bytes, CORS, rate headers
+can never be bypassed by a cache hit.</li>
+</ul>
+<h3 id="cacheability-deterministic-closed-rules"><a class="doc-anchor" href="#cacheability-deterministic-closed-rules">§</a>Cacheability (deterministic, closed rules)</h3>
+<p>A REQUEST is cacheable when: the route has a <code>cache</code> block and a
+PROXY action; the method is GET or HEAD (DP-04: HEAD is cacheable —
+a HEAD response carries the same headers as GET with no body, and
+the method folds into the key so the two representations are
+distinct entries; a fresh GET entry also serves a HEAD via the
+GET-fallback, RFC 9111 section 4.1); the request carries no body,
+no <code>Authorization</code>, no <code>Cookie</code> (credentials make per-consumer
+keying insufficient — two bearer tokens of one consumer would share
+an entry), and no <code>Upgrade</code>. Everything else is a BYPASS (stamped
+and counted, never stored).</p>
+<p>A RESPONSE is storable when: status is exactly 200; it carries no
+<code>Set-Cookie</code>; its <code>Cache-Control</code> has none of <code>no-store</code> /
+<code>private</code> / <code>no-cache</code> (the storage vetoes; DP-04 additionally
+honors <code>s-maxage</code>/<code>max-age</code> as the freshness lifetime — taking
+precedence over the configured <code>ttl_secs</code> — and <code>stale-if-error</code>
+as the per-entry stale-on-error window, RFC 5861 section 4); it is
+not content-encoded (dwara compresses on replay; an upstream-encoded
+body cannot be re-negotiated); and its <code>Vary</code> is <code>*</code>-free and a
+subset of the route’s effective vary set (see <code>config::cache</code> for
+the configured + policy-derived variance model — the key must be
+derivable from the request alone, so an unknown variance dimension
+forbids storage).</p>
+<h3 id="keys"><a class="doc-anchor" href="#keys">§</a>Keys</h3>
+<p><code>sha256("dwara-rc-v1" | route | epoch | method | consumer | path | query | vary-name=value...)</code> — hex-encoded. The method component
+(DP-04) separates HEAD and GET representations of one resource.
+The consumer component means masked (DW-029) and consumer-group
+variants can never cross consumers. Keys are never logged (paths
+and query strings carry tokens; the hash is opaque anyway).</p>
+<h3 id="freshness-stale-while-revalidate-etag"><a class="doc-anchor" href="#freshness-stale-while-revalidate-etag">§</a>Freshness, stale-while-revalidate, ETag</h3>
+<p>Fresh for the effective freshness lifetime — the upstream
+<code>Cache-Control: s-maxage</code> (then <code>max-age</code>) when present (DP-04,
+RFC 7234 section 5.2.2.9), else the configured <code>ttl_secs</code>; within
+<code>stale_while_revalidate_secs</code> after expiry the entry is served stale (<code>x-cache: stale</code>) while ONE
+background revalidation runs per key (a bounded in-flight set
+deduplicates; DW-038’s request coalescing applies the same
+single-flight discipline to the foreground miss path). Past the
+window the next request revalidates synchronously: the stored
+validator rides the forwarded fetch as <code>If-None-Match</code> (only when
+the client sent none of its own — a client conditional always wins
+the forwarded request), and an upstream 304 refreshes the entry
+without re-sending the body (<code>x-cache: revalidated</code>). A client
+<code>If-None-Match</code> that matches a FRESH entry’s validator is answered
+304 straight from the cache. Weak comparison (W/ prefixes ignored)
+per RFC 9110 section 8.8.3.</p>
+<h3 id="request-coalescing-dw-038"><a class="doc-anchor" href="#request-coalescing-dw-038">§</a>Request coalescing (DW-038)</h3>
+<p>A cache MISS on a route whose cache block carries <code>coalescing</code>
+either becomes the LEADER (fetches upstream while holding the key’s
+slot) or a FOLLOWER (parks, bounded by the route’s
+<code>coalescing.wait_ms</code>). The coalescing key IS the cache key — route
+epoch, consumer, path, query, vary — so a follower can only ever be
+handed an outcome computed for a byte-identical request shape of
+its OWN consumer and generation; per-consumer isolation is
+inherited from the key, not reimplemented. The STORE is the share
+point: the leader’s store stage completes before it publishes, and
+a woken follower re-reads the store and replays the entry exactly
+like a hit (<code>x-cache: hit</code>; the decoration tail re-runs — the same
+replay guarantees as a normal hit). Scope: the miss path of
+cache-enabled routes only. A request shape the cache bypasses
+(non-GET, credentialed, body-bearing, upgrade) never coalesces,
+and routes without a cache block never coalesce — “concurrent
+identical cacheable GETs” is the whole claim.</p>
+<p>Every failure mode fails OPEN (no client is ever errored because
+coalescing gave up), each rule pinned by test:</p>
+<ul>
+<li>Leader finished with nothing storable (vetoed, non-200, upstream
+error, over-cap) or died outright (panic, client-cancel abort):
+followers fetch on their own, each running the route’s FULL
+retry policy — a leader’s failure is never inherited.</li>
+<li>Epoch flipped mid-flight (purge or config change): followers
+fetch on their own rather than inherit a dead generation’s
+answer.</li>
+<li>Follower wait bound expired: the follower fetches on its own.</li>
+<li>The leader map is saturated (<a href="constant.MAX_COALESCING_KEYS.html" title="constant dwara_core::dataplane::response_cache::MAX_COALESCING_KEYS"><code>MAX_COALESCING_KEYS</code></a> distinct
+in-flight keys): the request never joins — it just fetches
+(uncounted by coalescing metrics; it was neither leader nor
+follower).</li>
+</ul>
+<p>The map holds LEADER slots only (waiters carry no per-key state);
+a slot leaves the map at completion by the leader’s guard, and the
+guard’s Drop is the publish — so a leader that dies unpublishes
+into the fail-open path too. Nothing in the coalescing path waits
+on the SWR revalidation in-flight set or vice versa: the two
+single-flight mechanisms have disjoint state and no shared locks,
+so they cannot deadlock or double-subscribe each other.</p>
+<h3 id="invalidations-why-epochs"><a class="doc-anchor" href="#invalidations-why-epochs">§</a>Invalidations (why epochs)</h3>
+<p>Entries record the route’s CACHE EPOCH at store time; a lookup
+under a different epoch is a miss (the dead entry is dropped).
+Epochs bump on: an explicit purge (the admin API — an O(1)
+generation advance, which is why purge is &lt;100 ms at any store
+size; the opaque backend is never enumerated), and any snapshot
+publish that CHANGES a route’s definition (a <code>Route</code>-equality diff
+at refresh — stored bytes were shaped by the old masking/transform/
+cache policy, so any route change invalidates that route’s entries;
+unrelated config edits leave the cache warm). Entries left
+unreachable by a bump are never re-read; the byte-weighed store
+reclaims them by eviction.</p>
+<p>DP-04 adds two targeted purge axes alongside the epoch-based route
+purge: purge-by-tag (every entry the upstream tagged with a given
+<code>Cache-Tags</code> value) and purge-by-URL (every entry for an exact or
+prefix-matched request URL). These delete specific keys through the
+<code>CacheStore</code> seam (O(keys-matching), not O(1)) using in-memory
+tag→keys and URL→keys indexes populated at store time; the indexes
+are runtime state (lost on restart) and self-clean lazily as purges
+drop their dead cross-references.</p>
+<h3 id="reload-behavior"><a class="doc-anchor" href="#reload-behavior">§</a>Reload behavior</h3>
+<p>The engine (store, epochs, in-flight set) lives on the
+<a href="../proxy/struct.DataPlane.html" title="struct dwara_core::dataplane::proxy::DataPlane"><code>DataPlane</code></a>, NOT in the snapshot: it is
+runtime state, like the priority counters, and survives config
+reloads. A changed <code>cache</code> block applies to NEW lookups (freshness
+windows are read from the CURRENT policy at lookup time); entries
+stored under a changed route die by the epoch rule above.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CacheControl.html" title="struct dwara_core::dataplane::response_cache::CacheControl">Cache<wbr>Control</a></dt><dd>Parsed upstream <code>Cache-Control</code> directives (RFC 7234 + the
+<code>stale-if-error</code> extension, RFC 5861 section 4). Only the directives
+the gateway’s shared cache acts on are captured; unknown directives
+are ignored (forward-compat). The parser is hand-rolled (no new
+dependency) and tolerant: a malformed <code>delta-seconds</code> argument is
+treated as absent rather than failing the whole header, and directive
+names are matched case-insensitively with optional whitespace.</dd><dt><a class="struct" href="struct.CoalesceLead.html" title="struct dwara_core::dataplane::response_cache::CoalesceLead">Coalesce<wbr>Lead</a></dt><dd>A leader’s hold on one coalescing key (DW-038). Dropping IS the
+publication: the slot leaves the map, then every parked follower
+wakes and re-reads the store. The guard pattern (not manual
+cleanup) so a leader that panics or is cancelled mid-fetch still
+publishes — its followers wake, find nothing shareable, and fetch
+on their own.</dd><dt><a class="struct" href="struct.EntryEnvelope.html" title="struct dwara_core::dataplane::response_cache::EntryEnvelope">Entry<wbr>Envelope</a></dt><dd>One stored response (the value bytes of the <a href="../../extensions/cache/trait.CacheStore.html" title="trait dwara_core::extensions::cache::CacheStore"><code>CacheStore</code></a>). The
+layout is a tiny length-prefixed binary frame (no new dependency):
+magic, schema version, epoch, stored-at, status, header pairs, body.
+Headers are the DENY-LISTED copy of the response’s headers — hop-
+by-hop and framing names are already gone (stripped on the proxy
+path); additionally excluded at store time: <code>Content-Length</code>
+(recomputed on replay), <code>Vary</code> (re-derived from the live policy),
+<code>Age</code> (recomputed), <code>Cache-Control</code>/<code>Expires</code> (the gateway owns the
+entry’s freshness — replaying origin directives would mislead
+clients about a gateway-held entry), <code>Set-Cookie</code> (personalized;
+also a storage veto), and the gateway’s own stamps (<code>X-Cache</code>,
+<code>X-Request-Id</code>, <code>X-RateLimit-*</code>). Everything else round-trips
+verbatim (ETag, Last-Modified, Date, Content-Type, custom headers).</dd><dt><a class="struct" href="struct.MissFlow.html" title="struct dwara_core::dataplane::response_cache::MissFlow">Miss<wbr>Flow</a></dt><dd>Everything the store stage and the background revalidation need
+about one cacheable request (DW-037).</dd><dt><a class="struct" href="struct.PassthroughBody.html" title="struct dwara_core::dataplane::response_cache::PassthroughBody">Passthrough<wbr>Body</a></dt><dd>A body that replays a buffered prefix and then continues the
+original stream byte-for-byte (the over-cap passthrough arm — the
+response reaches the client exactly as if no cache existed).</dd><dt><a class="struct" href="struct.ResponseCache.html" title="struct dwara_core::dataplane::response_cache::ResponseCache">Response<wbr>Cache</a></dt><dd>The local response cache: opaque store + route epochs + the
+single-flight revalidation guard + the request-coalescing leader
+map. Owned by the <a href="../proxy/struct.DataPlane.html" title="struct dwara_core::dataplane::proxy::DataPlane"><code>DataPlane</code></a>; survives reloads.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CacheFlow.html" title="enum dwara_core::dataplane::response_cache::CacheFlow">Cache<wbr>Flow</a></dt><dd>The per-request cache state carried from lookup to the store stage.</dd><dt><a class="enum" href="enum.CoalesceOutcome.html" title="enum dwara_core::dataplane::response_cache::CoalesceOutcome">Coalesce<wbr>Outcome</a></dt><dd>What <a href="struct.ResponseCache.html#method.attach" title="method dwara_core::dataplane::response_cache::ResponseCache::attach"><code>ResponseCache::attach</code></a> decided for one cache miss (DW-038).</dd><dt><a class="enum" href="enum.LookupOutcome.html" title="enum dwara_core::dataplane::response_cache::LookupOutcome">Lookup<wbr>Outcome</a></dt><dd>What a lookup decided (DW-037): replay now, carry a miss to the
+store stage, or stamp a bypass.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_COALESCING_KEYS.html" title="constant dwara_core::dataplane::response_cache::MAX_COALESCING_KEYS">MAX_<wbr>COALESCING_<wbr>KEYS</a></dt><dd>Upper bound on concurrently held coalescing LEADER slots (DW-038).
+The map bounds memory (each slot is a key string + a watch channel)
+and the stampede-collapse itself: beyond this many DISTINCT
+in-flight cache keys, new misses never join — they fetch
+independently (fail open, uncounted by coalescing metrics). Slots
+are not evicted early (an in-flight leader cannot be preempted —
+its followers are parked on it); the map drains as leaders
+complete, which IS the eviction policy: hold-while-in-flight,
+remove-at-completion, refuse-at-capacity. A same-process burst
+with more than this many distinct keys was never going to collapse
+anyway — the keys are distinct.</dd><dt><a class="constant" href="constant.MAX_INFLIGHT_REVALIDATIONS.html" title="constant dwara_core::dataplane::response_cache::MAX_INFLIGHT_REVALIDATIONS">MAX_<wbr>INFLIGHT_<wbr>REVALIDATIONS</a></dt><dd>Upper bound on concurrently in-flight background revalidations
+(DW-037): the stale-while-revalidate path serves stale immediately
+and refreshes in the background; beyond this many DISTINCT keys the
+gateway skips spawning (the next request past the stale window
+revalidates synchronously) so a cache-wide expiry cannot stampede.</dd><dt><a class="constant" href="constant.X_CACHE.html" title="constant dwara_core::dataplane::response_cache::X_CACHE">X_CACHE</a></dt><dd>The gateway’s cache-outcome stamp header (DW-037): <code>hit</code>, <code>stale</code>,
+<code>miss</code>, <code>bypass</code>, or <code>revalidated</code> — the same closed set as the
+<code>dwara_cache_lookups_total</code> metric (plus <code>revalidated</code>, which is a
+miss resolved by a 304 confirmation).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.derive_key.html" title="fn dwara_core::dataplane::response_cache::derive_key">derive_<wbr>key</a></dt><dd>Derive the store key: a SHA-256 over the domain-tagged components
+(route, epoch, consumer, method, path, query, vary values). Hashing
+keeps the key length bounded and keeps raw paths/queries out of the
+store’s memory-visible key space (they are never logged either way).
+The method component (DP-04) separates a HEAD representation (no
+body) from a GET representation (full body) of the same resource —
+they are distinct cache entries per RFC 9111 section 4.1.</dd><dt><a class="fn" href="fn.inm_matches.html" title="fn dwara_core::dataplane::response_cache::inm_matches">inm_<wbr>matches</a></dt><dd>Whether a client <code>If-None-Match</code> value matches a stored validator:
+<code>*</code> matches any; otherwise weak comparison (RFC 9110 section 8.8.3
+— the W/ prefix is ignored on both sides) over the comma-separated
+list. A stored entry without a validator never matches.</dd><dt><a class="fn" href="fn.store_veto.html" title="fn dwara_core::dataplane::response_cache::store_veto">store_<wbr>veto</a></dt><dd>The response-side storable rules (see the module docs). Returns the
+veto reason code for logging/telemetry when storage is forbidden.</dd><dt><a class="fn" href="fn.strip_weak.html" title="fn dwara_core::dataplane::response_cache::strip_weak">strip_<wbr>weak</a></dt><dd>Strip the weak-validator prefix (RFC 9110 section 8.8.3: weak
+comparison ignores <code>W/</code> on both sides).</dd><dt><a class="fn" href="fn.validators_match.html" title="fn dwara_core::dataplane::response_cache::validators_match">validators_<wbr>match</a></dt><dd>Whether an upstream 304’s validator agrees with the stored one
+(both absent also agrees — an entity with no validator is trivially
+unchanged). Weak comparison, like <code>inm_matches</code>.</dd></dl></section></div></main></body></html>

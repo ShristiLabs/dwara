@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DevPortalSpecSource"],"struct":["DevPortal","LoadedSpec"]};

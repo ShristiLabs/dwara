@@ -1,0 +1,92 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Consumer request budgets (DW-033): daily/monthly quotas and metering."><title>dwara_core::state::quotas - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module quotas</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module quotas</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-a-quota-is-and-is-not" title="What a quota is (and is not)">What a quota is (and is not)</a></li><li><a href="#counters-and-durability" title="Counters and durability">Counters and durability</a></li><li><a href="#hot-path-cost-documented-trade" title="Hot-path cost (documented trade)">Hot-path cost (documented trade)</a></li><li><a href="#window-math" title="Window math">Window math</a></li><li><a href="#evaluation-semantics-mirrors-dw-017-where-the-client-sees-it" title="Evaluation semantics (mirrors DW-017 where the client sees it)">Evaluation semantics (mirrors DW-017 where the client sees it)</a></li><li><a href="#failure-model" title="Failure model">Failure model</a></li><li><a href="#metering" title="Metering">Metering</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>state</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">state</a></div><h1>Module <span>quotas</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/state/quotas.rs.html#1-517">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Consumer request budgets (DW-033): daily/monthly quotas and metering.</p>
+<h2 id="what-a-quota-is-and-is-not"><a class="doc-anchor" href="#what-a-quota-is-and-is-not">§</a>What a quota is (and is not)</h2>
+<p>A quota is a BUDGET, not a rate: <a href="../../config/struct.ConsumerQuotas.html" title="struct dwara_core::config::ConsumerQuotas"><code>crate::config::ConsumerQuotas</code></a>
+caps the total number of requests one consumer may make inside a
+fixed UTC calendar window — a day (midnight to midnight UTC) or a
+month (the first through the last instant of the UTC month). The
+rate limiter (DW-017) shapes traffic inside seconds or minutes via
+GCRA replenishment; a quota never replenishes inside its window,
+just resets whole at the boundary. The two mechanisms are SEPARATE
+by design and compose: both apply when both are configured, and
+quota 429s carry the same header family as rate-limit 429s
+(<code>Retry-After</code> + <code>X-RateLimit-Limit</code> / <code>-Remaining</code> / <code>-Reset</code>)
+because the client-facing contract is identical — “you may retry at
+this time”.</p>
+<h2 id="counters-and-durability"><a class="doc-anchor" href="#counters-and-durability">§</a>Counters and durability</h2>
+<p>Usage counters are the state store’s <code>quota_counters</code> rows (DW-018
+seeded the table and <a href="../store/struct.StateStore.html#method.incr_quota" title="method dwara_core::state::store::StateStore::incr_quota"><code>StateStore::incr_quota</code></a>’s atomic
+increment-or-refuse — this module is the policy layer that was
+missing). Counters therefore persist restarts and crashes like the
+rest of the store: every accepted request’s increment is a
+synchronous point write committed before the request proceeds, not
+a fire-and-forget record, so a crash can lose at most the request
+that was in flight — never a committed counter. This is the OSS
+local-counter implementation the issue scopes: per-instance SQLite
+(or in-memory) truth. A fleet-wide shared-counter variant (Redis)
+is the Ent follow-up (DW-155) and deliberately does not exist here.</p>
+<h2 id="hot-path-cost-documented-trade"><a class="doc-anchor" href="#hot-path-cost-documented-trade">§</a>Hot-path cost (documented trade)</h2>
+<p>Every request of a quota-configured consumer performs one or two
+SYNCHRONOUS SQLite write transactions (<code>incr_quota</code>) on the single
+mutex-guarded state-store connection — and that store keeps
+SQLite’s default <code>synchronous=FULL</code> (an fsync per commit; the
+analytics store pins <code>NORMAL</code> for contrast, but relaxing the state
+store’s durability is a separate decision touching credential-write
+semantics, not this feature’s call). Budgets therefore add a
+per-request fsync and serialize quota’d traffic through one
+connection — the accepted OSS per-instance shape; scaling quota
+enforcement across a fleet is exactly the DW-155 follow-up.</p>
+<h2 id="window-math"><a class="doc-anchor" href="#window-math">§</a>Window math</h2>
+<p>Windows are UTC calendar aligned and computed purely from an
+epoch-seconds input (<a href="../../config/quotas/fn.day_window.html" title="fn dwara_core::config::quotas::day_window"><code>day_window</code></a>, <a href="../../config/quotas/fn.month_window.html" title="fn dwara_core::config::quotas::month_window"><code>month_window</code></a>) so tests are
+deterministic. The day window is <code>days * 86400</code>; the month window
+uses the standard civil-calendar days algorithm (no calendar
+dependency). <code>reset_epoch_s</code> is the boundary at which the budget
+becomes whole again — the value advertised in <code>X-RateLimit-Reset</code>.</p>
+<h2 id="evaluation-semantics-mirrors-dw-017-where-the-client-sees-it"><a class="doc-anchor" href="#evaluation-semantics-mirrors-dw-017-where-the-client-sees-it">§</a>Evaluation semantics (mirrors DW-017 where the client sees it)</h2>
+<p>Budgets evaluate shortest-window-first (daily, then monthly). All
+configured budgets apply (AND). A denied request answers 429 with
+<code>Retry-After</code> = seconds until the denying budget’s window resets
+(rounded up, minimum 1) and the FIRST denying budget’s
+Limit/Remaining/Reset headers; when a LATER budget is ALSO
+exhausted, <code>Retry-After</code> stretches to that later wall (the monthly
+boundary is a midnight at or after the daily one) — a client
+honoring the hint never retries out of the daily wall straight into
+the monthly one, the same max-wait rule the multi-rule rate limiter
+applies. Evaluation is decide-and-reserve and STOPS at the first
+denial (the GCRA stacking rule): a request denied by the monthly
+budget has already spent its daily unit (the daily window evaluated
+first), while a request denied by the daily budget consumes
+NOTHING — later budgets are peeked read-only for the max-wait
+computation, never incremented for a refused request. The stacking
+waste is one unit in the faster-resetting window; never more
+permissive, bounded, documented.</p>
+<h2 id="failure-model"><a class="doc-anchor" href="#failure-model">§</a>Failure model</h2>
+<p>The store’s failure answers are surfaced, not hidden:
+<a href="../../config/quotas/enum.QuotaOutcome.html#variant.Unavailable" title="variant dwara_core::config::quotas::QuotaOutcome::Unavailable"><code>QuotaOutcome::Unavailable</code></a> (a SQLite error) maps to a 500 on the
+request path — the gateway cannot vouch for the budget either way,
+the same posture as an authN backend failure. A consumer present in
+config but absent from the store (sync never ran) fails OPEN with a
+logged warn: there is no counter to enforce, and 500-ing every
+request of an unsynced consumer would turn a wiring gap into an
+outage. Quota config without ANY attached state store is likewise
+inert (warned once at request time from the dataplane — validation
+cannot see <code>DWARA_STATE_DB</code>, which is runtime environment, not
+config).</p>
+<h2 id="metering"><a class="doc-anchor" href="#metering">§</a>Metering</h2>
+<p>Usage is queryable three ways: the admin API’s <code>GET /quotas/usage</code>
+(current windows, per consumer), the <code>dwara_quota_used</code> /
+<code>dwara_quota_limit</code> / <code>dwara_quota_denied_total</code> metric families
+(DW-021 conventions), and the analytics store — a quota-denied
+request completes with <code>rate_limited = true</code> and its consumer name,
+so the existing per-consumer analytics axis (raw rows and the
+<code>rollup_fixed</code> consumer dimension) already answers “how much did
+this consumer send and how much was refused” over history.</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.day_window"><code>pub use crate::config::quotas::<a class="fn" href="../../config/quotas/fn.day_window.html" title="fn dwara_core::config::quotas::day_window">day_window</a>;</code></dt><dt id="reexport.month_window"><code>pub use crate::config::quotas::<a class="fn" href="../../config/quotas/fn.month_window.html" title="fn dwara_core::config::quotas::month_window">month_window</a>;</code></dt><dt id="reexport.retry_after"><code>pub use crate::config::quotas::<a class="fn" href="../../config/quotas/fn.retry_after.html" title="fn dwara_core::config::quotas::retry_after">retry_after</a>;</code></dt><dt id="reexport.Budget"><code>pub use crate::config::quotas::<a class="enum" href="../../config/quotas/enum.Budget.html" title="enum dwara_core::config::quotas::Budget">Budget</a>;</code></dt><dt id="reexport.QuotaOutcome"><code>pub use crate::config::quotas::<a class="enum" href="../../config/quotas/enum.QuotaOutcome.html" title="enum dwara_core::config::quotas::QuotaOutcome">QuotaOutcome</a>;</code></dt><dt id="reexport.DAILY_KEY"><code>pub use crate::config::quotas::<a class="constant" href="../../config/quotas/constant.DAILY_KEY.html" title="constant dwara_core::config::quotas::DAILY_KEY">DAILY_KEY</a>;</code></dt><dt id="reexport.MONTHLY_KEY"><code>pub use crate::config::quotas::<a class="constant" href="../../config/quotas/constant.MONTHLY_KEY.html" title="constant dwara_core::config::quotas::MONTHLY_KEY">MONTHLY_KEY</a>;</code></dt></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BudgetUsage.html" title="struct dwara_core::state::quotas::BudgetUsage">Budget<wbr>Usage</a></dt><dd>One budget’s current-window usage figure (the admin API and metric
+gauges’ read model).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.check.html" title="fn dwara_core::state::quotas::check">check</a></dt><dd>Check-and-reserve one request against every configured budget of
+<code>quotas</code> for consumer row <code>consumer_id</code> (DW-033). Pure policy over
+<a href="../store/struct.StateStore.html#method.incr_quota" title="method dwara_core::state::store::StateStore::incr_quota"><code>StateStore::incr_quota</code></a>; see the module docs for the evaluation
+order, the stacking consumption trade, and the failure model.</dd><dt><a class="fn" href="fn.current_usage.html" title="fn dwara_core::state::quotas::current_usage">current_<wbr>usage</a></dt><dd>Read the current-window usage of every configured budget for one
+consumer (no reservation, no increment — the query side of
+metering). A store that cannot answer yields an empty read; callers
+surface the gap their own way (the admin endpoint 500s, the gauge
+refresh skips).</dd></dl></section></div></main></body></html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Route-scoped response compression (DW-027, feature analysis 4.13)."><title>dwara_core::dataplane::compression - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module compression</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module compression</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>compression</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/compression.rs.html#1-470">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Route-scoped response compression (DW-027, feature analysis 4.13).</p>
+<p>One <a href="../../config/struct.Compression.html" title="struct dwara_core::config::Compression"><code>Compression</code></a> policy per route drives two steps:</p>
+<ul>
+<li><strong>Negotiation</strong> (<a href="fn.negotiate.html" title="fn dwara_core::dataplane::compression::negotiate"><code>negotiate</code></a>): the first algorithm of the
+policy’s preference order the request’s <code>Accept-Encoding</code> accepts
+wins. <code>q=0</code> codings are treated as refusal; <code>*</code> accepts any. No
+acceptable overlap means no compression (identity is always
+permitted; the gateway never answers 406 over compression).</li>
+<li><strong>Encoding</strong> (<a href="fn.wrap_response.html" title="fn dwara_core::dataplane::compression::wrap_response"><code>wrap_response</code></a>): the response body is wrapped in
+<a href="struct.CompressedBody.html" title="struct dwara_core::dataplane::compression::CompressedBody"><code>CompressedBody</code></a>, which compresses CHUNK-BY-CHUNK — every data
+frame is written through the codec and flushed, and whatever the
+codec produced is forwarded as the next frame. The gateway never
+buffers a whole body to compress it; the only buffering is the
+codec’s own bounded working set plus the not-yet-emitted output of
+the current chunk. Per-chunk flushing costs a little ratio and
+buys streaming correctness: a slow/trickling upstream (SSE)
+reaches the client per chunk instead of at end-of-stream.
+Content types that must not be delayed (e.g. <code>text/event-stream</code>)
+are the operator’s call via <code>excluded_content_types</code>.</li>
+</ul>
+<p>Response eligibility (see <a href="fn.decide.html" title="fn dwara_core::dataplane::compression::decide"><code>decide</code></a>): never a 1xx/204/304, never a
+101 upgrade, never a body that already carries <code>Content-Encoding</code>,
+never a zero length, never below <code>min_size</code> when the size is known
+(declared <code>Content-Length</code> or the exact size of the gateway’s own
+header-less bodies; unknown-length streams are always candidates).
+<code>Content-Length</code> is dropped on compression (the encoded
+length differs; framing switches to chunked/streamed), and
+<code>Content-Encoding: &lt;token&gt;</code> plus <code>Vary: Accept-Encoding</code> (merged into
+any existing <code>Vary</code>) are set. <code>Vary</code> is ALSO added to responses that
+were candidates but skipped (too small, wrong content type, no
+acceptable coding) so shared caches key them correctly alongside
+their compressed siblings — the proxy handles that half.</p>
+<p>The three codecs are Write-based streaming encoders (flate2 gzip,
+brotli, zstd) all draining into one shared output sink the wrapper reads
+compressed bytes back out of; each carries the per-algorithm level
+clamp (gzip 0-9, brotli 0-11, zstd 0-22; defaults 6/5/3 — zstd 3 and
+brotli 5 sit at the fast end of their useful range, the right bias
+for a per-route default on a hot proxy path).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.CompressedBody.html" title="struct dwara_core::dataplane::compression::CompressedBody">Compressed<wbr>Body</a></dt><dd>Compressing wrapper over a <a href="../proxy/enum.ProxyBody.html" title="enum dwara_core::dataplane::proxy::ProxyBody"><code>ProxyBody</code></a> (DW-027). Streams: every
+inner data frame goes through the codec and comes back as (at most)
+one emitted frame of pending output; the codec is finished when the
+inner stream ends, and any trailing headers observed on the inner
+stream are re-emitted AFTER the compressed bytes (trailers ride
+after the body; compression does not touch them).</dd><dt><a class="struct" href="struct.CompressionPlan.html" title="struct dwara_core::dataplane::compression::CompressionPlan">Compression<wbr>Plan</a></dt><dd>The negotiated coding for one response.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.decide.html" title="fn dwara_core::dataplane::compression::decide">decide</a></dt><dd>Decide whether THIS response gets compressed under the policy
+(DW-027): status, existing encoding, known size, content type, and
+negotiation all have to line up. <code>None</code> = pass through (the caller
+still adds <code>Vary: Accept-Encoding</code> for cache correctness).</dd><dt><a class="fn" href="fn.negotiate.html" title="fn dwara_core::dataplane::compression::negotiate">negotiate</a></dt><dd>Negotiate the coding for one response (DW-027): the first policy
+algorithm the request accepts wins; <code>None</code> = serve identity.</dd><dt><a class="fn" href="fn.wrap_response.html" title="fn dwara_core::dataplane::compression::wrap_response">wrap_<wbr>response</a></dt><dd>Apply a plan to a response (DW-027): header rewrite + body wrap.
+<code>Content-Length</code> is removed (the encoded length differs); the
+encoding token and <code>Vary: Accept-Encoding</code> are set.</dd></dl></section></div></main></body></html>

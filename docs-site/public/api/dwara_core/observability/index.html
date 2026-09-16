@@ -1,0 +1,289 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Observability substrate (DW-021, feature analysis sections 4.17 and 4.19): tracing spans per request phase, structured JSON access logs, Prometheus metrics, request IDs, and the unified error envelope."><title>dwara_core::observability - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module observability</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module observability</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#tracing-and-spans" title="Tracing and spans">Tracing and spans</a></li><li><a href="#otlp-decision" title="OTLP decision">OTLP decision</a></li><li><a href="#access-logs" title="Access logs">Access logs</a></li><li><a href="#metrics" title="Metrics">Metrics</a></li><li><a href="#otel-genai-semantic-conventions-ai-07" title="OTel GenAI semantic conventions (AI-07)">OTel GenAI semantic conventions (AI-07)</a></li><li><a href="#error-envelope-section-419" title="Error envelope (section 4.19)">Error envelope (section 4.19)</a></li><li><a href="#request-ids" title="Request IDs">Request IDs</a></li><li><a href="#redaction-rules-hard-requirements" title="Redaction rules (hard requirements)">Redaction rules (hard requirements)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>observability</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/observability.rs.html#1-3496">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Observability substrate (DW-021, feature analysis sections 4.17 and
+4.19): tracing spans per request phase, structured JSON access logs,
+Prometheus metrics, request IDs, and the unified error envelope.</p>
+<h3 id="tracing-and-spans"><a class="doc-anchor" href="#tracing-and-spans">§</a>Tracing and spans</h3>
+<p><code>tracing</code> (MIT) is the substrate. Every request opens a root span
+named <code>request</code> carrying <code>request_id</code>, <code>method</code>, <code>path</code> (WITHOUT the
+query string — redaction: query strings carry tokens), <code>consumer</code>,
+<code>route</code>, and <code>listener</code> fields, plus child spans at each phase:
+<code>authn</code>, <code>authz</code>, <code>ratelimit</code>, <code>admission</code>, <code>upstream_pick</code> (emitted
+inside the upstream handle where the pick actually happens), and one
+<code>upstream_attempt</code> span per send. The binary installs a
+<code>tracing-subscriber</code> JSON formatter over STDOUT filtered by
+<code>DWARA_LOG</code> (RUST_LOG syntax, default <code>dwara=info</code>).</p>
+<h3 id="otlp-decision"><a class="doc-anchor" href="#otlp-decision">§</a>OTLP decision</h3>
+<p>The OTLP exporter (<code>opentelemetry</code> + <code>opentelemetry-otlp</code>) was
+evaluated and NOT added in v1: the crates are heavy (their own HTTP
+transport, tonic/protonic codegen) against a musl &lt;25MB binary-size
+budget (DW-026) and a compute-conscious CI. The span STRUCTURE ships
+now and is proven by an in-process span-capture test (one trace shows
+all phases). Since #126 the exporter exists behind the default-off
+<code>otlp</code> cargo FEATURE on dwara-bin (the env var <code>DWARA_OTLP_ENDPOINT</code>
+is a binary-level knob and the tracing subscriber the exporter must
+hook lives in the bin; this module stays dependency-light by design).
+Default build: <code>DWARA_OTLP_ENDPOINT</code> remains RESERVED but inert;
+feature build: the spans defined here export over http/protobuf.</p>
+<h3 id="access-logs"><a class="doc-anchor" href="#access-logs">§</a>Access logs</h3>
+<p>One event at target <code>dwara::access</code> per completed request (rendered
+as one JSON line by the binary’s subscriber): <code>ts</code> (subscriber
+timestamp), <code>request_id</code>, <code>method</code>, <code>path</code> (sanitized: no query),
+<code>status</code>, <code>duration_ms</code>, <code>route</code>, <code>consumer</code>, <code>upstream</code>,
+<code>endpoint</code>, <code>attempts</code>, and the <code>rate_limited</code> / <code>broken</code> / <code>shed</code>
+flags. <code>bytes_in</code>/<code>bytes_out</code> are deliberately omitted: the proxy
+path is zero-buffering by design (DW-009) and body sizes are not
+cheaply available for streamed bodies — recorded here as an honest
+omission rather than a wrong number. Sampling: <code>DWARA_ACCESS_LOG_ SAMPLE</code> (0.0-1.0, default 1.0); responses with status &gt;= 500 are
+ALWAYS logged regardless of sampling (documented rule).</p>
+<h3 id="metrics"><a class="doc-anchor" href="#metrics">§</a>Metrics</h3>
+<p>Prometheus text format on <code>/metrics</code>, reserved on every HTTP(S)
+listener exactly like <code>/healthz</code> (a configured route matching it is
+shadowed — same accepted v1 behavior). The <code>prometheus</code> crate (MIT,
+default features off: text format only, no protobuf exporter) backs
+the registry. Metric families:</p>
+<ul>
+<li><code>requests_total{route,listener,status_class}</code> counter</li>
+<li><code>request_duration_seconds{route}</code> histogram</li>
+<li><code>upstream_attempts_total{upstream,endpoint,status_class}</code> counter</li>
+<li><code>retries_total{upstream}</code> counter</li>
+<li><code>dwara_hedge_sent_total{upstream}</code> counter (DW-063) — speculative
+hedge copies sent after the tail-latency timer fired</li>
+<li><code>dwara_mirror_sent_total{upstream}</code> counter (DW-062) — shadow
+traffic mirror requests sent to a mirror upstream</li>
+<li><code>rate_limited_total{route}</code> counter</li>
+<li><code>dwara_rate_limiter_adaptive_factor{policy}</code> gauge (DW-089) — the
+current adaptive rate-limit factor per policy (1.0 = configured
+rate; &lt; 1.0 tightens, &gt; 1.0 relaxes; bounded [min, max])</li>
+<li><code>dwara_rate_limiter_origin_signal_total{policy,signal}</code> counter
+(DW-089) — upstream origin signals received (<code>retry_after</code>), by
+policy and signal (both config-bounded)</li>
+<li><code>dwara_rate_limiter_adaptive_tightened_total{policy}</code> counter
+(DW-089) — adaptive factor decreases, by policy</li>
+<li><code>dwara_rate_limiter_adaptive_relaxed_total{policy}</code> counter
+(DW-089) — adaptive factor increases, by policy</li>
+<li><code>dwara_canary_promotions_total{group}</code> counter (DW-091) — canary
+promotions, by group (service name or AI alias)</li>
+<li><code>dwara_canary_rollbacks_total{group}</code> counter (DW-091) — canary
+rollbacks (including severe-regression immediate rollbacks to 0)</li>
+<li><code>dwara_canary_weight{group}</code> gauge (DW-091) — current canary
+weight, by group (the total weight stays constant)</li>
+<li><code>shed_total{priority}</code> counter</li>
+<li><code>dwara_policy_dry_run_total{phase,route}</code> counter (DW-041) —
+requests a dry-run (monitor) policy would have rejected, by phase
+(<code>route_limits</code>, <code>authz</code>, <code>rate_limit</code>, <code>load_shed</code>) and route
+(<code>unrouted</code> for pre-404 listener/global policies); the request was
+ALLOWED. Together with the <code>dwara::policy</code> warn events (phase,
+would-be status, reason, route, consumer, request id) this family
+IS the dry-run report — no separate endpoint.</li>
+<li><code>breaker_state{upstream}</code> gauge (0 closed, 1 open, 2 half-open)</li>
+<li><code>endpoint_health{upstream,endpoint}</code> gauge (1 available, 0 ejected)</li>
+<li><code>upstream_fail_open_picks{upstream}</code> gauge (scrape-time snapshot of
+the balancer’s monotonic fail-open counter; a gauge rather than a
+counter so the hot pick path stays free of registry coupling)</li>
+<li><code>active_requests</code> gauge</li>
+<li><code>config_generation</code> gauge</li>
+<li><code>jwks_refresh_total{provider}</code> counter</li>
+<li><code>dwara_rate_limiter_evictions_total</code> gauge (scrape-time snapshot
+of the rate-limit engine’s monotonic eviction counter, aggregated
+over every compiled rule; resets when a reload rebuilds the
+engine; a gauge rather than a counter so the hot check path stays
+free of registry coupling)</li>
+<li><code>dwara_rate_limiter_live_keys</code> gauge (live per-key cells across
+every compiled rule, approximate, bounded by the sharded store
+cap; aggregate and unlabeled — cardinality is never per key)</li>
+<li><code>dwara_webhook_events_total{kind,outcome}</code> counter (DW-044):
+webhook deliveries by event kind and outcome — <code>delivered</code> (2xx
+on some attempt), <code>failed</code> (retries exhausted / non-transient
+answer / budget spent), <code>dropped</code> (never tried: envelope over the
+byte cap, or delivery concurrency saturated). Both labels are
+closed sets, so cardinality is bounded by construction.</li>
+<li><code>dwara_events_dropped_total</code> / <code>dwara_events_emitted_total</code>
+gauges (DW-044, scrape-time snapshots of the event bus’s
+monotonic counters — gauges rather than counters so the emit path
+stays a plain atomic with zero registry coupling, the same model
+as the rate-limiter eviction gauge): events dropped at EMIT time
+(full queue / no deliverer) and events handed to the queue.</li>
+<li><code>dwara_access_records_streamed_total{outcome}</code> counter (DW-121):
+access records counted per flushed-batch delivery outcome —
+<code>delivered</code> / <code>failed</code> (tried and not taken) / <code>dropped</code>
+(per-record byte cap) — a closed three-value label set, counted
+by the stream flusher, never the request path.</li>
+<li><code>dwara_access_records_offered_total</code> /
+<code>dwara_access_records_dropped_total</code> gauges (DW-121, scrape-time
+snapshots of the record stream’s monotonic counters, the same
+gauge-not-counter model as the event bus): records offered at
+request completion and records dropped at OFFER time (channel
+full / stream disabled).</li>
+<li><code>dwara_quota_denied_total{consumer,budget}</code> counter (DW-033) —
+requests refused by a consumer request budget (429), by consumer
+(the quota-configured set, config-bounded) and binding budget
+(<code>daily</code>/<code>monthly</code>, a closed set). Distinct from
+<code>rate_limited_total</code>: budgets are not rates.</li>
+<li><code>dwara_quota_used{consumer,budget}</code> / <code>dwara_quota_limit{consumer, budget}</code> gauges (DW-033, scrape-time snapshots of the state
+store’s quota counters and the config caps — the same snapshot
+gauge model as the rate-limiter live-keys gauge).</li>
+<li><code>dwara_admission_queued_total{outcome}</code> counter (DW-053) —
+admission queue outcomes by closed set <code>admitted</code> (a permit was
+acquired after queueing), <code>timeout</code> (the queue timeout expired;
+shed with 503), <code>queue_full</code> (the queue was at capacity; shed
+immediately with 503).</li>
+<li><code>dwara_admission_queue_depth</code> gauge (DW-053) — current number of
+requests waiting in the admission queue for a concurrency permit.</li>
+<li><code>dwara_license_status</code> gauge (DW-032) — 0 = no license (OSS mode),
+1 = valid, 2 = expired within grace period, 3 = expired past grace
+period (degraded to OSS). Set at startup and on reload; no labels.</li>
+<li><code>dwara_dns_discovery_endpoints{upstream}</code> gauge (DW-042) — current
+resolved endpoint count for DNS-discovered upstreams. The <code>upstream</code>
+label is config-bounded; cardinality is never per resolved address.</li>
+<li><code>dwara_dns_discovery_refresh_total{upstream}</code> counter (DW-042) — DNS
+discovery refresh attempts, by upstream (config-bounded label).</li>
+<li><code>dwara_dns_discovery_refresh_failures_total{upstream}</code> counter
+(DW-042) — DNS discovery refresh failures, by upstream.</li>
+<li><code>dwara_mcp_sessions_total{state}</code> counter (DW-087) — MCP session
+lifecycle transitions, by state (<code>initialized</code>, <code>closed</code>,
+<code>expired</code>). A closed three-value label set, so cardinality is
+three series total.</li>
+<li><code>dwara_mcp_tool_calls_total{tool,status}</code> counter (DW-087) — MCP
+tool calls, by tool (config-bounded) and status (<code>success</code>,
+<code>error</code>, <code>denied</code>). No consumer label (cardinality rule).</li>
+<li><code>dwara_mcp_tool_duration_seconds{tool}</code> histogram (DW-087) — MCP
+tool call duration (authz check through upstream response), by
+tool (config-bounded label).</li>
+<li><code>dwara_a2a_requests_total{agent,outcome}</code> counter (DW-114) — A2A
+(agent-to-agent) requests, by agent (config-bounded) and outcome
+(<code>success</code>, <code>error</code>, <code>stubbed</code>). No consumer label (cardinality
+rule).</li>
+<li><code>dwara_a2a_sessions_total{state}</code> counter (DW-114) — A2A session
+lifecycle transitions, by state (<code>initialized</code>, <code>closed</code>,
+<code>expired</code>). A closed three-value label set (mirrors MCP), so
+cardinality is three series total.</li>
+<li><code>dwara_tls_pq_handshakes_total{result}</code> counter (DW-105) —
+post-quantum TLS handshake outcomes, by result (<code>success</code>,
+<code>fallback</code>, <code>disabled</code>). A closed three-value label set, so
+cardinality is three series total.</li>
+<li><code>dwara_graphql_requests_total{route,outcome}</code> counter (DW-099) —
+GraphQL check outcomes, by route (config-bounded) and outcome
+(<code>allowed</code>, <code>depth_exceeded</code>, <code>complexity_exceeded</code>,
+<code>persisted_query_required</code> — a closed four-value set).</li>
+<li><code>dwara_graphql_depth{route}</code> gauge (DW-099) — last query depth for
+a GraphQL-configured route (config-bounded label).</li>
+<li><code>dwara_nano_service_requests_total{route,outcome}</code> counter (DW-106)
+— nano-service (WASM route handler) request outcomes, by route
+(config-bounded) and outcome (<code>success</code>, <code>error</code>, <code>timeout</code> — a
+closed three-value set). No consumer label (cardinality rule).</li>
+<li><code>dwara_nano_service_duration_seconds{route}</code> histogram (DW-106) —
+nano-service <code>handle</code> call duration, by route (config-bounded
+label).</li>
+<li><code>dwara_plugin_failures_total{name,reason}</code> counter (DW-157) —
+plugin dispatch failures, by plugin name (config-bounded) and
+reason (<code>crashed</code>, <code>disabled</code>, <code>not_loaded</code>, <code>not_registered</code>,
+<code>instantiate_failed</code>, <code>trap</code>, <code>body_too_large</code>,
+<code>response_stream_ended</code> — a closed set).
+One increment per request the plugin chain answered with an error
+(a plugin short-circuit via <code>send_http_response</code> is a plugin
+DECISION, not a failure, and is not counted; the access-log
+<code>plugin_short_circuit</code> flag marks those).</li>
+<li><code>dwara_plugin_total{state}</code> gauge (DW-158) — plugins loaded per
+lifecycle state (<code>healthy</code>, <code>crashed</code>, <code>disabled</code>, <code>not_loaded</code>,
+<code>not_registered</code> — a closed five-value set over the generation’s
+declared plugins, the same enumeration <code>GET /plugins</code> serves).
+Refreshed at publish time (every config generation); state changes
+that happen between publishes (a crash counted at request time)
+land on the next publish or are visible per-request in
+<code>dwara_plugin_failures_total</code>.</li>
+<li><code>dwara_graphql_complexity{route}</code> gauge (DW-099) — last query
+complexity for a GraphQL-configured route (config-bounded label).</li>
+<li><code>dwara_l4_connections_total{listener,protocol}</code> counter (DW-103) —
+L4 connections proxied, by listener (config-bounded) and protocol
+(<code>tcp</code>, <code>udp</code> — a closed two-value set). Counted once per accepted
+L4 connection (before the splice is established).</li>
+<li><code>dwara_l4_connection_duration_seconds{listener}</code> histogram
+(DW-103) — L4 connection duration (splice establishment through
+close), by listener (config-bounded label).</li>
+<li><code>dwara_ai_request_duration_seconds{provider,route}</code> histogram
+(AI-07) — AI request latency (request parse through response
+translation), by provider and route (both config-bounded). Observed
+once per completed AI request (success and provider/translation
+errors alike; client-side rejections never reach a provider).</li>
+<li><code>dwara_ai_tokens_per_request{provider,model,kind}</code> histogram
+(AI-07) — distribution of provider-reported tokens per request, by
+provider (config-bounded), provider_model (config-bounded), and
+kind (the closed set <code>prompt</code> | <code>completion</code>). Provider-reported
+only; the gateway never estimates. No consumer label (cardinality).</li>
+</ul>
+<h3 id="otel-genai-semantic-conventions-ai-07"><a class="doc-anchor" href="#otel-genai-semantic-conventions-ai-07">§</a>OTel GenAI semantic conventions (AI-07)</h3>
+<p>AI request spans carry the OpenTelemetry GenAI semantic-convention
+<code>gen_ai.*</code> attributes (<a href="https://opentelemetry.io/docs/specs/semconv/gen-ai/">https://opentelemetry.io/docs/specs/semconv/gen-ai/</a>):
+<code>gen_ai.system</code> (the provider kind), <code>gen_ai.request.model</code>
+(the client alias), <code>gen_ai.response.model</code> (the provider model that
+served), <code>gen_ai.request.{max_tokens,temperature,top_p}</code>, and the
+provider-reported <code>gen_ai.usage.{prompt_tokens,completion_tokens, total_tokens}</code>, <code>gen_ai.response.finish_reasons</code>, and
+<code>gen_ai.response.id</code>. The helpers <a href="fn.record_gen_ai_request_attrs.html" title="fn dwara_core::observability::record_gen_ai_request_attrs"><code>record_gen_ai_request_attrs</code></a> and
+<a href="fn.record_gen_ai_response_attrs.html" title="fn dwara_core::observability::record_gen_ai_response_attrs"><code>record_gen_ai_response_attrs</code></a> record them onto a span created with
+every <code>gen_ai.*</code> field declared <code>Empty</code> (the span lives in
+<code>dataplane::ai_proxy::serve_ai</code>).</p>
+<h3 id="error-envelope-section-419"><a class="doc-anchor" href="#error-envelope-section-419">§</a>Error envelope (section 4.19)</h3>
+<p>Every gateway-generated non-success body — including the reserved
+<code>/healthz</code>/<code>/readyz</code> responses, which are aligned to the same shape —
+is <code>{"error":{"code","message","request_id"}}</code>. Messages never leak
+upstream internals: classification strings only (“upstream
+unavailable”, not hyper error text).</p>
+<h3 id="request-ids"><a class="doc-anchor" href="#request-ids">§</a>Request IDs</h3>
+<p>An inbound <code>X-Request-Id</code> is respected when it is printable ASCII of
+at most 128 bytes (anything else is replaced — a hostile ID must not
+smuggle control bytes into logs); otherwise a process-unique ID is
+generated (wall-clock nanoseconds + per-process counter — cheaper
+than a UUID, no extra dependency). The ID is echoed on the response
+as <code>X-Request-Id</code> and available to every span and log line.</p>
+<h3 id="redaction-rules-hard-requirements"><a class="doc-anchor" href="#redaction-rules-hard-requirements">§</a>Redaction rules (hard requirements)</h3>
+<ul>
+<li>Paths are logged WITHOUT query strings.</li>
+<li>No Authorization / Proxy-Authorization / Cookie / Set-Cookie /
+X-API-Key VALUES are ever emitted by this module or the tracing
+calls it fronts; field lists below are exhaustive.</li>
+<li>JWKS bodies, credentials, and keys are never logged.</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AccessRecord.html" title="struct dwara_core::observability::AccessRecord">Access<wbr>Record</a></dt><dd>The accumulated access-log record for one request. The proxy fills
+fields as the request progresses; <code>finish</code> stamps status/duration.</dd><dt><a class="struct" href="struct.ListenerLabel.html" title="struct dwara_core::observability::ListenerLabel">Listener<wbr>Label</a></dt><dd>Extension inserted by the listener frontend (dwara-bin) naming the
+listener that accepted the request; absent when <code>proxy::handle</code> is
+driven directly (tests), in which case the label is “unknown”.</dd><dt><a class="struct" href="struct.Observability.html" title="struct dwara_core::observability::Observability">Observability</a></dt><dd>Per-dataplane observability state: the metric families plus the
+access-log sampling knob. One instance per <code>DataPlane</code>, so parallel
+tests never share a registry (duplicate-metric registration errors).</dd><dt><a class="struct" href="struct.SloTargets.html" title="struct dwara_core::observability::SloTargets">SloTargets</a></dt><dd>Plain per-route SLO targets. Primitives on purpose: observability
+depends on nothing, so the config types are converted at the call
+site (dataplane refresh).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.X_CORRELATION_ID.html" title="constant dwara_core::observability::X_CORRELATION_ID">X_<wbr>CORRELATION_<wbr>ID</a></dt><dd>Request header carrying the business correlation ID (DW-093):
+inbound respected (falls back to <code>X-Request-Id</code>), outbound echoed
+on the response so a client can tie a reply to its journey across
+multiple gateway requests.</dd><dt><a class="constant" href="constant.X_REQUEST_ID.html" title="constant dwara_core::observability::X_REQUEST_ID">X_<wbr>REQUEST_<wbr>ID</a></dt><dd>Request header carrying the correlation ID (inbound respected,
+outbound always set by the gateway).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.emit_access.html" title="fn dwara_core::observability::emit_access">emit_<wbr>access</a></dt><dd>Emit one access-log event (one JSON line under the binary’s
+subscriber). The field list is exhaustive and redacted by
+construction: no headers, no query string, no credentials.
+<code>bytes_in</code>/<code>bytes_out</code> (PERF-12, #209): <code>bytes_in</code> is the declared
+<code>Content-Length</code> (0 for chunked); <code>bytes_out</code> is the frame-counted
+response body size (read from the atomic the <code>CountingBody</code>
+wrapper updated as frames streamed to the client).</dd><dt><a class="fn" href="fn.envelope_body.html" title="fn dwara_core::observability::envelope_body">envelope_<wbr>body</a></dt><dd>The unified error body (section 4.19): a JSON object an operator can
+grep and a client can correlate. <code>code</code> is a stable machine token,
+<code>message</code> a human string with no upstream internals, <code>request_id</code>
+ties the response to the trace/access log.</dd><dt><a class="fn" href="fn.generate_request_id.html" title="fn dwara_core::observability::generate_request_id">generate_<wbr>request_<wbr>id</a></dt><dd>Public for testing the request-id generation contract.</dd><dt><a class="fn" href="fn.record_gen_ai_request_attrs.html" title="fn dwara_core::observability::record_gen_ai_request_attrs">record_<wbr>gen_<wbr>ai_<wbr>request_<wbr>attrs</a></dt><dd>Record the request-side OTel GenAI semantic-convention attributes
+(AI-07) onto an AI span. The span MUST have been created with every
+<code>gen_ai.*</code> field declared as <code>tracing::field::Empty</code> (see
+<code>gen_ai_span_fields</code>); <code>Span::record</code> only fills fields the span’s
+metadata already declared. Request-side fields are always available
+once the canonical <a href="../ai/types/struct.ChatRequest.html" title="struct dwara_core::ai::types::ChatRequest"><code>crate::ai::types::ChatRequest</code></a> is parsed; the
+<code>system</code> is the serving provider’s kind
+(<a href="../config/ai/enum.AiProviderKind.html#method.gen_ai_system" title="method dwara_core::config::ai::AiProviderKind::gen_ai_system"><code>crate::config::ai::AiProviderKind::gen_ai_system</code></a>).</dd><dt><a class="fn" href="fn.record_gen_ai_response_attrs.html" title="fn dwara_core::observability::record_gen_ai_response_attrs">record_<wbr>gen_<wbr>ai_<wbr>response_<wbr>attrs</a></dt><dd>Record the response-side OTel GenAI semantic-convention attributes
+(AI-07) onto an AI span. Each argument is recorded only when present
+(provider-reported only; the gateway never estimates). <code>finish_reasons</code>
+is the per-choice finish-reason token list (one entry per choice).</dd><dt><a class="fn" href="fn.resolve_correlation_id.html" title="fn dwara_core::observability::resolve_correlation_id">resolve_<wbr>correlation_<wbr>id</a></dt><dd>Resolve the request’s business correlation ID (DW-093): a valid
+inbound <code>X-Correlation-Id</code> verbatim, else the already-resolved
+<code>request_id</code> (so every request carries a non-empty correlation
+handle for the journey/funnel query even when the client did not
+send one). The validity gate mirrors <code>valid_inbound_request_id</code>
+(printable ASCII, at most 128 bytes) so hostile IDs cannot smuggle
+control characters into the analytics store.</dd><dt><a class="fn" href="fn.resolve_request_id.html" title="fn dwara_core::observability::resolve_request_id">resolve_<wbr>request_<wbr>id</a></dt><dd>Resolve the request’s correlation ID: a valid inbound <code>X-Request-Id</code>
+verbatim, else a generated one (<code>req-</code> + hex wall-clock nanoseconds +
+hex process counter; unique per process, no dependency pulled in for
+randomness — request IDs are correlation handles, not secrets).</dd><dt><a class="fn" href="fn.stamp_correlation_id.html" title="fn dwara_core::observability::stamp_correlation_id">stamp_<wbr>correlation_<wbr>id</a></dt><dd>Echo the correlation ID onto a response (insert, never append:
+exactly one <code>X-Correlation-Id</code>, the gateway’s resolved one).</dd><dt><a class="fn" href="fn.stamp_request_id.html" title="fn dwara_core::observability::stamp_request_id">stamp_<wbr>request_<wbr>id</a></dt><dd>Echo a request ID onto a response (insert, never append: exactly one
+<code>X-Request-Id</code>, the gateway’s resolved one).</dd><dt><a class="fn" href="fn.status_class.html" title="fn dwara_core::observability::status_class">status_<wbr>class</a></dt><dd>Prometheus status-class label (“2xx”, “5xx”, …).</dd><dt><a class="fn" href="fn.valid_inbound_request_id.html" title="fn dwara_core::observability::valid_inbound_request_id">valid_<wbr>inbound_<wbr>request_<wbr>id</a></dt><dd>Validate an inbound <code>X-Request-Id</code> value: printable ASCII (0x20-0x7E),
+at most 128 bytes. Anything else (control bytes, UTF-8 multibyte,
+overlong) is rejected so hostile IDs cannot smuggle control
+characters into logs.</dd></dl></section></div></main></body></html>

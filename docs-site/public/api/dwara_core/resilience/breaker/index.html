@@ -1,0 +1,73 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Per-upstream circuit breaker (DW-015, feature analysis 4.11)."><title>dwara_core::resilience::breaker - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module breaker</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module breaker</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-it-is" title="What it is">What it is</a></li><li><a href="#states-and-transitions" title="States and transitions">States and transitions</a></li><li><a href="#observation-points" title="Observation points">Observation points</a></li><li><a href="#reload-semantics" title="Reload semantics">Reload semantics</a></li><li><a href="#events-dw-044" title="Events (DW-044)">Events (DW-044)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>resilience</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">resilience</a></div><h1>Module <span>breaker</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/resilience/breaker.rs.html#1-369">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Per-upstream circuit breaker (DW-015, feature analysis 4.11).</p>
+<h2 id="what-it-is"><a class="doc-anchor" href="#what-it-is">§</a>What it is</h2>
+<p>The breaker gates an ENTIRE upstream (all endpoints) when that upstream
+is failing as a whole. It is a different layer from DW-012 per-ENDPOINT
+ejection: ejection removes individual endpoints from load-balancer
+rotation, the breaker stops sending ANY traffic to the upstream for a
+cooling-off period. When every endpoint is ejected the balancer
+fail-opens and picks anyway (DW-012); that pick still flows THROUGH the
+breaker — the breaker gates the upstream, ejection gates endpoints
+within it. The two never consume each other’s state: an open breaker
+short-circuits before the balancer is consulted, so a breaker-open
+period ejects nothing (passive health sees no traffic, hence no
+failures, hence no ejections), and ejections never open the breaker.</p>
+<h2 id="states-and-transitions"><a class="doc-anchor" href="#states-and-transitions">§</a>States and transitions</h2>
+<ul>
+<li><strong>Closed</strong> (healthy): requests flow. Failures are counted two ways —
+a consecutive-failure streak and a rolling-window error ratio. The
+breaker OPENS when either trips: the streak reaches
+<code>consecutive_failures</code> (default 5), or the window holds at least
+<code>error_volume</code> (default 20) observations AND
+<code>failures / observations &gt;= error_ratio</code> (default 0.5). The window is
+60 seconds, the same rolling-event pattern as the retry budget.</li>
+<li><strong>Open</strong> (tripped): every request fails fast with <code>503</code> (body
+“upstream circuit open”) and a <code>Retry-After</code> header carrying the
+whole seconds until half-open (rounded up, minimum 1). No attempts
+are made — no endpoint pick, no retries. Requests already in flight
+when the breaker opened complete normally (documented).</li>
+<li><strong>HalfOpen</strong> (probing): after <code>open_ms</code> (default 30000) the next
+request is admitted as a trial probe (up to <code>half_open_probes</code>
+concurrent probes, default 1). A successful probe CLOSES the breaker
+(all counters reset, window cleared); a failed probe re-OPENS it for
+another <code>open_ms</code>. While all probes are in flight, further requests
+fail fast like Open (Retry-After: 1 second, the documented probing
+hint — exact half-open time is unknowable while a probe runs).
+A retried request consumes one half-open probe slot per attempt:
+each attempt is a trial.</li>
+</ul>
+<h2 id="observation-points"><a class="doc-anchor" href="#observation-points">§</a>Observation points</h2>
+<p>The breaker is evaluated at the SAME observation points as passive
+health: when an attempt’s response HEADERS resolve — transport errors
+and statuses &gt;= 500 are failures, everything else (1xx-4xx) is a
+success and counts toward the ratio denominator. Every retry attempt
+reports too (each attempt is a real exchange with the upstream). A
+mid-BODY abort after headers resolved does not open the breaker: the
+exchange was classified at header time (it is still reported to
+endpoint health per DW-014).</p>
+<p>Failure classification is intentionally identical to passive health so
+operators reason about one notion of “failure” across both layers.</p>
+<p>Timing is wall-clock (<code>SystemTime</code>): an NTP step can lengthen or
+shorten a wall-clock Open period.</p>
+<h2 id="reload-semantics"><a class="doc-anchor" href="#reload-semantics">§</a>Reload semantics</h2>
+<p>Breaker STATE (current state, streak, window) is carried across config
+reloads keyed by upstream name — exactly like balancer state and the
+retry budget. Breaker PARAMETERS apply from the new config
+(<code>BreakerParams</code> is resolved per generation, <code>Breaker</code> holds state
+only, and every method takes the params explicitly — the same
+split as <code>RetryParams</code>/<code>RetryBudget</code>).</p>
+<h2 id="events-dw-044"><a class="doc-anchor" href="#events-dw-044">§</a>Events (DW-044)</h2>
+<p>A breaker constructed with
+<a href="struct.Breaker.html#method.with_clock_and_events" title="associated function dwara_core::resilience::breaker::Breaker::with_clock_and_events"><code>Breaker::with_clock_and_events</code></a> emits one event
+per STATE TRANSITION (never per report): <code>breaker_opened</code> (with the
+rule that tripped, or “half_open_probe_failed” for a failed probe
+re-opening it), <code>breaker_half_open</code> (the first admitted probe after
+the cooling-off), and <code>breaker_closed</code> (a successful probe). Emission
+is the event bus’s bounded non-blocking hand-off — a full queue drops
+and counts, never blocks the report path. A <code>None</code> emitter (every
+direct/test construction) is a documented no-op.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Breaker.html" title="struct dwara_core::resilience::breaker::Breaker">Breaker</a></dt><dd>Per-upstream circuit breaker state (see the module docs). Share via
+<code>Arc</code> from the upstream handle; the lock is taken once per attempt
+(report) and once per request admission (check).</dd><dt><a class="struct" href="struct.BreakerParams.html" title="struct dwara_core::resilience::breaker::BreakerParams">Breaker<wbr>Params</a></dt><dd>Resolved (validated) breaker parameters for one upstream. <code>None</code> on the
+upstream handle disables the breaker entirely — the no-config behavior
+is bit-identical to pre-DW-015.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.BreakerDecision.html" title="enum dwara_core::resilience::breaker::BreakerDecision">Breaker<wbr>Decision</a></dt><dd>Admission decision for one request about to be dispatched.</dd><dt><a class="enum" href="enum.BreakerState.html" title="enum dwara_core::resilience::breaker::BreakerState">Breaker<wbr>State</a></dt><dd>Breaker state snapshot (observability/tests).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BREAKER_WINDOW_MS.html" title="constant dwara_core::resilience::breaker::BREAKER_WINDOW_MS">BREAKER_<wbr>WINDOW_<wbr>MS</a></dt><dd>Rolling window the error ratio accounts over (milliseconds).</dd><dt><a class="constant" href="constant.HALF_OPEN_RETRY_AFTER_MS.html" title="constant dwara_core::resilience::breaker::HALF_OPEN_RETRY_AFTER_MS">HALF_<wbr>OPEN_<wbr>RETRY_<wbr>AFTER_<wbr>MS</a></dt><dd>Retry-After (milliseconds) advertised while half-open probes are in
+flight (exact half-open time is unknowable until a probe resolves).</dd></dl></section></div></main></body></html>

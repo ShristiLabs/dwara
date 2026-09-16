@@ -1,0 +1,51 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Route-scoped CORS (DW-027, feature analysis 4.14)."><title>dwara_core::dataplane::cors - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module cors</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module cors</a></h2><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>cors</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/cors.rs.html#1-196">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Route-scoped CORS (DW-027, feature analysis 4.14).</p>
+<p>Two phases, both driven by one <a href="../../config/struct.Cors.html" title="struct dwara_core::config::Cors"><code>Cors</code></a> policy attached to a route:</p>
+<ul>
+<li><strong>Preflight short-circuit</strong> (<a href="fn.is_preflight.html" title="fn dwara_core::dataplane::cors::is_preflight"><code>is_preflight</code></a> +
+<a href="fn.preflight_response.html" title="fn dwara_core::dataplane::cors::preflight_response"><code>preflight_response</code></a>): an <code>OPTIONS</code> request carrying BOTH <code>Origin</code>
+and <code>Access-Control-Request-Method</code> on a CORS-configured route is
+answered 204 by the gateway immediately after route resolution and
+the route-scoped limit checks — before authentication,
+authorization, rate limiting, and cap admission, and NEVER proxied
+upstream. Browsers send preflights without credentials, so gating
+them on authn would break every credentialed route; they are also
+pure metadata probes, so admitting them to the concurrency cap
+would let a hostile page burn slots cheaply. A preflight that
+fails validation (origin, method, or requested headers not
+allowed) is still short-circuited — 204 with NO CORS headers,
+which the browser reads as a failed preflight. A plain <code>OPTIONS</code>
+without the preflight markers is NOT intercepted and proxies
+normally. A preflight whose route <code>match.methods</code> list excludes
+<code>OPTIONS</code> never resolves the route at all (404, the documented
+request-path order) — include <code>OPTIONS</code> in the method list of CORS
+routes.</li>
+<li><strong>Actual-response decoration</strong> (<a href="fn.decorate_actual.html" title="fn dwara_core::dataplane::cors::decorate_actual"><code>decorate_actual</code></a>): responses on
+the route (every action: proxy, redirect, respond) carry
+<code>Access-Control-Allow-Origin</code> (<code>*</code>, or the echoed request origin
+under a specific list), <code>Access-Control-Allow-Credentials: true</code>
+when configured, <code>Access-Control-Expose-Headers</code> when configured,
+and <code>Vary: Origin</code> (merged; see <a href="../hardening/fn.merge_vary.html" title="fn dwara_core::dataplane::hardening::merge_vary"><code>crate::dataplane::hardening::merge_vary</code></a>).
+A request whose <code>Origin</code> is not allowed gets NO CORS headers — the
+response passes through unchanged (same-origin and no-cors reads
+never consult CORS).</li>
+</ul>
+<p>Origin matching uses the shared origin grammar in
+<a href="../../config/fn.normalize_origin.html" title="fn dwara_core::config::normalize_origin"><code>crate::config::normalize_origin</code></a>: exact match on the normalized
+form (lowercase scheme and host, default port dropped, no userinfo)
+or the single config entry <code>*</code>. The config side of that comparison
+is precompiled into <a href="../../config/struct.CompiledCorsOrigins.html" title="struct dwara_core::config::CompiledCorsOrigins"><code>crate::config::CompiledCorsOrigins</code></a> at
+snapshot-compile time (see <a href="../../snapshot/struct.RouteTable.html#method.cors_origins" title="method dwara_core::snapshot::RouteTable::cors_origins"><code>crate::snapshot::RouteTable::cors_origins</code></a>),
+so the request path normalizes only the request’s own <code>Origin</code>.
+Subdomain wildcards (<code>*.example.com</code>) are deliberately not offered
+in v1: an explicit origin list is auditable, a wildcard is not; add
+entries per origin until that tradeoff is worth revisiting.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.decorate_actual.html" title="fn dwara_core::dataplane::cors::decorate_actual">decorate_<wbr>actual</a></dt><dd>Decorate an ACTUAL (non-preflight) response with the route’s CORS
+headers (DW-027). No-ops when the request carried no <code>Origin</code> or an
+origin the policy does not allow. <code>origins</code> is the policy’s
+snapshot-compiled origin set (see <a href="fn.preflight_response.html" title="fn dwara_core::dataplane::cors::preflight_response"><code>preflight_response</code></a>).</dd><dt><a class="fn" href="fn.is_preflight.html" title="fn dwara_core::dataplane::cors::is_preflight">is_<wbr>preflight</a></dt><dd>Is this request a CORS preflight (the only request shape the gateway
+answers without proxying)? Requires <code>OPTIONS</code>, an <code>Origin</code>, and the
+<code>Access-Control-Request-Method</code> marker the Fetch spec defines for
+preflights; anything less is a normal request.</dd><dt><a class="fn" href="fn.preflight_response.html" title="fn dwara_core::dataplane::cors::preflight_response">preflight_<wbr>response</a></dt><dd>Build the gateway-answered preflight response (DW-027): always 204;
+CORS headers only when the preflight validates against the policy.
+<code>origins</code> is the policy’s snapshot-compiled origin set (normalized
+once at compile time, not per request).</dd></dl></section></div></main></body></html>

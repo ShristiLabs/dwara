@@ -1,0 +1,108 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Protocol hardening knobs (DW-023, feature analysis 4.20)."><title>dwara_core::dataplane::hardening - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module hardening</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module hardening</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>hardening</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/hardening.rs.html#1-980">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Protocol hardening knobs (DW-023, feature analysis 4.20).</p>
+<p>Two families of defenses, applied identically to EVERY serving surface
+(data-plane listeners and the admin listener):</p>
+<ol>
+<li>
+<p><strong>Parser/amplification bounds</strong> on hyper’s connection builders, so a
+single hostile connection cannot pin unbounded memory or parse cost:</p>
+<div><table><thead><tr><th>Knob (env)</th><th>Default</th><th>Attack it bounds</th></tr></thead><tbody>
+<tr><td><code>DWARA_HTTP1_MAX_HEADERS</code></td><td>100</td><td>header-count bombs (N header lines per request)</td></tr>
+<tr><td><code>DWARA_HTTP1_MAX_BUF_KIB</code></td><td>64 KiB</td><td>single-header/line size bombs (hyper’s read buffer cap; a header line that does not fit is a 431-class parse failure)</td></tr>
+<tr><td><code>DWARA_HTTP1_HEADER_TIMEOUT_MS</code></td><td>10 000</td><td>SLOWLORIS: a connection that sends headers slower than this is closed before ever reaching a route</td></tr>
+<tr><td><code>DWARA_H2_MAX_CONCURRENT_STREAMS</code></td><td>128</td><td>stream floods over one h2 connection (also advertised to the peer in SETTINGS)</td></tr>
+<tr><td><code>DWARA_H2_STREAM_WINDOW_KIB</code></td><td>1024 (1 MiB)</td><td>per-stream receive buffering a malicious h2 peer can force</td></tr>
+<tr><td><code>DWARA_H2_CONNECTION_WINDOW_KIB</code></td><td>4096 (4 MiB)</td><td>connection-wide h2 receive buffering</td></tr>
+<tr><td><code>DWARA_H2_MAX_SEND_BUF_KIB</code></td><td>1024 (1 MiB)</td><td>outbound h2 send buffer per connection (write-amplification / memory pinning by a non-reading peer)</td></tr>
+</tbody></table>
+</div></li>
+</ol>
+<p>Left deliberately at hyper’s defaults: <code>max_frame_size</code> (16 KiB, the
+minimum legal value — hyper already refuses larger frames) and HTTP/2
+<code>max_headers</code> (hyper-util’s h2 builder has no such knob; the h2 header
+list is bounded by the flow-control windows pinned above).</p>
+<p>A timer is installed on the HTTP/1 builder (<code>TokioTimer</code>) because
+hyper disables <code>header_read_timeout</code> when no timer is configured.</p>
+<ol start="2">
+<li><strong>Request-body inactivity gap</strong> (<code>DWARA_REQUEST_BODY_TIMEOUT_MS</code>,
+default 30 000, <code>0</code> disables): the INBOUND request body handed to the
+dataplane is wrapped in <a href="struct.InboundBody.html" title="struct dwara_core::dataplane::hardening::InboundBody"><code>InboundBody</code></a>, which errors when the gap
+between two body frames exceeds the configured duration. Semantics
+deliberately mirror the DW-014 response-side <code>write_ms</code> wrapper
+(<a href="../upstream/struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody"><code>crate::dataplane::upstream::UpstreamBody</code></a>): it is a GAP timeout, not a total
+budget — a legitimate slow upload (large file over a slow link) that
+keeps making progress never trips it; a client that sends headers and
+then trickles body bytes forever to hold a concurrency slot and an
+upstream connection is cut off after the gap. When the wrapper fires
+the in-flight upstream attempt fails as a transport-class error (the
+proxy answers 502 and closes), and the request’s global concurrency
+slot is released with the response.</li>
+</ol>
+<p>CL+TE request smuggling is NOT configured here because it needs no
+configuration: hyper 1.x’s HTTP/1 parser rejects requests carrying both
+<code>Content-Length</code> and <code>Transfer-Encoding</code> (400/close) outright, and the
+gateway never passes raw bytes to an upstream — every forwarded request
+is rebuilt from hyper-parsed parts, so a smuggled “second request” would
+require hyper itself to mis-parse the first one. Both properties are
+pinned by the smuggling-corpus integration tests in dwara-bin.</p>
+<p>The pre-parse sniff’s timeout is PER-READ, not a total head budget: a
+client that trickles one byte at a time, each inside the
+<code>DWARA_HTTP1_HEADER_TIMEOUT_MS</code> bound, keeps every individual sniff
+read successful, and the guard deliberately hands such connections to
+hyper instead of duplicating a head deadline (preferring handoff over
+racing hyper for the same bytes). The fallback defense for slow
+trickles is therefore hyper’s PER-HEAD <code>header_read_timeout</code> — the
+same knob value, installed on the connection builder together with a
+<code>TokioTimer</code> — which bounds the total time one request head may take
+and closes the connection when it elapses. The two compose as: the
+sniff owns each individual read, hyper owns the head as a whole, so
+neither a stalled connection nor a slow trickle can hold a listener
+slot indefinitely.</p>
+<p>All knobs are read once from the environment at startup (invalid values
+fall back to the documented default) and are process-wide, not
+per-listener: hardening is a property of the parser, not of the route.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DigestingBody.html" title="struct dwara_core::dataplane::hardening::DigestingBody">Digesting<wbr>Body</a></dt><dd>Request body that enforces an HMAC-signed body digest while
+STREAMING (DW-036): every data frame is folded into an incremental
+SHA-256 — nothing is buffered, so a signed body of any size costs
+O(1) memory beyond the frame in flight — and the final digest is
+compared (constant-time, <code>subtle</code>) against the digest the verified
+signature bound at authn time (<code>Identity::body_digest</code>,
+<code>security::authn</code>). A mismatch surfaces as
+<a href="enum.SignatureBodyError.html#variant.DigestMismatch" title="variant dwara_core::dataplane::hardening::SignatureBodyError::DigestMismatch"><code>SignatureBodyError::DigestMismatch</code></a>, aborting the upstream send
+WITH the last frame withheld on declared-length bodies (the digest
+is final the moment the declared byte count is hashed) or at the
+terminating frame on unknown-length bodies: the tampered request
+never completes upstream and the proxy answers 401.</dd><dt><a class="struct" href="struct.HttpHardening.html" title="struct dwara_core::dataplane::hardening::HttpHardening">Http<wbr>Hardening</a></dt><dd>Resolved hardening configuration (see the module docs for the knob
+table, defaults, and the attack each bound addresses).</dd><dt><a class="struct" href="struct.InboundBody.html" title="struct dwara_core::dataplane::hardening::InboundBody">Inbound<wbr>Body</a></dt><dd>Inbound request body with an inactivity-gap timeout (the request-side
+mirror of <a href="../upstream/struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody"><code>crate::dataplane::upstream::UpstreamBody</code></a>). A <code>tokio::time::Sleep</code> is
+armed whenever the stream is idle-Pending and cleared on every frame,
+so the timeout bounds GAPS, not total streaming time. When it fires the
+error propagates through the dataplane’s attempt machinery: the in-flight
+upstream send fails as a transport-class error, the client receives a
+classified 5xx, and the request’s concurrency slot is released.</dd><dt><a class="struct" href="struct.LimitedBody.html" title="struct dwara_core::dataplane::hardening::LimitedBody">Limited<wbr>Body</a></dt><dd>Request body wrapped with a route’s <code>max_body_bytes</code> cap (DW-027):
+counts streamed data frames and errors with
+<a href="enum.LimitedBodyError.html#variant.OverLimit" title="variant dwara_core::dataplane::hardening::LimitedBodyError::OverLimit"><code>LimitedBodyError::OverLimit</code></a> the moment the running total crosses
+the cap — the streaming half of the body limit, for requests whose
+length is not declared up front (chunked, h2 without content-length).
+The error propagates through the dataplane’s attempt machinery; the
+proxy recognizes it in the failure’s source chain and answers 413
+(see <code>proxy::request_limit_exceeded</code>). <code>None</code> cap = thin passthrough
+(the same shape <a href="struct.InboundBody.html" title="struct dwara_core::dataplane::hardening::InboundBody"><code>InboundBody</code></a> takes with no gap configured), so the
+proxy can wrap unconditionally for proxied actions.</dd><dt><a class="struct" href="struct.PrefixedStream.html" title="struct dwara_core::dataplane::hardening::PrefixedStream">Prefixed<wbr>Stream</a></dt><dd>A stream that replays <code>prefix</code> (bytes already sniffed off the wire)
+before forwarding to the inner stream. IO traits only delegate.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.InboundBodyError.html" title="enum dwara_core::dataplane::hardening::InboundBodyError">Inbound<wbr>Body<wbr>Error</a></dt><dd>Error of the inbound request-body wrapper.</dd><dt><a class="enum" href="enum.LimitedBodyError.html" title="enum dwara_core::dataplane::hardening::LimitedBodyError">Limited<wbr>Body<wbr>Error</a></dt><dd>Error of the route-limited request body (DW-027).</dd><dt><a class="enum" href="enum.RouteLimitViolation.html" title="enum dwara_core::dataplane::hardening::RouteLimitViolation">Route<wbr>Limit<wbr>Violation</a></dt><dd>One route-scoped request-limit violation (DW-027): which cap was
+crossed, by what observed value. The proxy turns these into the 431
+(headers) / 413 (body) error-envelope responses.</dd><dt><a class="enum" href="enum.SignatureBodyError.html" title="enum dwara_core::dataplane::hardening::SignatureBodyError">Signature<wbr>Body<wbr>Error</a></dt><dd>Error of the signed-request digesting body (DW-036).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_H2_CONNECTION_WINDOW_KIB.html" title="constant dwara_core::dataplane::hardening::DEFAULT_H2_CONNECTION_WINDOW_KIB">DEFAULT_<wbr>H2_<wbr>CONNECTION_<wbr>WINDOW_<wbr>KIB</a></dt><dd>Default HTTP/2 initial connection window, in KiB (4 MiB).</dd><dt><a class="constant" href="constant.DEFAULT_H2_MAX_CONCURRENT_STREAMS.html" title="constant dwara_core::dataplane::hardening::DEFAULT_H2_MAX_CONCURRENT_STREAMS">DEFAULT_<wbr>H2_<wbr>MAX_<wbr>CONCURRENT_<wbr>STREAMS</a></dt><dd>Default HTTP/2 concurrent-stream cap (also advertised in SETTINGS).</dd><dt><a class="constant" href="constant.DEFAULT_H2_MAX_SEND_BUF_KIB.html" title="constant dwara_core::dataplane::hardening::DEFAULT_H2_MAX_SEND_BUF_KIB">DEFAULT_<wbr>H2_<wbr>MAX_<wbr>SEND_<wbr>BUF_<wbr>KIB</a></dt><dd>Default HTTP/2 per-connection send-buffer cap, in KiB (1 MiB).</dd><dt><a class="constant" href="constant.DEFAULT_H2_STREAM_WINDOW_KIB.html" title="constant dwara_core::dataplane::hardening::DEFAULT_H2_STREAM_WINDOW_KIB">DEFAULT_<wbr>H2_<wbr>STREAM_<wbr>WINDOW_<wbr>KIB</a></dt><dd>Default HTTP/2 initial per-stream window, in KiB (1 MiB).</dd><dt><a class="constant" href="constant.DEFAULT_HTTP1_HEADER_TIMEOUT_MS.html" title="constant dwara_core::dataplane::hardening::DEFAULT_HTTP1_HEADER_TIMEOUT_MS">DEFAULT_<wbr>HTTP1_<wbr>HEADER_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default slowloris header-read timeout.</dd><dt><a class="constant" href="constant.DEFAULT_HTTP1_MAX_BUF_KIB.html" title="constant dwara_core::dataplane::hardening::DEFAULT_HTTP1_MAX_BUF_KIB">DEFAULT_<wbr>HTTP1_<wbr>MAX_<wbr>BUF_<wbr>KIB</a></dt><dd>Default HTTP/1 read-buffer cap, in KiB (hyper’s is ~8 KiB growable;
+pinned to 64 KiB explicitly so the bound is a documented constant).</dd><dt><a class="constant" href="constant.DEFAULT_HTTP1_MAX_HEADERS.html" title="constant dwara_core::dataplane::hardening::DEFAULT_HTTP1_MAX_HEADERS">DEFAULT_<wbr>HTTP1_<wbr>MAX_<wbr>HEADERS</a></dt><dd>Default HTTP/1 max header COUNT (hyper’s own default, made explicit).</dd><dt><a class="constant" href="constant.DEFAULT_REQUEST_BODY_TIMEOUT_MS.html" title="constant dwara_core::dataplane::hardening::DEFAULT_REQUEST_BODY_TIMEOUT_MS">DEFAULT_<wbr>REQUEST_<wbr>BODY_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default inbound request-body inactivity gap.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.check_route_limits.html" title="fn dwara_core::dataplane::hardening::check_route_limits">check_<wbr>route_<wbr>limits</a></dt><dd>Check a request against a route’s <a href="../../config/struct.RequestLimits.html" title="struct dwara_core::config::RequestLimits"><code>crate::config::RequestLimits</code></a> (DW-027), right
+after route resolution. <code>content_length</code> is the request body’s exact
+size when declared (<code>size_hint().exact()</code> — Content-Length for h1,
+the content-length pseudo-header for h2), <code>None</code> when the length is
+unknown (streaming). Header checks are header-count first (cheapest
+to report), then header bytes, then the declared body size.</dd><dt><a class="fn" href="fn.merge_vary.html" title="fn dwara_core::dataplane::hardening::merge_vary">merge_<wbr>vary</a></dt><dd>Merge one token into a response’s <code>Vary</code> header (DW-027): appended to
+the existing comma-separated list when not already present
+(case-insensitive), created otherwise. RFC 9110 permits MULTIPLE
+<code>Vary</code> field lines; every line is folded into the membership check
+and the merged value, and the result replaces the set with one line —
+reading only the first line would drop the later lines’ tokens and
+corrupt cache keys for upstreams that split their <code>Vary</code>. Correct
+<code>Vary</code> is what keeps a shared cache from serving a compressed (or
+origin-specific) response to a client that could not have received
+it.</dd></dl></section></div></main></body></html>

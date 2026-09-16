@@ -1,0 +1,61 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Synthetic monitoring (DW-071, DP-10 / #238)."><title>dwara_core::synthetic - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module synthetic</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module synthetic</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#design-section-6-traffic-intelligence" title="Design (section 6-Traffic Intelligence)">Design (section 6-Traffic Intelligence)</a></li><li><a href="#probe-lifecycle" title="Probe lifecycle">Probe lifecycle</a></li><li><a href="#alerting" title="Alerting">Alerting</a></li><li><a href="#body-assertions-dp-10-238" title="Body assertions (DP-10, #238)">Body assertions (DP-10, #238)</a></li><li><a href="#multi-step-journeys-dp-10-238" title="Multi-step journeys (DP-10, #238)">Multi-step journeys (DP-10, #238)</a></li><li><a href="#probe-from-header-dp-10-238" title="Probe-from header (DP-10, #238)">Probe-from header (DP-10, #238)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>synthetic</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/synthetic/mod.rs.html#1-746">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Synthetic monitoring (DW-071, DP-10 / #238).</p>
+<p>Built-in probes per route that measure latency and uptime, feeding
+results into analytics and webhooks. This is the proactive/synthetic
+side of SLO tracking – it pairs with DW-052 (SLO &amp; error-budget
+export, M2), which derives SLO/burn-rate metrics from real traffic.
+Synthetic monitoring lets an SLO be tracked even on routes with
+little real traffic.</p>
+<h3 id="design-section-6-traffic-intelligence"><a class="doc-anchor" href="#design-section-6-traffic-intelligence">§</a>Design (section 6-Traffic Intelligence)</h3>
+<p>“The gateway measures the SLOs it exports.” Each route can have a
+synthetic probe configured: a periodic HTTP request to the route’s
+URL (or a custom URL) that records latency, status code, and
+success/failure. The results feed into the analytics store (as
+access records tagged as synthetic) and the event bus (for webhook
+delivery on probe failures).</p>
+<h3 id="probe-lifecycle"><a class="doc-anchor" href="#probe-lifecycle">§</a>Probe lifecycle</h3>
+<ol>
+<li>At config publish time, the probe configuration is compiled
+into a <a href="struct.ProbeSpec.html" title="struct dwara_core::synthetic::ProbeSpec"><code>ProbeSpec</code></a> per route.</li>
+<li>A background task (<a href="struct.ProbeScheduler.html" title="struct dwara_core::synthetic::ProbeScheduler"><code>ProbeScheduler</code></a>) runs each probe on its
+configured interval via the async HTTP executor (<a href="fn.run_probe.html" title="fn dwara_core::synthetic::run_probe"><code>run_probe</code></a>).</li>
+<li>Each probe result (<a href="struct.ProbeResult.html" title="struct dwara_core::synthetic::ProbeResult"><code>ProbeResult</code></a>) is:
+<ul>
+<li>Fed into <a href="struct.ProbeRunner.html#method.process_result" title="method dwara_core::synthetic::ProbeRunner::process_result"><code>ProbeRunner::process_result</code></a> for state tracking.</li>
+<li>Emitted as an event on state transitions (alert/recovery).</li>
+<li>Recorded in the analytics store (as a synthetic access record).</li>
+</ul>
+</li>
+</ol>
+<h3 id="alerting"><a class="doc-anchor" href="#alerting">§</a>Alerting</h3>
+<p>When a probe fails, an event is emitted on the event bus. If a
+webhook is configured for the <code>probe_failed</code> event kind, the
+webhook deliverer sends a notification. The alert fires on the
+first failure that crosses the threshold (edge-triggered);
+subsequent consecutive failures do not re-fire until the probe
+recovers.</p>
+<h3 id="body-assertions-dp-10-238"><a class="doc-anchor" href="#body-assertions-dp-10-238">§</a>Body assertions (DP-10, #238)</h3>
+<p>Probes can assert on the response body:</p>
+<ul>
+<li><code>body_contains</code>: the body must contain a substring.</li>
+<li><code>body_jsonpath</code>: a JSONPath expression that must resolve to a
+non-null value (simple dot-notation, e.g. <code>$.status</code>).</li>
+</ul>
+<h3 id="multi-step-journeys-dp-10-238"><a class="doc-anchor" href="#multi-step-journeys-dp-10-238">§</a>Multi-step journeys (DP-10, #238)</h3>
+<p>A probe can be a multi-step journey: a sequence of requests where
+each step can extract values (e.g. a session token) and pass them
+to subsequent steps via header templates. The journey fails if any
+step fails.</p>
+<h3 id="probe-from-header-dp-10-238"><a class="doc-anchor" href="#probe-from-header-dp-10-238">§</a>Probe-from header (DP-10, #238)</h3>
+<p>A probe can set the <code>X-Dwara-Probe-From</code> header to identify the
+region/agent executing the probe, enabling multi-region synthetic
+monitoring where agents in different geographies probe the same
+route and report their origin.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ProbeResult.html" title="struct dwara_core::synthetic::ProbeResult">Probe<wbr>Result</a></dt><dd>The result of a single probe run.</dd><dt><a class="struct" href="struct.ProbeRunner.html" title="struct dwara_core::synthetic::ProbeRunner">Probe<wbr>Runner</a></dt><dd>A probe runner: holds probe specs and their current states, and
+processes results to drive edge-triggered alerting.</dd><dt><a class="struct" href="struct.ProbeScheduler.html" title="struct dwara_core::synthetic::ProbeScheduler">Probe<wbr>Scheduler</a></dt><dd>A probe scheduler: spawns a background task per probe that runs
+the probe on its configured interval and feeds results into a
+<a href="struct.ProbeRunner.html" title="struct dwara_core::synthetic::ProbeRunner"><code>ProbeRunner</code></a>. State transitions (alert/recovery) are emitted
+as events.</dd><dt><a class="struct" href="struct.ProbeSpec.html" title="struct dwara_core::synthetic::ProbeSpec">Probe<wbr>Spec</a></dt><dd>A synthetic probe specification for a route.</dd><dt><a class="struct" href="struct.ProbeStep.html" title="struct dwara_core::synthetic::ProbeStep">Probe<wbr>Step</a></dt><dd>One step in a multi-step probe journey (DP-10, #238).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ProbeOutcome.html" title="enum dwara_core::synthetic::ProbeOutcome">Probe<wbr>Outcome</a></dt><dd>The outcome of processing a probe result.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.check_body_assertions.html" title="fn dwara_core::synthetic::check_body_assertions">check_<wbr>body_<wbr>assertions</a></dt><dd>Check a response body against the probe’s body assertions.
+Returns <code>Ok(())</code> if all assertions pass, or <code>Err(message)</code> on
+the first failure.</dd><dt><a class="fn" href="fn.failure_result.html" title="fn dwara_core::synthetic::failure_result">failure_<wbr>result</a></dt><dd>Create a probe result from a failed HTTP response (or error).</dd><dt><a class="fn" href="fn.run_probe.html" title="fn dwara_core::synthetic::run_probe">run_<wbr>probe</a></dt><dd>Execute a single probe spec as an HTTP request and return the
+result. This is the core executor: it sends the request, measures
+latency, checks the status code, and runs body assertions.</dd><dt><a class="fn" href="fn.success_result.html" title="fn dwara_core::synthetic::success_result">success_<wbr>result</a></dt><dd>Create a probe result from a successful HTTP response.</dd></dl></section></div></main></body></html>

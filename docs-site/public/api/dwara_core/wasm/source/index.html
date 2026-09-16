@@ -1,0 +1,115 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Registry plugin source resolution (DW-165)."><title>dwara_core::wasm::source - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module source</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module source</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#resolution-pipeline-per-source-plugin" title="Resolution pipeline (per `source:` plugin)">Resolution pipeline (per <code>source:</code> plugin)</a></li><li><a href="#downloader-why-a-hand-rolled-client" title="Downloader (why a hand-rolled client)">Downloader (why a hand-rolled client)</a></li><li><a href="#time-budget-review-finding-no-unbounded-holds" title="Time budget (review finding: no unbounded holds)">Time budget (review finding: no unbounded holds)</a></li><li><a href="#cache-layout" title="Cache layout">Cache layout</a></li></ul><h3><a href="#enums">Module Items</a></h3><ul class="block"><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>wasm</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">wasm</a></div><h1>Module <span>source</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/wasm/source.rs.html#1-954">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Registry plugin source resolution (DW-165).</p>
+<p>A plugin entry with <code>source:</code> names a remote <code>.wasm</code> artifact
+(registry URL + mandatory SHA-256 digest + optional Ed25519
+signature/key material). This module resolves every such entry to a
+VERIFIED local file BEFORE the wasm load step (<code>PluginLifecycle:: load</code>), so a registry plugin enters the runtime through exactly the
+same read/compile/health path as a local <code>wasm:</code> plugin — there is
+no partial load: an artifact that cannot be resolved or fails
+verification never reaches wasmtime, and the plugin is marked
+<code>Crashed</code> at publish (fail-closed for its routes, DW-157/158
+vocabulary).</p>
+<h3 id="resolution-pipeline-per-source-plugin"><a class="doc-anchor" href="#resolution-pipeline-per-source-plugin">§</a>Resolution pipeline (per <code>source:</code> plugin)</h3>
+<ol>
+<li><strong>Scheme check</strong> — only <code>https://</code> is fetchable. <code>oci://</code>
+references parse in config but are rejected with a clear
+validation error in this version (see the registry spec in the
+user docs); the resolver repeats the rejection defensively.</li>
+<li><strong>Digest format check</strong> — <code>source.digest</code> must be a 64-char
+SHA-256 hex string (case-insensitive; normalized lowercase).</li>
+<li><strong>Cache lookup</strong> — the artifact is content-addressed:
+<code>&lt;cache_dir&gt;/&lt;digest&gt;.wasm</code> (<code>source.cache_path</code> overrides the
+location, not the verification; it must be a relative path with
+no <code>..</code> segments — containment, see [<code>PluginSourceConfig:: cache_path_violation</code>]). A present cache file whose bytes do
+not hash to the pinned digest is a tampered/corrupt entry and
+FAILS CLOSED with a digest-mismatch error naming the expected
+and actual digests — it is never silently re-fetched (an
+operator must see that the file named for one digest holds
+another). A cache hit still verifies the signature.</li>
+<li><strong>Download</strong> (cache miss only, and only while the per-publish
+budget has time left) — one HTTPS GET, HTTP/1.1, redirects NOT
+followed, response size capped. See the downloader note below
+for why this is a hand-rolled client.</li>
+<li><strong>Digest verification</strong> — downloaded bytes must hash to the
+pinned digest; mismatch fails closed naming both digests.</li>
+<li><strong>Signature verification</strong> — when <code>signature</code>/<code>public_key</code> (or
+pinned <code>plugin_registry.public_keys</code>) are configured, an
+Ed25519 signature over the artifact bytes must verify. A plugin
+with no signature is REJECTED when the registry pins keys, and
+a <code>public_key</code> without a <code>signature</code> is rejected as a config
+mistake (a key that verifies nothing).</li>
+<li><strong>Atomic cache write</strong> — tmp file in the same directory, fsync,
+rename into place. A crash mid-write can never leave a partial
+artifact under the digest name; the next resolve either sees the
+complete file or downloads again.</li>
+</ol>
+<h3 id="downloader-why-a-hand-rolled-client"><a class="doc-anchor" href="#downloader-why-a-hand-rolled-client">§</a>Downloader (why a hand-rolled client)</h3>
+<p>dwara-core has no reqwest/ureq; the repo precedent for outbound
+HTTP is the events domain’s hand-rolled HTTP/1.1 client
+(<code>events::webhook</code>, tokio-based). That client is private to
+<code>events</code>, which the wasm domain must not import (<code>check_deps.py</code>:
+wasm &lt;- config, plugins), and it is async while resolution runs
+inside the SYNCHRONOUS <code>DataPlane::reload_plugins</code> (called from
+async reload loops — a nested <code>block_on</code> would panic). So this
+module carries its own minimal SYNCHRONOUS HTTPS GET: std
+<code>TcpStream</code> + rustls <code>ClientConnection</code> (both already direct
+dependencies), public webpki roots, the same egress posture as
+webhooks (operator-configured URL, SSRF egress filter applied at
+connect time when enabled, redirects not followed).</p>
+<h3 id="time-budget-review-finding-no-unbounded-holds"><a class="doc-anchor" href="#time-budget-review-finding-no-unbounded-holds">§</a>Time budget (review finding: no unbounded holds)</h3>
+<p>Two layers bound every resolution, because a registry that drips
+one byte per read would otherwise defeat a per-read timeout (each
+read resets it) and hold a thread forever:</p>
+<ul>
+<li>a per-READ timeout (10s connect, 30s per read), and</li>
+<li>a per-PUBLISH total budget (<a href="constant.RESOLUTION_BUDGET.html" title="constant dwara_core::wasm::source::RESOLUTION_BUDGET"><code>RESOLUTION_BUDGET</code></a>, 60s across
+ALL source plugins of one publish), checked before each download
+and inside the fetcher’s read loop. A cache hit needs no network
+and is never budget-gated. Budget exhaustion fails the affected
+plugin closed with a step-named error ([<code>SourceError:: ResolutionBudgetExceeded</code>] / a <code>DownloadFailed</code> naming the
+budget), never a hang.</li>
+</ul>
+<p>The binary’s reload path additionally runs the whole resolution on
+<code>tokio::task::spawn_blocking</code> (DNS via getaddrinfo and the sync
+TLS reads are blocking syscalls), so the async reload task awaits
+instead of holding a worker thread; see <code>dwara-bin</code>’s reload
+driver.</p>
+<h3 id="cache-layout"><a class="doc-anchor" href="#cache-layout">§</a>Cache layout</h3><div class="example-wrap"><pre class="language-text"><code>&lt;cache_dir&gt;/                 (plugin_registry.cache_dir, default ./plugin-cache)
+  &lt;sha256-digest&gt;.wasm       one immutable artifact per digest
+  .&lt;sha256-digest&gt;.wasm.tmp&lt;pid&gt;   transient write target (never read)</code></pre></div>
+<p>Artifacts are content-addressed: two plugins pinning the same
+digest share one file, and a restart (or a second gateway process)
+re-resolves from the cache without network access — the
+restart-safety test pins this by pointing <code>url</code> at a dead port and
+resolving from cache alone.</p>
+</div></details><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SourceError.html" title="enum dwara_core::wasm::source::SourceError">Source<wbr>Error</a></dt><dd>Why a <code>source:</code> plugin could not be resolved. Every variant names
+the plugin and the exact pipeline step that failed; <code>Display</code>
+messages are operator-facing (they reach the crashed-plugin error
+string on the status surface and the publish-time log line).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_CACHE_DIR.html" title="constant dwara_core::wasm::source::DEFAULT_CACHE_DIR">DEFAULT_<wbr>CACHE_<wbr>DIR</a></dt><dd>Default cache directory when <code>plugin_registry.cache_dir</code> is absent
+(relative to the gateway working directory, the same posture as the
+ACME <code>state_dir</code> default).</dd><dt><a class="constant" href="constant.MAX_ARTIFACT_BYTES.html" title="constant dwara_core::wasm::source::MAX_ARTIFACT_BYTES">MAX_<wbr>ARTIFACT_<wbr>BYTES</a></dt><dd>Hard cap on one downloaded artifact (bytes). proxy-wasm filter
+modules are small; this binds a hostile registry answer.</dd><dt><a class="constant" href="constant.RESOLUTION_BUDGET.html" title="constant dwara_core::wasm::source::RESOLUTION_BUDGET">RESOLUTION_<wbr>BUDGET</a></dt><dd>Total wall-clock budget for registry-source resolution per publish,
+shared across ALL <code>source:</code> plugins (review finding: a drip-feeding
+or hung registry must not hold the reload path unboundedly, and N
+plugins must not stack N budgets). Checked before each download and
+between reads in the fetch loop; cache hits are never budget-gated
+(they need no network). Exhaustion fails the affected plugin closed
+with a step-named error; the next publish retries.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.decode_chunked.html" title="fn dwara_core::wasm::source::decode_chunked">decode_<wbr>chunked</a></dt><dd>Minimal chunked transfer decoding (hex size; optional chunk
+extensions after <code>;</code> ignored; final 0-chunk ends the body, trailers
+after it are accepted and dropped). Public for the integration
+tests in <code>tests/wasm_plugin_source.rs</code>, which pin the hostile
+framings (overflow size lines, over-cap sizes, malformed hex,
+missing CRLFs) as pure functions.</dd><dt><a class="fn" href="fn.parse_response.html" title="fn dwara_core::wasm::source::parse_response">parse_<wbr>response</a></dt><dd>Parse a raw HTTP/1.1 response: status line, headers, body framing
+(Content-Length, chunked, or read-to-EOF). Only 200 is accepted;
+redirects are deliberately not followed (a registry behind a
+redirect must be configured at its final URL — the same posture as
+webhook deliveries). Public for the integration tests in
+<code>tests/wasm_plugin_source.rs</code>, which pin the framing edge cases
+(truncation, caps, hostile chunk sizes) as pure functions.</dd><dt><a class="fn" href="fn.resolve_sources.html" title="fn dwara_core::wasm::source::resolve_sources">resolve_<wbr>sources</a></dt><dd>Resolve every <code>source:</code> plugin in the gateway config to a verified
+local artifact path. Local <code>wasm:</code>/<code>native</code> plugins are absent from
+the map. Successes are logged (cache vs download); failures are
+logged by the lifecycle when they mark the plugin Crashed (this
+function stays quiet on errors so the crash log line is the single
+publish-time record). The whole resolution runs under the
+<a href="constant.RESOLUTION_BUDGET.html" title="constant dwara_core::wasm::source::RESOLUTION_BUDGET"><code>RESOLUTION_BUDGET</code></a> per-publish budget.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.SourceResolutions.html" title="type dwara_core::wasm::source::SourceResolutions">Source<wbr>Resolutions</a></dt><dd>Per-plugin resolution results keyed by plugin name (only
+<code>source:</code> plugins appear). Built by <a href="fn.resolve_sources.html" title="fn dwara_core::wasm::source::resolve_sources"><code>resolve_sources</code></a>; consumed
+by <code>PluginLifecycle::load</code>.</dd></dl></section></div></main></body></html>

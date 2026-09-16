@@ -1,0 +1,87 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="OpenID Connect: discovery, token introspection, revocation, token exchange, and the authorization-code + PKCE relying-party flow (DW-034)."><title>dwara_core::security::oidc - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module oidc</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module oidc</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#discovery" title="Discovery">Discovery</a></li><li><a href="#http" title="HTTP">HTTP</a></li><li><a href="#error-posture" title="Error posture">Error posture</a></li><li><a href="#caching" title="Caching">Caching</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>oidc</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/oidc.rs.html#1-1060">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>OpenID Connect: discovery, token introspection, revocation, token
+exchange, and the authorization-code + PKCE relying-party flow
+(DW-034).</p>
+<p>The gateway acts as an OIDC client (relying party) for two distinct
+purposes:</p>
+<ol>
+<li><strong>Token introspection (RFC 7662)</strong> — on the request path, a
+presented <code>Authorization: Bearer</code> token that did not verify
+against any JWT provider (DW-019) is introspected against the
+configured OIDC provider’s introspection endpoint. An <code>active: true</code> result resolves an <code>Identity</code>; <code>active: false</code> (or a
+non-2xx) is a 401. Introspection results are cached keyed by the
+token’s SHA-256 hash with a configurable TTL — a cached <code>active: true</code> short-circuits the IdP call, while a cached <code>active: false</code>
+is NOT cached (re-checked on the next request so a revoked token
+is noticed promptly).</li>
+<li><strong>Authorization-code + PKCE (RFC 6749 section 4.1 + RFC 7636)</strong> —
+the user-facing login flow: the gateway redirects an
+unauthenticated request to the IdP’s authorization endpoint with
+a PKCE code challenge, handles the callback, and exchanges the
+code for access/refresh/ID tokens. This is the relying-party
+role; the resulting tokens are stored in a session cookie.</li>
+</ol>
+<p>Two management operations round out the flow:</p>
+<ul>
+<li><strong>Token revocation (RFC 7009)</strong> — POST to the revocation endpoint
+to revoke a token. An admin/CLI operation, not on the hot request
+path.</li>
+<li><strong>Token exchange (RFC 8693)</strong> — exchange a subject token (the
+client’s bearer token) for an actor token for an upstream, using
+the <code>urn:ietf:params:oauth:grant-type:token-exchange</code> grant type.
+This extends the OAuth2 client-credentials proxying pattern
+(DW-035).</li>
+</ul>
+<h3 id="discovery"><a class="doc-anchor" href="#discovery">§</a>Discovery</h3>
+<p>The provider’s discovery document is fetched from
+<code>{issuer}/.well-known/openid-configuration</code> (RFC 8414 / OIDC
+Discovery 1.0) and cached for the provider’s lifetime (it rarely
+changes). The document supplies the introspection, revocation,
+authorization, and token endpoints; config-level overrides
+(<code>introspection_endpoint</code>, <code>revocation_endpoint</code>) take precedence
+over the discovered values.</p>
+<h3 id="http"><a class="doc-anchor" href="#http">§</a>HTTP</h3>
+<p>All IdP HTTP calls use the <code>OidcConnector</code> (plain-or-TLS, the
+<code>JwksConnector</code>/<code>OAuth2Connector</code> pattern), reusing the workspace
+rustls stack with no new HTTP dependencies. A <code>trusted_ca_file</code>
+replaces the webpki public roots for an IdP behind a private CA
+(the same trust model as <code>JwtProvider::trusted_ca_file</code>).</p>
+<h3 id="error-posture"><a class="doc-anchor" href="#error-posture">§</a>Error posture</h3>
+<p>An introspection failure (network error, non-2xx, malformed
+response) is governed by the provider’s <code>fail_open</code> config: default
+false (fail closed = 401, the gateway refuses to authenticate a
+token it cannot introspect); true treats the failure as anonymous
+(pass-through). Fail-open trades security for availability. The
+error envelope never leaks the IdP’s response body or headers.</p>
+<h3 id="caching"><a class="doc-anchor" href="#caching">§</a>Caching</h3>
+<p>The introspection cache (<a href="struct.OidcIntrospectionCache.html" title="struct dwara_core::security::oidc::OidcIntrospectionCache"><code>OidcIntrospectionCache</code></a>) lives on the
+dataplane (carried across generation swaps, the <code>jwks_caches</code> /
+<code>oauth2_token_cache</code> precedent) so a config reload never discards a
+cached <code>active: true</code> result. Entries are keyed by
+<code>{provider_name}:{sha256_hex(token)}</code> and expire after
+<code>introspection_cache_ttl_s</code>. The discovery document is cached
+per-provider on the <a href="struct.OidcClient.html" title="struct dwara_core::security::oidc::OidcClient"><code>OidcClient</code></a> (rebuilt per generation, like
+<code>OAuth2Client</code>).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.DiscoveryDocument.html" title="struct dwara_core::security::oidc::DiscoveryDocument">Discovery<wbr>Document</a></dt><dd>The parsed OIDC discovery document (RFC 8414 / OIDC Discovery 1.0).
+Only the fields the gateway consumes are extracted; unknown fields
+are ignored (the document is forward-compatible by design).</dd><dt><a class="struct" href="struct.IntrospectionResponse.html" title="struct dwara_core::security::oidc::IntrospectionResponse">Introspection<wbr>Response</a></dt><dd>The parsed token introspection response (RFC 7662 section 2.2).
+<code>active</code> is the only REQUIRED field; the rest are optional and
+extracted as strings for the identity map.</dd><dt><a class="struct" href="struct.OidcClient.html" title="struct dwara_core::security::oidc::OidcClient">Oidc<wbr>Client</a></dt><dd>One configured OIDC provider at runtime: config + HTTP client +
+cached discovery document. The introspection cache lives on the
+dataplane (<a href="struct.OidcIntrospectionCache.html" title="struct dwara_core::security::oidc::OidcIntrospectionCache"><code>OidcIntrospectionCache</code></a>) so a config reload reuses
+cached results.</dd><dt><a class="struct" href="struct.OidcIntrospectionCache.html" title="struct dwara_core::security::oidc::OidcIntrospectionCache">Oidc<wbr>Introspection<wbr>Cache</a></dt><dd>Per-provider introspection cache (DW-034): lives on the dataplane so
+a config reload reuses cached <code>active: true</code> results (the
+<code>jwks_caches</code> / <code>oauth2_token_cache</code> precedent). Entries are keyed
+by <code>{provider_name}:{sha256_hex(token)}</code>. Only <code>active: true</code>
+results are cached; <code>active: false</code> is re-checked on every request
+so a revoked token is noticed promptly.</dd><dt><a class="struct" href="struct.TokenSet.html" title="struct dwara_core::security::oidc::TokenSet">Token<wbr>Set</a></dt><dd>The token set returned by an auth-code exchange (RFC 6749 section
+5.1 + OIDC <code>id_token</code>). All fields except <code>access_token</code> are
+optional.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.OidcError.html" title="enum dwara_core::security::oidc::OidcError">Oidc<wbr>Error</a></dt><dd>Error contacting an OIDC provider (DW-034). The <code>Display</code> text is
+logged, not sent to the client (the envelope never leaks IdP
+internals). All variants surface to the client as 401 (fail closed)
+or pass-through (fail open) per the provider’s <code>fail_open</code> config.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.pkce_code_challenge.html" title="fn dwara_core::security::oidc::pkce_code_challenge">pkce_<wbr>code_<wbr>challenge</a></dt><dd>Derive the PKCE code challenge (S256) from a verifier: the
+<code>base64url(sha256(verifier))</code> per RFC 7636 section 4.2.</dd><dt><a class="fn" href="fn.pkce_code_verifier.html" title="fn dwara_core::security::oidc::pkce_code_verifier">pkce_<wbr>code_<wbr>verifier</a></dt><dd>Generate a PKCE code verifier (43..=128 random ASCII characters per
+RFC 7636 section 4.1). Returns the verifier; the challenge is
+<code>base64url(sha256(verifier))</code> (S256 method). The verifier MUST be
+sent in the token exchange; the challenge is sent in the
+authorization request. Uses a caller-provided 32-byte random seed
+(the gateway does not pull in a crypto RNG crate; tests pass a
+fixed seed for determinism, production callers use the OS RNG).</dd></dl></section></div></main></body></html>

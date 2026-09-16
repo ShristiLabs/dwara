@@ -1,0 +1,40 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="SOAP/XML protocol translation (DW-100)."><title>dwara_core::dataplane::translation_soap - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module translation_soap</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module translation_<wbr>soap</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#minimal-xml-parser" title="Minimal XML parser">Minimal XML parser</a></li><li><a href="#xml---json-convention" title="XML &#60;-&#62; JSON convention">XML &lt;-&gt; JSON convention</a></li><li><a href="#feature-gating" title="Feature gating">Feature gating</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>translation_<wbr>soap</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/translation_soap.rs.html#1-790">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>SOAP/XML protocol translation (DW-100).</p>
+<p>The <a href="struct.SoapTranslator.html" title="struct dwara_core::dataplane::translation_soap::SoapTranslator"><code>SoapTranslator</code></a> implements <a href="../translation/trait.ProtocolTranslator.html" title="trait dwara_core::dataplane::translation::ProtocolTranslator"><code>super::translation::ProtocolTranslator</code></a>
+for routes that bridge a REST/JSON client and a SOAP/XML upstream (or
+vice versa). Two directions:</p>
+<ul>
+<li><strong>SOAP-to-REST</strong> (<code>kind: soap_to_rest</code>): the client sends a SOAP
+XML envelope; the translator parses the envelope, extracts the
+<code>Body</code>’s first child element (the operation), and converts its XML
+children to a JSON body the REST upstream expects.</li>
+<li><strong>REST-to-SOAP</strong> (<code>kind: rest_to_soap</code>): the upstream returns a
+REST JSON body; the translator wraps it in a SOAP envelope
+(<code>Envelope &gt; Body &gt; {operation}</code>) with the configured operation
+name and namespace, converting the JSON to XML.</li>
+</ul>
+<h3 id="minimal-xml-parser"><a class="doc-anchor" href="#minimal-xml-parser">§</a>Minimal XML parser</h3>
+<p>A full XML library would be a new dependency (and a deny.toml
+review). SOAP envelopes are a narrow XML subset: elements with
+optional attributes, text content, and nested elements – no DTDs,
+no entity expansion, no processing instructions. A minimal hand-rolled
+parser handles that subset and rejects everything else (fail-closed
+against anything it cannot prove well-formed). The parser is bounded:
+a depth cap prevents element-nesting DoS, and a size cap rejects
+oversized bodies before parsing.</p>
+<h3 id="xml---json-convention"><a class="doc-anchor" href="#xml---json-convention">§</a>XML &lt;-&gt; JSON convention</h3>
+<p>The conversion follows a simple, deterministic convention:</p>
+<ul>
+<li>An element with only text content -&gt; a JSON string (or number/bool
+when the text parses as one).</li>
+<li>An element with child elements -&gt; a JSON object mapping each child
+tag to its converted value. Repeated child tags become a JSON array.</li>
+<li>Attributes -&gt; a <code>@attr</code> key in the object.</li>
+</ul>
+<p>This is sufficient for SOAP body payloads (which are flat-ish data
+records); complex XSD types are out of scope for the hand-rolled
+converter.</p>
+<h3 id="feature-gating"><a class="doc-anchor" href="#feature-gating">§</a>Feature gating</h3>
+<p>Compiled under the <code>soap</code> cargo feature (which implies
+<code>protocol_translation</code>).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SoapTranslator.html" title="struct dwara_core::dataplane::translation_soap::SoapTranslator">Soap<wbr>Translator</a></dt><dd>The SOAP-to-REST / REST-to-SOAP translator.</dd><dt><a class="struct" href="struct.XmlElement.html" title="struct dwara_core::dataplane::translation_soap::XmlElement">XmlElement</a></dt><dd>A parsed XML element: name (qualified, prefix retained), attributes,
+and children (elements and text).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.SoapDirection.html" title="enum dwara_core::dataplane::translation_soap::SoapDirection">Soap<wbr>Direction</a></dt><dd>The translation direction.</dd><dt><a class="enum" href="enum.XmlChild.html" title="enum dwara_core::dataplane::translation_soap::XmlChild">XmlChild</a></dt><dd>One child of an XML element: a nested element or a text run.</dd></dl></section></div></main></body></html>

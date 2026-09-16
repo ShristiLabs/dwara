@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Adaptive + origin-driven rate-limit tuning (DW-089)."><title>dwara_core::resilience::adaptive - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adaptive</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adaptive</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#factor-logic" title="Factor logic">Factor logic</a></li><li><a href="#origin-signals" title="Origin signals">Origin signals</a></li><li><a href="#atomic-f64-storage" title="Atomic f64 storage">Atomic f64 storage</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>resilience</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">resilience</a></div><h1>Module <span>adaptive</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/resilience/adaptive.rs.html#1-332">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Adaptive + origin-driven rate-limit tuning (DW-089).</p>
+<p>An <a href="struct.AdaptiveController.html" title="struct dwara_core::resilience::adaptive::AdaptiveController"><code>AdaptiveController</code></a> holds per-policy atomic EWMA state for the
+upstream error rate and latency, plus a current adaptive factor that
+scales a policy’s rate-limit quotas at check time. The controller is
+compiled once per config generation from the <code>policies[].adaptive</code>
+blocks (only policies with <code>adaptive.enabled</code> contribute state); it
+is shared via <code>Arc</code> from the dataplane generation and updated on the
+response path (<code>record_outcome</code>), then read on the request path
+(<code>factor_for</code>) — both lock-free, the same atomic-EWMA pattern as the
+balancer’s <code>PeakEwmaTracker</code> (in <code>dataplane::balance</code>).</p>
+<h2 id="factor-logic"><a class="doc-anchor" href="#factor-logic">§</a>Factor logic</h2>
+<p>The adaptive factor is bounded <code>[min_factor, max_factor]</code> (never 0,
+never unbounded). When the upstream is stressed (error EWMA above
+<code>error_threshold</code> OR latency EWMA above <code>latency_threshold_ms</code>) the
+factor DECREASES toward <code>min_factor</code> (tighten — each request “costs
+more” against the GCRA bucket, so the effective rate drops). When the
+upstream is healthy the factor INCREASES toward <code>max_factor</code> (relax —
+each request “costs less”, so the effective rate rises). Tightening
+is faster than relaxing (asymmetric: <code>TIGHTEN_RATE</code> &lt; 1.0 multiplies
+the factor down by ~5% per stressed update, <code>RELAX_RATE</code> &gt; 1.0
+multiplies it up by ~1% per healthy update), so the gateway errs
+toward protecting upstreams.</p>
+<h2 id="origin-signals"><a class="doc-anchor" href="#origin-signals">§</a>Origin signals</h2>
+<p>When <code>retry_after</code> is in <code>origin_signals</code> and the upstream response
+carries a <code>Retry-After</code> header, <code>record_outcome</code> sets a backoff
+deadline (<code>now + retry_after_duration</code>) and drops the factor to
+<code>min_factor</code> immediately. While within the backoff window,
+<code>factor_for</code> returns <code>min_factor</code> regardless of the EWMA state; once
+the window elapses the EWMA-driven factor resumes.</p>
+<h2 id="atomic-f64-storage"><a class="doc-anchor" href="#atomic-f64-storage">§</a>Atomic f64 storage</h2>
+<p>Error EWMA, latency EWMA, the factor, and the backoff deadline are
+stored as <code>AtomicU64</code> holding the bits of an <code>f64</code> (<code>f64::to_bits</code> /
+<code>f64::from_bits</code>), exactly like the balancer’s <code>PeakEwmaTracker</code>
+<code>cost_ns</code>. The
+stamp is nanoseconds since the Unix epoch (the same
+<code>system_now_ns</code> clock the balancer uses). All loads/stores are
+<code>Ordering::Relaxed</code>: the values are advisory (a stale factor merely
+tightens or relaxes one request early), so the relaxed ordering is
+correct and the hot path stays lock-free.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AdaptiveController.html" title="struct dwara_core::resilience::adaptive::AdaptiveController">Adaptive<wbr>Controller</a></dt><dd>EWMA-feedback-driven limiter tuning (DW-089). Compiled once per
+config generation from the <code>policies[].adaptive</code> blocks; shared via
+<code>Arc</code> from the dataplane generation. <code>record_outcome</code> runs on the
+response path (after the upstream exchange resolves) and <code>factor_for</code>
+runs on the request path (inside the rate-limit check) — both
+lock-free. Policies without an enabled <code>adaptive</code> block are absent
+from the map; <code>factor_for</code> returns <code>1.0</code> for them (no adaptive
+tuning, the configured quotas apply as-is).</dd></dl></section></div></main></body></html>

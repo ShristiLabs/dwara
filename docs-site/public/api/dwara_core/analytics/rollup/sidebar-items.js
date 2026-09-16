@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GRANULARITIES_MS"],"fn":["cascade_range","cursor","roll_cascade","roll_raw_range","roll_raw_to_1m","sweep_retention","window_of"]};

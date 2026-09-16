@@ -1,0 +1,74 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Zero-downtime binary upgrade (DW-049)."><title>dwara::upgrade - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module upgrade</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara/index.html">dwara</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module upgrade</a></h2><h3><a href="#constants">Module Items</a></h3><ul class="block"><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara</a></div><h1>Module <span>upgrade</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara/upgrade.rs.html#1-383">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Zero-downtime binary upgrade (DW-049).</p>
+<p>Approach: SO_REUSEPORT hand-off with a readiness signal.</p>
+<ol>
+<li>Every listening socket is bound with <code>SO_REUSEPORT</code> (in addition to
+<code>SO_REUSEADDR</code>), so a second process can bind the SAME port while the
+first is still listening. On Linux the kernel load-balances accepts
+across both sockets; on macOS both sockets may accept (the balance is
+less even but the hand-off still works — no port-loss window).</li>
+<li>On <code>SIGUSR2</code> the OLD process spawns a NEW copy of the binary (the
+same path by default, or <code>DWARA_UPGRADE_BINARY</code>) with the env var
+<a href="constant.UPGRADE_READY_SOCKET_ENV.html" title="constant dwara::upgrade::UPGRADE_READY_SOCKET_ENV"><code>UPGRADE_READY_SOCKET_ENV</code></a> pointing at a freshly-created Unix
+domain socket.</li>
+<li>The NEW process binds its listeners (SO_REUSEPORT lets it bind
+alongside the old), spawns its accept tasks, then connects to the
+ready socket and sends <code>READY\n</code>. This is the hand-off signal.</li>
+<li>The OLD process receives <code>READY\n</code> (bounded wait), THEN initiates
+the same drain sequence as SIGTERM: stop accepting, flush backlogs,
+drain HTTP connections within the shutdown budget, exit 0. Because
+the new process is already accepting, no connection is refused and
+no in-flight connection is reset.</li>
+<li>If the new process fails to bind/start, it never signals READY; the
+old process times out, logs an ERROR, and KEEPS running — a failed
+upgrade never takes the gateway down.</li>
+</ol>
+<p>This is the nginx/Envoy model without FD passing: SO_REUSEPORT removes
+the need to transfer file descriptors, so the coordination is a single
+byte frame over a Unix domain socket (portable, no SCM_RIGHTS).</p>
+<p>Operator trigger: <code>dwara upgrade</code> (CLI) sends SIGUSR2 to the PID in the
+PID file (<code>DWARA_PID_FILE</code>) or to an explicit <code>--pid</code>.</p>
+<p>Environment:</p>
+<ul>
+<li><code>DWARA_PID_FILE</code>: write the process PID here on startup (default:
+none). The <code>dwara upgrade</code> CLI reads it to find the process to
+signal. The new process overwrites it after signaling READY.</li>
+<li><code>DWARA_UPGRADE_BINARY</code>: path to the new binary for an upgrade
+(default: <code>std::env::current_exe()</code>).</li>
+<li><a href="constant.UPGRADE_READY_SOCKET_ENV.html" title="constant dwara::upgrade::UPGRADE_READY_SOCKET_ENV"><code>UPGRADE_READY_SOCKET_ENV</code></a>: set by the old process on the spawned
+child; the child connects to this Unix socket to signal readiness.
+Unset on a normal (non-upgrade) start.</li>
+</ul>
+</div></details><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_UPGRADE_READY_TIMEOUT.html" title="constant dwara::upgrade::DEFAULT_UPGRADE_READY_TIMEOUT">DEFAULT_<wbr>UPGRADE_<wbr>READY_<wbr>TIMEOUT</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>How long the old process waits for the new process to signal READY
+before giving up (and keeping the old process running). Generous:
+the new process must load config, bind, and spawn accept tasks.</dd><dt><a class="constant" href="constant.READY_FRAME.html" title="constant dwara::upgrade::READY_FRAME">READY_<wbr>FRAME</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The readiness frame the new process sends once its accept loops are
+running. A single line so a <code>read_line</code> drains it cleanly.</dd><dt><a class="constant" href="constant.UPGRADE_READY_SOCKET_ENV.html" title="constant dwara::upgrade::UPGRADE_READY_SOCKET_ENV">UPGRADE_<wbr>READY_<wbr>SOCKET_<wbr>ENV</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Env var the OLD process sets on the spawned child: the path of the
+Unix domain socket the child connects to after it is accepting.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.await_ready.html" title="fn dwara::upgrade::await_ready">await_<wbr>ready</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Wait for the new process to signal READY over the Unix domain socket.
+The old process has already bound <code>listener</code> at <code>ready_socket_path</code>
+BEFORE spawning the child (so the child’s connect cannot race a
+missing listener). Returns Ok(()) on READY, Err on timeout/IO error
+(the caller keeps running on Err — a failed upgrade is safe).</dd><dt><a class="fn" href="fn.bind_with_reuse_port.html" title="fn dwara::upgrade::bind_with_reuse_port">bind_<wbr>with_<wbr>reuse_<wbr>port</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Bind a TCP listener with <code>SO_REUSEADDR</code> AND <code>SO_REUSEPORT</code> so a second
+process can bind the same address during an upgrade hand-off. Returns
+a tokio <code>TcpListener</code> (non-blocking, close-on-exec handled by tokio).</dd><dt><a class="fn" href="fn.initiate_upgrade.html" title="fn dwara::upgrade::initiate_upgrade">initiate_<wbr>upgrade</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The OLD process’s upgrade entry point. Called from the SIGUSR2 handler
+in main. Binds the ready socket, spawns the child, awaits READY, and
+returns Ok(()) when the old process should proceed to drain+exit. On
+any error the old process keeps running (returns the error for logging).</dd><dt><a class="fn" href="fn.new_binary_path.html" title="fn dwara::upgrade::new_binary_path">new_<wbr>binary_<wbr>path</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Resolve the new binary path for an upgrade. <code>DWARA_UPGRADE_BINARY</code>
+overrides; otherwise the current executable. Falls back to a literal
+<code>dwara</code> on PATH only if current_exe cannot be resolved (extremely
+rare — the binary was exec’d to get here).</dd><dt><a class="fn" href="fn.ready_socket_path.html" title="fn dwara::upgrade::ready_socket_path">ready_<wbr>socket_<wbr>path</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>A unique Unix domain socket path for one upgrade hand-off. Lives
+under <code>/tmp</code> (NOT <code>std::env::temp_dir()</code>: on macOS the temp dir is a
+long <code>/var/folders/...</code> path that can exceed the Unix domain socket
+SUN_LEN limit of 104 bytes), namespaced by the OLD process’s PID so
+concurrent upgrades on the same host do not collide.</dd><dt><a class="fn" href="fn.ready_timeout.html" title="fn dwara::upgrade::ready_timeout">ready_<wbr>timeout</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The upgrade ready timeout. <code>DWARA_UPGRADE_READY_TIMEOUT_SECS</code> overrides
+the default; an unparseable value falls back to the default.</dd><dt><a class="fn" href="fn.signal_ready.html" title="fn dwara::upgrade::signal_ready">signal_<wbr>ready</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>The NEW process’s readiness signal. Called from main AFTER all
+listeners are bound and accept tasks are spawned. Connects to the
+ready socket named by <a href="constant.UPGRADE_READY_SOCKET_ENV.html" title="constant dwara::upgrade::UPGRADE_READY_SOCKET_ENV"><code>UPGRADE_READY_SOCKET_ENV</code></a> and sends READY.
+Errors are logged but do NOT stop the new process — it is already
+serving traffic; the old process will time out and keep running (or
+the operator notices the old process did not exit and investigates).</dd><dt><a class="fn" href="fn.spawn_upgrade_child.html" title="fn dwara::upgrade::spawn_upgrade_child">spawn_<wbr>upgrade_<wbr>child</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Spawn the new binary as an upgrade child. The child inherits the
+environment (DWARA_CONFIG, DWARA_BIND, … — it must serve the SAME
+listeners) plus <a href="constant.UPGRADE_READY_SOCKET_ENV.html" title="constant dwara::upgrade::UPGRADE_READY_SOCKET_ENV"><code>UPGRADE_READY_SOCKET_ENV</code></a> pointing at <code>ready_socket</code>.
+The child is detached (no stdio piped) so it outlives the old process’s
+exit independently.</dd><dt><a class="fn" href="fn.write_pid_file.html" title="fn dwara::upgrade::write_pid_file">write_<wbr>pid_<wbr>file</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Write <code>pid</code> to the PID file at <code>path</code> (atomic temp + rename, mirroring
+the CLI’s config writer). Overwrites any existing file. The new
+process calls this after signaling READY so the PID file always names
+the live acceptor.</dd></dl></section></div></main></body></html>

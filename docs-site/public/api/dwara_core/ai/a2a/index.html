@@ -1,0 +1,133 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="A2A (agent-to-agent) protocol support (DW-114, AI-12 #252)."><title>dwara_core::ai::a2a - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module a2a</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module a2a</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-implemented" title="What is implemented">What is implemented</a></li><li><a href="#v03-wire-format-ai-12-252" title="v0.3 wire format (AI-12, #252)">v0.3 wire format (AI-12, #252)</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li><li><a href="#feature-gate" title="Feature gate">Feature gate</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>a2a</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/a2a.rs.html#1-1481">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>A2A (agent-to-agent) protocol support (DW-114, AI-12 #252).</p>
+<p>This module implements the A2A protocol’s task lifecycle state
+machine and the v0.3 JSON-RPC wire format against the A2A Protocol
+Specification (<a href="https://github.com/a2aproject/A2A">https://github.com/a2aproject/A2A</a>) as of 2025-Q4.
+The task state vocabulary (<code>submitted</code>, <code>working</code>, <code>completed</code>,
+<code>failed</code>, <code>canceled</code>) and the legal transitions are stable; the
+wire format (JSON-RPC method names, envelope shapes) is the v0.3
+shape (<code>message/send</code>, <code>message/stream</code>, <code>tasks/get</code>, etc.).</p>
+<h2 id="what-is-implemented"><a class="doc-anchor" href="#what-is-implemented">§</a>What is implemented</h2>
+<ul>
+<li>The <a href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine"><code>TaskStateMachine</code></a> struct: a validating state machine for
+A2A task lifecycle transitions. Legal transitions:
+<ul>
+<li><code>Submitted -&gt; Working</code> (the agent starts processing)</li>
+<li><code>Submitted -&gt; Failed</code> (the agent rejects the task)</li>
+<li><code>Submitted -&gt; Canceled</code> (the caller cancels before processing)</li>
+<li><code>Working -&gt; Completed</code> (the agent finishes successfully)</li>
+<li><code>Working -&gt; Failed</code> (the agent fails mid-processing)</li>
+<li><code>Working -&gt; Canceled</code> (the caller cancels during processing)</li>
+<li><code>Completed</code>, <code>Failed</code>, <code>Canceled</code> are terminal (no transitions
+out). Illegal transitions return an <a href="enum.A2AError.html" title="enum dwara_core::ai::a2a::A2AError"><code>A2AError</code></a> naming the
+attempted and target states.</li>
+</ul>
+</li>
+<li>The <a href="struct.A2AAdapter.html" title="struct dwara_core::ai::a2a::A2AAdapter"><code>A2AAdapter</code></a> struct implementing <a href="../adapter/trait.ProviderAdapter.html" title="trait dwara_core::ai::adapter::ProviderAdapter"><code>ProviderAdapter</code></a>: it
+translates a canonical <a href="../types/struct.ChatRequest.html" title="struct dwara_core::ai::types::ChatRequest"><code>ChatRequest</code></a> into an A2A v0.3 JSON-RPC
+<code>message/send</code> (or <code>message/stream</code> for streaming) body
+(<a href="struct.A2AAdapter.html#method.build_request" title="method dwara_core::ai::a2a::A2AAdapter::build_request"><code>A2AAdapter::build_request</code></a>) and parses an A2A response back
+into the canonical <a href="../types/struct.ChatResponse.html" title="struct dwara_core::ai::types::ChatResponse"><code>ChatResponse</code></a>
+(<a href="struct.A2AAdapter.html#method.parse_response" title="method dwara_core::ai::a2a::A2AAdapter::parse_response"><code>A2AAdapter::parse_response</code></a>). The adapter handles both direct
+<code>Message</code> results (with <code>parts[]</code> using the <code>kind</code> discriminator)
+and <code>Task</code> results (extracting text from <code>status.message</code> or
+<code>artifacts</code>). Error and stream-event parsing are wired too (the
+SSE framing reuses <a href="../sse/index.html" title="mod dwara_core::ai::sse"><code>crate::ai::sse</code></a>); stream events cover
+<code>TaskStatusUpdateEvent</code>, <code>TaskArtifactUpdateEvent</code>, and direct
+<code>Message</code> frames.</li>
+<li>The <a href="struct.AgentCard.html" title="struct dwara_core::ai::a2a::AgentCard"><code>AgentCard</code></a> struct and <a href="struct.AgentCardParser.html" title="struct dwara_core::ai::a2a::AgentCardParser"><code>AgentCardParser</code></a>: parse the
+JSON-LD-ish Agent Card discovery doc (name, description, url,
+version, capabilities, authentication) from an inline JSON value
+or a file path.</li>
+<li>The <a href="enum.TaskLifecycle.html" title="enum dwara_core::ai::a2a::TaskLifecycle"><code>TaskLifecycle</code></a> enum: the task state vocabulary
+(<code>Submitted</code>, <code>Working</code>, <code>Completed</code>, <code>Failed</code>, <code>Canceled</code>).</li>
+<li>The <a href="struct.A2ASession.html" title="struct dwara_core::ai::a2a::A2ASession"><code>A2ASession</code></a> struct: reuses the MCP session-management
+patterns (session id, TTL, max-concurrent) for agent-to-agent
+task sessions. Each session owns a <a href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine"><code>TaskStateMachine</code></a>.</li>
+<li>The <a href="fn.handle_a2a_request.html" title="fn dwara_core::ai::a2a::handle_a2a_request"><code>handle_a2a_request</code></a> function: routes an A2A call through
+the existing <code>dataplane::ai_proxy</code> path (the transport is the
+agent’s named upstream, exactly like a regular provider).</li>
+</ul>
+<h2 id="v03-wire-format-ai-12-252"><a class="doc-anchor" href="#v03-wire-format-ai-12-252">§</a>v0.3 wire format (AI-12, #252)</h2>
+<p>The adapter speaks the A2A v0.3 JSON-RPC binding:</p>
+<ul>
+<li><strong>Request</strong>: <code>message/send</code> (non-streaming) or <code>message/stream</code>
+(streaming). The canonical <code>ChatRequest</code> is folded into
+<code>params.message.parts[]</code> using the <code>kind</code>-discriminated part
+shape (<code>text</code>, <code>file</code>, <code>data</code>). System messages are folded as a
+text preamble (A2A has no system role). The message carries a
+generated <code>messageId</code> and <code>role: "user"</code>.</li>
+<li><strong>Response</strong>: the adapter detects whether the JSON-RPC <code>result</code>
+is a <code>Message</code> (has <code>parts</code> or <code>kind: "message"</code>) or a <code>Task</code>
+(has <code>status</code> or <code>kind: "task"</code>). For Tasks, text is extracted
+from <code>status.message.parts</code> or <code>artifacts[].parts</code>. The task
+state maps to <code>FinishReason</code> (<code>completed</code> -&gt; <code>Stop</code>, <code>failed</code> -&gt;
+<code>Other("failed")</code>, etc.).</li>
+<li><strong>Streaming</strong>: SSE frames carry JSON-RPC responses whose
+<code>result</code> is one of <code>TaskStatusUpdateEvent</code> (has <code>status</code>),
+<code>TaskArtifactUpdateEvent</code> (has <code>artifact</code>), or a direct
+<code>Message</code> (has <code>parts</code>). Terminal states emit a finish delta.</li>
+<li><strong>Backward compat</strong>: the adapter still accepts the older
+<code>content</code>/<code>type</code> message shape and the <code>result.message</code> wrapper
+for agents that have not migrated to v0.3.</li>
+</ul>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only. The A2A adapter is a pure translator
+(no HTTP client of its own), mirroring the OpenAI/Anthropic/Gemini
+adapters and the MCP gateway. No new dependencies are introduced
+(the scaffold is hand-rolled, the same locked M4 decision as MCP).</p>
+<h2 id="feature-gate"><a class="doc-anchor" href="#feature-gate">§</a>Feature gate</h2>
+<p>The <code>a2a</code> cargo feature is flag-only (no new deps). When it is OFF,
+the <code>ai.a2a</code> config block is accepted but inert: validation warns,
+and <a href="struct.CompiledA2a.html#method.compile" title="associated function dwara_core::ai::a2a::CompiledA2a::compile"><code>CompiledA2a::compile</code></a> returns <code>None</code> (no A2A providers are
+wired into the alias table). When it is ON, each configured agent
+appears as a provider of kind <code>a2a</code> in the model alias table.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.A2AAdapter.html" title="struct dwara_core::ai::a2a::A2AAdapter">A2AAdapter</a></dt><dd>The A2A provider adapter (DW-114, DP-12 #252). A pure translator,
+like the OpenAI/Anthropic/Gemini adapters: it holds no state and
+opens no connections. The transport is the agent’s named upstream,
+driven from <code>dataplane::ai_proxy</code>.</dd><dt><a class="struct" href="struct.A2ASession.html" title="struct dwara_core::ai::a2a::A2ASession">A2ASession</a></dt><dd>One A2A task session (DW-114), mirroring MCP’s session model: a
+session id, a TTL, and a max-concurrent cap. The session is a
+correlation handle for an agent-to-agent task exchange and owns a
+<a href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine"><code>TaskStateMachine</code></a> tracking the task’s lifecycle state.</dd><dt><a class="struct" href="struct.A2AStub.html" title="struct dwara_core::ai::a2a::A2AStub">A2AStub</a></dt><dd>The former stub error type, kept as a compatibility alias for the
+<code>handle_a2a_request</code> function (which is about the network call, not
+the state machine). New code should use <a href="enum.A2AError.html" title="enum dwara_core::ai::a2a::A2AError"><code>A2AError</code></a> directly.</dd><dt><a class="struct" href="struct.AgentCard.html" title="struct dwara_core::ai::a2a::AgentCard">Agent<wbr>Card</a></dt><dd>An Agent Card (DW-114): the JSON-LD-ish discovery doc an A2A agent
+publishes to declare its identity, capabilities, and
+authentication. Parsed from an inline JSON value or a file path by
+<a href="struct.AgentCardParser.html" title="struct dwara_core::ai::a2a::AgentCardParser"><code>AgentCardParser</code></a>.</dd><dt><a class="struct" href="struct.AgentCardParser.html" title="struct dwara_core::ai::a2a::AgentCardParser">Agent<wbr>Card<wbr>Parser</a></dt><dd>Parses Agent Card JSON (DW-114) from an inline JSON value or a
+file path. The card shape is JSON-LD-ish: a top-level object with
+<code>name</code>, <code>description</code>, <code>url</code>, <code>version</code>, <code>capabilities</code>, and
+<code>authentication</code> fields. Unknown fields are tolerated (the spec is
+not frozen). Required fields are <code>name</code> and <code>url</code>; missing either
+is a parse error.</dd><dt><a class="struct" href="struct.CompiledA2a.html" title="struct dwara_core::ai::a2a::CompiledA2a">Compiled<wbr>A2a</a></dt><dd>The compiled A2A surface (DW-114): the agent table and session
+policy. Built at <code>AiRuntime</code> compile time from the <code>ai.a2a</code> config
+block; immutable once built. None when the block is absent or the
+<code>a2a</code> feature is off (the block is inert).</dd><dt><a class="struct" href="struct.CompiledA2aAgent.html" title="struct dwara_core::ai::a2a::CompiledA2aAgent">Compiled<wbr>A2aAgent</a></dt><dd>One compiled A2A agent (DW-114): the resolved provider entry an
+alias can route to. Built at <code>AiRuntime</code> compile time from the
+<code>ai.a2a.agents[]</code> config; immutable once built.</dd><dt><a class="struct" href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine">Task<wbr>State<wbr>Machine</a></dt><dd>A validating state machine for A2A task lifecycle transitions
+(DW-114). Holds the current state; transition methods validate the
+transition and return the new state, or an <a href="enum.A2AError.html" title="enum dwara_core::ai::a2a::A2AError"><code>A2AError</code></a> when the
+transition is illegal.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.A2AError.html" title="enum dwara_core::ai::a2a::A2AError">A2AError</a></dt><dd>Error returned by A2A task lifecycle operations. Replaces the
+former <code>A2AStub</code> (the spec is now sufficiently stable for the task
+state machine; the wire format may still evolve). The <a href="struct.A2AStub.html" title="struct dwara_core::ai::a2a::A2AStub"><code>A2AStub</code></a>
+type is kept as an alias for backward compatibility with the
+<code>handle_a2a_request</code> function (which is about the network call,
+not the state machine).</dd><dt><a class="enum" href="enum.TaskLifecycle.html" title="enum dwara_core::ai::a2a::TaskLifecycle">Task<wbr>Lifecycle</a></dt><dd>The A2A task lifecycle state vocabulary (DW-114). The states follow
+the A2A Protocol Specification draft: <code>submitted</code>, <code>working</code>,
+<code>completed</code>, <code>failed</code>, <code>canceled</code>. The legal transitions between
+them are enforced by <a href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine"><code>TaskStateMachine</code></a>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.a2a_providers.html" title="fn dwara_core::ai::a2a::a2a_providers">a2a_<wbr>providers</a></dt><dd>The A2A agent entries that should appear as providers in the alias
+table (DW-114). Each entry is <code>(name, upstream)</code> — the provider
+name and the upstream that carries its transport. The <code>AiRuntime</code>
+compile path inserts these into the provider pool with
+<code>kind: a2a</code>. Returns an empty vec when the block is absent or
+inert.</dd><dt><a class="fn" href="fn.compile_a2a.html" title="fn dwara_core::ai::a2a::compile_a2a">compile_<wbr>a2a</a></dt><dd>Build the <a href="struct.CompiledA2a.html" title="struct dwara_core::ai::a2a::CompiledA2a"><code>CompiledA2a</code></a> from the gateway’s <code>ai.a2a</code> block, for
+the <code>AiRuntime</code> compile path. Returns None when the block is
+absent or inert (feature off / disabled).</dd><dt><a class="fn" href="fn.handle_a2a_request.html" title="fn dwara_core::ai::a2a::handle_a2a_request">handle_<wbr>a2a_<wbr>request</a></dt><dd>Route an A2A call through the existing <code>dataplane::ai_proxy</code> path
+(DW-114). The transport is the agent’s named upstream, exactly like
+a regular provider: the <a href="struct.A2AAdapter.html" title="struct dwara_core::ai::a2a::A2AAdapter"><code>A2AAdapter</code></a> builds the task-submit
+request, <code>ai_proxy</code> places the call through the upstream, and the
+response is parsed back to the canonical shape. This function is
+the seam the dataplane calls for an A2A-routed alias; today it
+returns an <a href="struct.A2AStub.html" title="struct dwara_core::ai::a2a::A2AStub"><code>A2AStub</code></a> error because the adapter intentionally
+does not own an HTTP client (the transport is the agent’s
+upstream, driven from <code>dataplane::ai_proxy</code>). The task lifecycle
+state machine itself is implemented (see <a href="struct.TaskStateMachine.html" title="struct dwara_core::ai::a2a::TaskStateMachine"><code>TaskStateMachine</code></a>);
+this function is the network-call seam, not the state machine.</dd></dl></section></div></main></body></html>

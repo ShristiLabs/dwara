@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Replay time-travel debugging CLI logic (DW-102): the pure half of the `dwara replay` subcommand, kept library-shaped so tests exercise exactly what the binary runs."><title>dwara_cli::replay - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_cli" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module replay</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_cli/index.html">dwara_<wbr>cli</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module replay</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#exit-code-contract" title="Exit-code contract">Exit-code contract</a></li><li><a href="#recording-format" title="Recording format">Recording format</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>cli</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_cli</a></div><h1>Module <span>replay</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_cli/replay.rs.html#1-159">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Replay time-travel debugging CLI logic (DW-102): the pure half of
+the <code>dwara replay</code> subcommand, kept library-shaped so tests exercise
+exactly what the binary runs.</p>
+<h2 id="exit-code-contract"><a class="doc-anchor" href="#exit-code-contract">§</a>Exit-code contract</h2>
+<ul>
+<li>0 = no decision diffs (the candidate config behaves identically
+to the baseline for every recorded request).</li>
+<li>1 = diffs found (useful as a CI gate: a config change that
+alters routing, authz, rate-limit, transform, or upstream
+decisions for recorded traffic is surfaced before deploy).</li>
+<li>2 = the recording or a config could not be loaded (operator
+error, distinct from a clean diff).</li>
+</ul>
+<h2 id="recording-format"><a class="doc-anchor" href="#recording-format">§</a>Recording format</h2>
+<p>A recording is a JSON document exported from the analytics store
+(or authored by hand for test fixtures):</p>
+<div class="example-wrap"><pre class="language-json"><code>{
+  &quot;baseline_config&quot;: &quot;&lt;baseline YAML string&gt;&quot;,
+  &quot;requests&quot;: [
+    {
+      &quot;method&quot;: &quot;GET&quot;,
+      &quot;path&quot;: &quot;/api/foo&quot;,
+      &quot;headers&quot;: [[&quot;x-plan&quot;, &quot;pro&quot;]],
+      &quot;auth_identity&quot;: &quot;alice&quot;,
+      &quot;timestamp_ms&quot;: 1700000000000
+    }
+  ]
+}</code></pre></div>
+<p>The <code>baseline_config</code> is the config the requests were captured
+under; <code>--config</code> is the candidate (new) config. The replay runs
+<a href="../../dwara_core/dataplane/replay/fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>dwara_core::dataplane::replay::decide</code></a> for each request under
+BOTH configs and emits a per-request <a href="../../dwara_core/dataplane/replay/struct.DecisionDiff.html" title="struct dwara_core::dataplane::replay::DecisionDiff"><code>DecisionDiff</code></a> report.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.RecordedRequest.html" title="struct dwara_cli::replay::RecordedRequest">Recorded<wbr>Request</a></dt><dd>One request in a recording (the JSON shape the CLI reads).</dd><dt><a class="struct" href="struct.Recording.html" title="struct dwara_cli::replay::Recording">Recording</a></dt><dd>A recording: the baseline config plus the captured requests.</dd><dt><a class="struct" href="struct.ReplayReport.html" title="struct dwara_cli::replay::ReplayReport">Replay<wbr>Report</a></dt><dd>The outcome of a replay run: the per-request diffs and a summary
+count. The CLI prints the diffs and exits 1 when <code>diff_count &gt; 0</code>.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.replay_against.html" title="fn dwara_cli::replay::replay_against">replay_<wbr>against</a></dt><dd>Run <a href="../../dwara_core/dataplane/replay/fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a> for each request under both snapshots and diff.
+Public for testing (the pure core of <a href="fn.run_replay.html" title="fn dwara_cli::replay::run_replay"><code>run_replay</code></a> without the
+parse/compile error paths).</dd><dt><a class="fn" href="fn.run_replay.html" title="fn dwara_cli::replay::run_replay">run_<wbr>replay</a></dt><dd>Run a replay: load the recording, compile the baseline and candidate
+configs, run <a href="../../dwara_core/dataplane/replay/fn.decide.html" title="fn dwara_core::dataplane::replay::decide"><code>decide</code></a> for each request under both, and diff.
+Returns the report or an error message (operator error).</dd></dl></section></div></main></body></html>

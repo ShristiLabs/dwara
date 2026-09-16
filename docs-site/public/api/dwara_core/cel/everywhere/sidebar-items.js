@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CelUseSite"],"fn":["compile_for","evaluate_for"],"struct":["HeaderTransform","PolicyCondition","RateLimitKey","RequestContext","RouteCondition"]};

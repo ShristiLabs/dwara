@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CedarDecision","CedarError"],"mod":["opa"],"struct":["CedarAuthorizer","CedarRequest","HotReloadCedarAuthorizer"]};

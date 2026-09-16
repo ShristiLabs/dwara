@@ -1,0 +1,83 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="WebSocket policy (DW-039 + DP-05 #253): the knobs that turn the generic 101 tunnel into a managed one for browser-style WebSocket traffic — origin allowlisting at the handshake, post-upgrade frame-rate policing, per-frame size limits, idle-timeout reaping, and RFC 6455 protocol-error enforcement on the tunnel."><title>dwara_core::dataplane::websocket - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module websocket</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module websocket</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#zero-new-dependencies-by-construction" title="Zero new dependencies, by construction">Zero new dependencies, by construction</a></li><li><a href="#the-origin-gate" title="The origin gate">The origin gate</a></li><li><a href="#the-frame-rate-policer" title="The frame-rate policer">The frame-rate policer</a></li><li><a href="#dp-05-253-frame-size-protocol-errors-and-idle-timeout" title="DP-05 (#253): frame size, protocol errors, and idle timeout">DP-05 (#253): frame size, protocol errors, and idle timeout</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>websocket</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/websocket.rs.html#1-594">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>WebSocket policy (DW-039 + DP-05 #253): the knobs that turn the
+generic 101 tunnel into a managed one for browser-style WebSocket
+traffic — origin allowlisting at the handshake, post-upgrade
+frame-rate policing, per-frame size limits, idle-timeout reaping,
+and RFC 6455 protocol-error enforcement on the tunnel.</p>
+<h2 id="zero-new-dependencies-by-construction"><a class="doc-anchor" href="#zero-new-dependencies-by-construction">§</a>Zero new dependencies, by construction</h2>
+<p>The module hand-rolls exactly as much of RFC 6455 as policing
+needs and not one byte more. The frame scanner reads HEADERS only
+(2..=14 bytes: opcode + mask bit + 7/16/64-bit lengths) — it never
+unmasks, never inspects payload bytes. The origin check is a string
+comparison against config values. The close frames the policer
+sends (opcode 8, status 1008/1009/1002) are four fixed bytes each.
+Everything else — the handshake itself, the upgraded byte pipe —
+stays the generic tunnel’s job (<code>proxy::tunnel</code> / <code>proxy::idle_tunnel</code>);
+a non-WebSocket upgrade (any other <code>Upgrade</code> token) never enters
+this module.</p>
+<h2 id="the-origin-gate"><a class="doc-anchor" href="#the-origin-gate">§</a>The origin gate</h2>
+<p>Applied in the proxy action when the request offers a <code>websocket</code>
+upgrade: a non-empty <code>routes[].websocket.origins</code> list admits ONLY
+exact (case-sensitive) matches. A MISSING <code>Origin</code> header is
+denied — browsers always send one on a WebSocket handshake, so an
+originless handshake is a non-browser client the operator did not
+name; fail closed. The check denies BEFORE any upstream contact
+(no dial, no breaker observation) with the gateway’s standard
+envelope, code <code>websocket_origin_denied</code>.</p>
+<h2 id="the-frame-rate-policer"><a class="doc-anchor" href="#the-frame-rate-policer">§</a>The frame-rate policer</h2>
+<p><a href="struct.WsPoliceIo.html" title="struct dwara_core::dataplane::websocket::WsPoliceIo"><code>WsPoliceIo</code></a> wraps the UPGRADED CLIENT side of the tunnel. Every
+byte the client sends passes through transparently while a scanner
+tracks frame boundaries and counts DATA frames (text <code>0x1</code>,
+binary <code>0x2</code>, continuation <code>0x0</code>; ping/pong/close are free — they
+are the protocol’s own housekeeping, and a ping flood is bounded
+by the connection itself). The allowance is a token bucket:
+<code>rate</code> tokens per second, capacity <code>rate</code> (a one-second burst). A
+data frame with no token left trips the policer: a close frame
+with status 1008 (policy violation) is queued for the CLIENT
+direction (written ahead of any other pending bytes), the client
+read side returns EOF (the tunnel propagates shutdown), and the
+connection ends. Policing is one-directional by design: it
+protects UPSTREAMS from abusive clients.</p>
+<p>Fragmented messages count per frame — a client fragmenting every
+message gets policed harder, not softer; the conservative
+direction is the safe one. Extended (16/64-bit) lengths are data
+frames by construction: RFC 6455 caps CONTROL frames at 125
+payload bytes, so only data frames ever carry them.</p>
+<h2 id="dp-05-253-frame-size-protocol-errors-and-idle-timeout"><a class="doc-anchor" href="#dp-05-253-frame-size-protocol-errors-and-idle-timeout">§</a>DP-05 (#253): frame size, protocol errors, and idle timeout</h2>
+<p>The frame scanner was extended to enforce three additional
+policies, all closing the connection with the appropriate code:</p>
+<ul>
+<li><strong><code>max_frame_size_bytes</code></strong>: a DATA frame whose payload length
+exceeds the configured cap is closed with status 1009 (message
+too big). The check runs at the header scan — both the 7-bit
+short length and the 16/64-bit extended length — before the
+payload is consumed.</li>
+<li><strong>Reserved opcodes</strong>: RFC 6455 reserves 0x3-0x7 (data) and
+0xB-0xF (control). A frame using a reserved opcode is closed
+with status 1002 (protocol error).</li>
+<li><strong>Control-frame length</strong>: control frames with extended lengths
+(len7 &gt;= 126) violate RFC 6455 §5.5 (control payloads must be
+&lt;= 125 bytes) and are closed with status 1002.</li>
+</ul>
+<p>The idle timeout (<code>idle_timeout_s</code>) is enforced at the tunnel
+level by <code>proxy::idle_tunnel</code>, which wraps the bidirectional copy
+in a resettable <code>tokio::time::sleep</code>. Each successful read or
+write in either direction resets the timer; if it fires, both
+sides are shut down.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.FrameCounter.html" title="struct dwara_core::dataplane::websocket::FrameCounter">Frame<wbr>Counter</a></dt><dd>The frame-boundary scanner: fed the exact byte stream the tunnel
+forwards client-to-upstream, counts data frames. Bytes are
+ANALYZED, never modified — the tunnel stays byte-exact.</dd><dt><a class="struct" href="struct.WsPoliceIo.html" title="struct dwara_core::dataplane::websocket::WsPoliceIo">WsPolice<wbr>Io</a></dt><dd>The policing wrapper around the UPGRADED CLIENT side of the tunnel
+(DW-039, DP-05 #253). Reads pass through byte-exact while the frame
+scanner counts; on the first unfunded data frame a 1008 close frame
+is queued for the write path (ahead of any other bytes) and the read
+side returns EOF — the tunnel then shuts both directions down.
+Bytes are never modified in either direction.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.FrameViolation.html" title="enum dwara_core::dataplane::websocket::FrameViolation">Frame<wbr>Violation</a></dt><dd>The kind of protocol violation the frame scanner detected (DP-05,
+#253). Stored in the shared violation flag so the tunnel spawner
+records the right metric and close code.</dd><dt><a class="enum" href="enum.Handshake.html" title="enum dwara_core::dataplane::websocket::Handshake">Handshake</a></dt><dd>The handshake gate’s outcome for one upgrade request.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.count_data_frames.html" title="fn dwara_core::dataplane::websocket::count_data_frames">count_<wbr>data_<wbr>frames</a></dt><dd>Data frames counted for a byte stream fed in one chunk (tests and
+diagnostics).</dd><dt><a class="fn" href="fn.flag_to_metric.html" title="fn dwara_core::dataplane::websocket::flag_to_metric">flag_<wbr>to_<wbr>metric</a></dt><dd>Decode the shared violation flag into the metric label the tunnel
+spawner records (DP-05, #253). Returns an empty string when no
+violation occurred.</dd><dt><a class="fn" href="fn.handshake_verdict.html" title="fn dwara_core::dataplane::websocket::handshake_verdict">handshake_<wbr>verdict</a></dt><dd>One policy decision at the handshake (DW-039): the proxy calls
+this before forwarding an upgrade request.</dd><dt><a class="fn" href="fn.offers_websocket.html" title="fn dwara_core::dataplane::websocket::offers_websocket">offers_<wbr>websocket</a></dt><dd>Whether a request offering upgrades asks for WebSocket (the
+<code>Upgrade</code> header is a comma list; the token is case-insensitive
+per RFC 7230).</dd><dt><a class="fn" href="fn.origin_allowed.html" title="fn dwara_core::dataplane::websocket::origin_allowed">origin_<wbr>allowed</a></dt><dd>The origin gate: <code>true</code> when the handshake may proceed. A
+non-empty allowlist admits only exact matches; a missing <code>Origin</code>
+is denied under a non-empty allowlist (fail closed).</dd></dl></section></div></main></body></html>

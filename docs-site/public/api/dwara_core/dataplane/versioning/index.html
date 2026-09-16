@@ -1,0 +1,71 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="API versioning aids (DW-048): the Accept media-type criterion of route matching, and the Deprecation/Sunset response-header automation."><title>dwara_core::dataplane::versioning - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module versioning</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module versioning</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-code-here-vs-already-expressible-the-honest-split" title="What is code here vs already expressible (the honest split)">What is code here vs already expressible (the honest split)</a></li><li><a href="#the-v1-same-path-limitation-documented-deliberately-not-fixed" title="The v1 same-path limitation (documented, deliberately not fixed)">The v1 same-path limitation (documented, deliberately not fixed)</a></li><li><a href="#caching-correctness" title="Caching correctness">Caching correctness</a></li></ul><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>versioning</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/versioning.rs.html#1-120">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>API versioning aids (DW-048): the Accept media-type criterion of
+route matching, and the Deprecation/Sunset response-header
+automation.</p>
+<h3 id="what-is-code-here-vs-already-expressible-the-honest-split"><a class="doc-anchor" href="#what-is-code-here-vs-already-expressible-the-honest-split">§</a>What is code here vs already expressible (the honest split)</h3>
+<p>The router (DW-010) already covers the common versioning shapes, and
+this module deliberately does NOT re-implement any of them:</p>
+<ul>
+<li><strong>Path-segment versions</strong> (<code>/v1/users</code>, <code>/v2/users</code>): plain path
+routes with the canonical precedence (exact &gt; regex &gt; prefix;
+longest prefix wins), plus <code>rewrite.replace_prefix</code> to strip the
+version segment toward a version-agnostic upstream. Nothing new
+was needed.</li>
+<li><strong>Version-header constraints</strong> (<code>X-API-Version: "2"</code>): the exact
+header matcher (<code>match.headers</code>) already expresses “this route
+additionally requires that header value”. Nothing new was needed.</li>
+<li><strong>Version-in-query</strong> (<code>?version=2</code>): <code>match.query</code> covers it.</li>
+</ul>
+<p>Two things were genuinely missing, and are the whole of the code:</p>
+<ol>
+<li><strong>Accept media-type selection</strong> (<a href="fn.accept_matches.html" title="fn dwara_core::dataplane::versioning::accept_matches"><code>accept_matches</code></a>): the exact
+header matcher requires byte-equality of the ENTIRE header value,
+so <code>Accept: application/vnd.acme.v2+json, application/json;q=0.8</code>
+cannot select a version. <code>match.accept</code> names one media type; the
+route applies when any Accept entry names that type/subtype
+(case-insensitive), ignoring parameters and q-values — including
+q=0, which RFC 9110 section 12.5.1 defines as <code>not acceptable</code>
+but which does not affect selection in v1 (a documented design
+decision: naming the version selects it, however reluctantly).
+The configured value is normalized (padding, case) once at
+snapshot compile and the compiled form is what the criterion
+compares, so the raw config string never reaches the hot path.
+Wildcard entries and a missing Accept never match: version
+selection requires the client to NAME the version, so
+unconstrained clients fall through to the unversioned default
+route.</li>
+<li><strong>Deprecation/Sunset automation</strong> (<a href="fn.decorate.html" title="fn dwara_core::dataplane::versioning::decorate"><code>decorate</code></a>): the
+<code>routes[].deprecation</code> config block emitting the RFC headers (see
+<code>config::Deprecation</code> for the frozen semantics).</li>
+</ol>
+<h3 id="the-v1-same-path-limitation-documented-deliberately-not-fixed"><a class="doc-anchor" href="#the-v1-same-path-limitation-documented-deliberately-not-fixed">§</a>The v1 same-path limitation (documented, deliberately not fixed)</h3>
+<p>Non-path criteria are applied AFTER path resolution and a criteria
+miss does NOT fall through to another candidate (the frozen DW-010
+model; duplicate exact templates are additionally rejected at
+compile). Consequence: multiple versions of ONE path cannot be
+selected by header or Accept in v1 — a version family uses distinct
+paths (<code>/v1/</code>, <code>/v2/</code>, optionally constrained further by
+<code>match.headers</code>/<code>match.accept</code>), or a single route serving one
+version. Candidate iteration across same-path routes is a router
+model change, out of scope for this aid; noted for the future.</p>
+<h3 id="caching-correctness"><a class="doc-anchor" href="#caching-correctness">§</a>Caching correctness</h3>
+<p>A response whose route was selected by <code>match.accept</code> varies with
+the request’s <code>Accept</code>, so the decoration tail merges
+<code>Vary: Accept</code> into every response of such a route (the same
+reasoning as CORS’s <code>Vary: Origin</code>), composing with compression’s
+<code>Vary: Accept-Encoding</code>.</p>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.accept_matches.html" title="fn dwara_core::dataplane::versioning::accept_matches">accept_<wbr>matches</a></dt><dd>Does the request’s <code>Accept</code> header name <code>media_type</code> (the compiled,
+NORMALIZED <code>type/subtype</code> of <code>match.accept</code> —
+<code>RouteTable::accept_media_type</code>, never the raw config string)? Any
+comma-separated entry of ANY <code>Accept</code> header line matches,
+case-insensitively, with parameters (<code>;q=...</code>, media-type
+parameters) and surrounding whitespace ignored. Wildcard entries
+(<code>*/*</code>, <code>type/*</code>) never match a specific type, and no <code>Accept</code>
+header at all never matches — both deliberately (see the module
+docs).</dd><dt><a class="fn" href="fn.decorate.html" title="fn dwara_core::dataplane::versioning::decorate">decorate</a></dt><dd>Stamp a route’s deprecation policy onto a response (DW-048).
+<code>Deprecation</code> and <code>Sunset</code> REPLACE any upstream-sent values (the
+gateway is the source of truth for the policy it is configured to
+emit — the same rule as the <code>X-RateLimit-*</code> headers); <code>Link</code> is
+APPENDED (a list header: upstream links must survive). Unbuildable
+values are skipped, never panic — validation has already rejected
+them for publishable configs, so this is only a generation-tear
+backstop, the same posture as the respond-action headers.</dd></dl></section></div></main></body></html>

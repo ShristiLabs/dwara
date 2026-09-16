@@ -1,0 +1,49 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI semantic caching (DW-083): embedding-similarity cache for AI prompts. A paraphrased prompt within the similarity threshold returns the cached response (no provider call, no token spend)."><title>dwara_core::ai::semantic_cache - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module semantic_cache</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module semantic_<wbr>cache</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#perf-02-enhancements" title="PERF-02 enhancements">PERF-02 enhancements</a></li><li><a href="#lifecycle" title="Lifecycle">Lifecycle</a></li><li><a href="#request-path" title="Request path">Request path</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>semantic_<wbr>cache</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/semantic_cache.rs.html#1-514">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI semantic caching (DW-083): embedding-similarity cache for AI
+prompts. A paraphrased prompt within the similarity threshold
+returns the cached response (no provider call, no token spend).</p>
+<p>Uses an external embedding service (OpenAI-compatible /v1/embeddings
+API) to vectorize prompts and <code>hnsw_rs</code> (pure Rust HNSW) for
+approximate nearest neighbor search.</p>
+<p>Feature-gated behind the <code>semantic_cache</code> cargo feature. Without it,
+the module compiles to an inert placeholder that always returns
+None (the config is accepted but the cache is a no-op).</p>
+<h2 id="perf-02-enhancements"><a class="doc-anchor" href="#perf-02-enhancements">§</a>PERF-02 enhancements</h2>
+<ul>
+<li><strong>Exact-match fast tier</strong>: before calling the embedding service,
+a <code>HashMap&lt;prompt_hash, entry_id&gt;</code> checks for an exact text match.
+A hit skips the embedding call entirely (the common case for
+repeated identical prompts — RAG traffic, retry storms, etc.).</li>
+<li><strong>LRU eviction</strong>: when the cache reaches <code>max_entries</code>, the least
+recently accessed entry is evicted (not a wholesale reset). Each
+entry carries a <code>last_accessed_ms</code> timestamp; the eviction scan
+is O(n) but runs once per insert, so the amortized cost is O(1).</li>
+<li><strong>Streaming support</strong>: streaming responses (SSE frame sequences)
+are cached and replayed. On a cache miss, the stream is TEE’d:
+frames are forwarded to the client AND collected in a bounded
+buffer; on stream completion, the collected frames are stored. On
+a cache hit, the cached frames are replayed as an SSE response.
+The tee buffer is bounded (<code>stream_cache_max_bytes</code>, default 1
+MiB): a stream exceeding the cap is not cached (the response is
+still forwarded to the client unmodified).</li>
+</ul>
+<h2 id="lifecycle"><a class="doc-anchor" href="#lifecycle">§</a>Lifecycle</h2>
+<p>The engine is constructed once at startup and stored on the
+dataplane behind an <code>ArcSwapOption</code>. It PERSISTS across reloads:
+the HNSW index and cached entries survive config refreshes, and a
+reload updates the config in place via <code>update_config</code> (so a
+threshold or TTL change applies to the next lookup with no cache
+reset).</p>
+<h2 id="request-path"><a class="doc-anchor" href="#request-path">§</a>Request path</h2>
+<p>The LOOKUP runs in <code>serve_ai</code> AFTER guardrails (the prompt may have
+been redacted) and BEFORE model routing + the provider call. A hit
+returns the cached response (JSON for non-streaming, SSE frames for
+streaming) with no provider call. The lookup is async (it may make
+an HTTP call to the embedding service) — acceptable because it runs
+in the already-async <code>serve_ai</code>. The STORE is fire-and-forget (a
+spawned task): the embedding call and the HNSW insert happen AFTER
+the response is sent, so they never block the response path.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SemanticCacheEngine.html" title="struct dwara_core::ai::semantic_cache::SemanticCacheEngine">Semantic<wbr>Cache<wbr>Engine</a></dt><dd>The semantic cache engine (DW-083). Constructed once at
+startup and stored on the dataplane (persists across reloads
+— the HNSW index and cached entries survive config refreshes).
+Config is updated in place via <code>update_config</code>.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.CachedResponse.html" title="enum dwara_core::ai::semantic_cache::CachedResponse">Cached<wbr>Response</a></dt><dd>What a cache lookup returns (PERF-02): the cached response,
+either a JSON body (non-streaming) or SSE frames (streaming).</dd></dl></section></div></main></body></html>

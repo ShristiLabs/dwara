@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CACHE_CAPACITY","DEFAULT_CACHE_STORE_BYTES"],"struct":["InMemoryCache","MokaCache"],"trait":["CacheStore"]};

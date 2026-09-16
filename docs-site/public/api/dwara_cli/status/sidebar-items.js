@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_ADMIN"],"fn":["render_plugins","render_top","resolve_admin","status","top"],"struct":["AdminClient"]};

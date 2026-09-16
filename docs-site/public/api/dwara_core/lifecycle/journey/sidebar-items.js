@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["JourneyStepResult"],"fn":["journey_dimension"],"struct":["Journey","JourneyRecorder","JourneyStep"]};

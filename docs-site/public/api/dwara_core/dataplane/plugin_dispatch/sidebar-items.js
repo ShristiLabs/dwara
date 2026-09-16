@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PLUGIN_BODY_CAP_DEFAULT"],"enum":["PluginStatusState"],"fn":["plugin_body_cap","plugin_statuses"],"struct":["PluginForwardHost","PluginStatusEntry","PluginTargetRewrite","RequestPlugins"],"type":["PluginExit"]};

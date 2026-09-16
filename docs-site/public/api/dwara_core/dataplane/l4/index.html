@@ -1,0 +1,54 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="L4 TCP/UDP proxying with SNI routing reuse (DW-103, DP-01 / #234: UDP datagram forwarding)."><title>dwara_core::dataplane::l4 - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module l4</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module l4</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#tcp-dispatcher" title="TCP dispatcher">TCP dispatcher</a></li><li><a href="#udp-dispatcher-dp-01-234" title="UDP dispatcher (DP-01, #234)">UDP dispatcher (DP-01, #234)</a></li><li><a href="#availability" title="Availability">Availability</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>l4</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/l4.rs.html#1-470">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>L4 TCP/UDP proxying with SNI routing reuse (DW-103, DP-01 / #234:
+UDP datagram forwarding).</p>
+<p>L4 proxying is a LISTENER TYPE, not a route action: a <code>protocol: tcp</code>
+(or <code>protocol: udp</code>) listener accepts raw L4 connections and splices
+them byte-for-byte to an upstream endpoint, never running the HTTP
+pipeline. This is the same byte-splice model the DW-008 TLS
+passthrough path uses – and when <code>sni_routing</code> is true, the TCP
+dispatcher reuses the EXACT SNI extraction from passthrough
+(<code>security::tls::sni_from_client_hello</code> + the peek loop) to select
+the upstream from the listener’s <code>tls.sni_routes</code>.</p>
+<h3 id="tcp-dispatcher"><a class="doc-anchor" href="#tcp-dispatcher">§</a>TCP dispatcher</h3>
+<p><a href="struct.L4Dispatcher.html" title="struct dwara_core::dataplane::l4::L4Dispatcher"><code>L4Dispatcher</code></a> (built from <a href="struct.L4ProxyConfig.html" title="struct dwara_core::dataplane::l4::L4ProxyConfig"><code>L4ProxyConfig</code></a>) accepts a TCP
+connection and:</p>
+<ol>
+<li>If <code>sni_routing</code> is true, peeks the TLS ClientHello SNI (reusing
+<code>security::tls::handle_passthrough</code>’s peek + <code>sni_from_client_hello</code>
+extraction – the same bounded reassembly, the same 64 KiB budget,
+the same 10s peek timeout). The SNI is matched against the
+listener’s <code>tls.sni_routes</code> to select the upstream; the configured
+<code>upstream</code> is the fallback for no-SNI / unmatched names (absent =
+close).</li>
+<li>If <code>sni_routing</code> is false, the configured <code>upstream</code> receives
+every connection.</li>
+<li>The selected upstream’s endpoint is picked through the CURRENT
+generation’s balancers (no hash key – a byte splice has no
+client-IP semantics), so L4 picks follow config reloads.</li>
+<li>The client and upstream connections are spliced with
+<code>tokio::io::copy_bidirectional</code> until either side closes (the
+same tunnel the passthrough path and the 101 upgrade path use).
+An optional idle timeout closes the splice when neither side sends
+data for the configured duration.</li>
+</ol>
+<p>Peeking (never reading) keeps the ClientHello bytes available for the
+upstream once splicing starts: the entire hello is still in the
+socket buffer and is replayed to the upstream by the splice.</p>
+<h3 id="udp-dispatcher-dp-01-234"><a class="doc-anchor" href="#udp-dispatcher-dp-01-234">§</a>UDP dispatcher (DP-01, #234)</h3>
+<p><a href="struct.UdpDispatcher.html" title="struct dwara_core::dataplane::l4::UdpDispatcher"><code>UdpDispatcher</code></a> implements UDP datagram forwarding with per-client
+session tracking. Each unique client <code>SocketAddr</code> gets a dedicated
+upstream <code>UdpSocket</code>; datagrams from the client are forwarded to the
+upstream, and responses from the upstream are forwarded back to the
+client. Sessions expire after a configurable idle timeout (default
+30s) to avoid leaking NAT state. The dispatcher uses a bounded
+session table (<code>max_sessions</code>, default 4096) to prevent resource
+exhaustion under adversarial traffic.</p>
+<h3 id="availability"><a class="doc-anchor" href="#availability">§</a>Availability</h3>
+<p>The entire module is compiled into the OSS build. The config
+schema (<code>ListenerProtocol::Tcp</code>/<code>Udp</code> + <code>L4Config</code>) is always
+present so configs round-trip; L4 proxying is always available.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.L4Dispatcher.html" title="struct dwara_core::dataplane::l4::L4Dispatcher">L4Dispatcher</a></dt><dd>TCP L4 dispatcher: accept one TCP connection, optionally peek SNI,
+select the upstream, and splice byte-for-byte.</dd><dt><a class="struct" href="struct.L4ProxyConfig.html" title="struct dwara_core::dataplane::l4::L4ProxyConfig">L4Proxy<wbr>Config</a></dt><dd>Compiled L4 proxying configuration (from <a href="../../config/struct.L4Config.html" title="struct dwara_core::config::L4Config"><code>L4Config</code></a>).</dd><dt><a class="struct" href="struct.UdpDispatcher.html" title="struct dwara_core::dataplane::l4::UdpDispatcher">UdpDispatcher</a></dt><dd>UDP L4 dispatcher (DP-01, #234): per-client session tracking with
+datagram forwarding and idle-session eviction.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.L4DispatchAction.html" title="enum dwara_core::dataplane::l4::L4DispatchAction">L4Dispatch<wbr>Action</a></dt><dd>The outcome of an L4 TCP dispatch: which upstream endpoint the
+connection was spliced to (for metrics/logging), or that it was
+closed (no upstream, no endpoint, or SNI routing with no match).</dd><dt><a class="enum" href="enum.L4Error.html" title="enum dwara_core::dataplane::l4::L4Error">L4Error</a></dt><dd>L4 proxying error. Kept simple: the dispatcher logs and closes on
+any error – there is no client-facing HTTP envelope at L4.</dd></dl></section></div></main></body></html>

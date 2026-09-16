@@ -1,0 +1,371 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Configuration schema v1 for the gateway (frozen domain vocabulary)."><title>dwara_core::config - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module config</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module config</a></h2><h3><a href="#modules">Module Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>config</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/config/mod.rs.html#1-7412">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Configuration schema v1 for the gateway (frozen domain vocabulary).</p>
+<p>The types in this module model the source form of a dwara configuration
+file. Compilation into a runtime snapshot is a later concern
+(config-compile pipeline); here we define strict, self-describing types:</p>
+<ul>
+<li>every struct rejects unknown fields (<code>deny_unknown_fields</code>),</li>
+<li>field order follows declaration order on serialization,</li>
+<li>the root type <a href="struct.Gateway.html" title="struct dwara_core::config::Gateway"><code>Gateway</code></a> exports a JSON Schema via <code>schemars</code>.</li>
+</ul>
+<p>YAML &lt;-&gt; typed conversions are provided by <a href="fn.parse_gateway.html" title="fn dwara_core::config::parse_gateway"><code>parse_gateway</code></a> (YAML text to
+typed value, with path-precise error messages) and <a href="fn.gateway_to_yaml.html" title="fn dwara_core::config::gateway_to_yaml"><code>gateway_to_yaml</code></a>
+(typed value back to normalized YAML text). Round-trip guarantee:
+<code>parse_gateway(gateway_to_yaml(cfg))</code> always succeeds and yields a value
+that serializes to the identical normalized text (stable normalization,
+not byte-identity with the original input).</p>
+<p>Submodules carry the parts of the config CONTRACT that are more than
+serde shapes: <a href="credentials/index.html" title="mod dwara_core::config::credentials"><code>credentials</code></a> defines the credential selector/stored-hash
+formats every credential holder must agree on plus the <code>${...}</code>
+secret-reference grammar (DW-045), <a href="limits/index.html" title="mod dwara_core::config::limits"><code>limits</code></a> the numeric
+bounds validation enforces, <a href="net/index.html" title="mod dwara_core::config::net"><code>net</code></a> the trusted-proxy IP/CIDR
+grammar shared by validation and the runtime matchers,
+<a href="versioning/index.html" title="mod dwara_core::config::versioning"><code>versioning</code></a> the HTTP-date and media-type grammar of the API
+versioning aids (DW-048), and <a href="transforms/index.html" title="mod dwara_core::config::transforms"><code>transforms</code></a> the JSON-pointer
+grammar and shapes of the request/response transforms and
+security-header injection (DW-028). <a href="cache/index.html" title="mod dwara_core::config::cache"><code>cache</code></a> carries the
+route-scoped response-caching grammar (DW-037), and <a href="ai/index.html" title="mod dwara_core::config::ai"><code>ai</code></a> the
+AI provider/model grammar of the provider-adapter pack (DW-075).</p>
+</div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="ai/index.html" title="mod dwara_core::config::ai">ai</a></dt><dd>The <code>ai:</code> configuration block (DW-075): AI provider adapters.</dd><dt><a class="mod" href="cache/index.html" title="mod dwara_core::config::cache">cache</a></dt><dd>Route-scoped response caching grammar (DW-037, feature analysis
+5-Protocol “Response caching”): the config shape of a route’s cache
+policy and the compiled form the dataplane’s response cache consumes.</dd><dt><a class="mod" href="credentials/index.html" title="mod dwara_core::config::credentials">credentials</a></dt><dd>Credential hashing: the selector and stored-hash formats of the
+credential schema contract (DW-018/DW-019, peppered per #124).</dd><dt><a class="mod" href="includes/index.html" title="mod dwara_core::config::includes">includes</a></dt><dd>Config includes and file-based profiles (CFG-01, #180).</dd><dt><a class="mod" href="limits/index.html" title="mod dwara_core::config::limits">limits</a></dt><dd>Schema-validation limits: numeric bounds the config compiler enforces
+and runtime code must respect.</dd><dt><a class="mod" href="mesh/index.html" title="mod dwara_core::config::mesh">mesh</a></dt><dd>Service mesh config schema (DW-107).</dd><dt><a class="mod" href="net/index.html" title="mod dwara_core::config::net">net</a></dt><dd>Minimal IP/CIDR support for trusted-proxy and IP-ACL matching
+(DW-009/DW-020).</dd><dt><a class="mod" href="quotas/index.html" title="mod dwara_core::config::quotas">quotas</a></dt><dd>Pure quota types shared by the state-store and Redis-backed quota
+implementations (DW-033, DW-155).</dd><dt><a class="mod" href="ssrf/index.html" title="mod dwara_core::config::ssrf">ssrf</a></dt><dd>SSRF egress filter (SEC-13).</dd><dt><a class="mod" href="transforms/index.html" title="mod dwara_core::config::transforms">transforms</a></dt><dd>Request/response transformation grammar (DW-028): the config shapes
+for header/query manipulation and JSON-pointer body transforms, the
+shared JSON-Pointer grammar validation and the runtime agree on, and
+the security-header injection policy (feature analysis 4.12 and the
+5-Security “security header injection” row).</dd><dt><a class="mod" href="versioning/index.html" title="mod dwara_core::config::versioning">versioning</a></dt><dd>API-versioning grammar (DW-048): the two shared vocabularies the
+versioning aids need beyond serde shapes — HTTP-dates (RFC 9110
+IMF-fixdate) and media types (RFC 9110 <code>type/subtype</code> tokens).</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AcmeConfig.html" title="struct dwara_core::config::AcmeConfig">Acme<wbr>Config</a></dt><dd>SEC-02: ACME (Let’s Encrypt) certificate automation configuration.
+The gateway acts as an ACME client: orders certificates for the
+configured domains, completes the challenge (HTTP-01 or TLS-ALPN-01),
+and installs the issued certificates into the hot-reloadable TLS
+termination/SNI resolver. Renewal runs automatically before expiry.</dd><dt><a class="struct" href="struct.ActiveHealth.html" title="struct dwara_core::config::ActiveHealth">Active<wbr>Health</a></dt><dd>Active health check knobs (DW-013). A block with no keys enables HTTP
+probes with the defaults.</dd><dt><a class="struct" href="struct.AdaptiveRateLimit.html" title="struct dwara_core::config::AdaptiveRateLimit">Adaptive<wbr>Rate<wbr>Limit</a></dt><dd>Adaptive + origin-driven rate-limit tuning (DW-089,
+<code>policies[].adaptive</code>): an EWMA of upstream error rate and latency
+dynamically scales this policy’s rate-limit quotas at check time
+(the factor multiplies the effective cost of each request against
+the GCRA bucket), and upstream-originated signals trigger an
+immediate backoff. The factor is bounded <code>[min_factor, max_factor]</code>
+(never 0, never unbounded); tightening under stress is faster than
+relaxing when healthy (asymmetric, so the gateway errs toward
+protecting upstreams). <code>origin_signals</code> selects which upstream
+response signals the controller honors (currently <code>retry_after</code>).</dd><dt><a class="struct" href="struct.AdminApiToken.html" title="struct dwara_core::config::AdminApiToken">Admin<wbr>ApiToken</a></dt><dd>One hashed API token with a role.</dd><dt><a class="struct" href="struct.AdminApiTokensConfig.html" title="struct dwara_core::config::AdminApiTokensConfig">Admin<wbr>ApiTokens<wbr>Config</a></dt><dd>SEC-01: API token authentication for the admin API. Tokens are
+hashed (SHA-256) at rest; the config lists token hashes, not
+plaintext tokens. A client presents a token via
+<code>Authorization: Bearer &lt;token&gt;</code>.</dd><dt><a class="struct" href="struct.AdminAuditConfig.html" title="struct dwara_core::config::AdminAuditConfig">Admin<wbr>Audit<wbr>Config</a></dt><dd>SEC-01: Admin audit log configuration.</dd><dt><a class="struct" href="struct.AdminConfig.html" title="struct dwara_core::config::AdminConfig">Admin<wbr>Config</a></dt><dd>Admin listener configuration (DW-022).</dd><dt><a class="struct" href="struct.AdminRbacBinding.html" title="struct dwara_core::config::AdminRbacBinding">Admin<wbr>Rbac<wbr>Binding</a></dt><dd>One certificate-fingerprint-to-role binding.</dd><dt><a class="struct" href="struct.AdminRbacConfig.html" title="struct dwara_core::config::AdminRbacConfig">Admin<wbr>Rbac<wbr>Config</a></dt><dd>SEC-01: Admin RBAC configuration. Maps client certificate
+fingerprints to roles. A valid certificate with no binding is
+denied (fail-closed).</dd><dt><a class="struct" href="struct.AdminTlsConfig.html" title="struct dwara_core::config::AdminTlsConfig">Admin<wbr>TlsConfig</a></dt><dd>mTLS material for the admin listener (DW-022). Unlike dataplane
+listeners there is no mode: the admin listener always terminates TLS
+and always requires a client certificate chaining to <code>client_ca_file</code>.</dd><dt><a class="struct" href="struct.AdmissionQueue.html" title="struct dwara_core::config::AdmissionQueue">Admission<wbr>Queue</a></dt><dd>Bounded admission queue config (DW-053, <code>gateway.admission_queue</code>).</dd><dt><a class="struct" href="struct.AgentPrincipal.html" title="struct dwara_core::config::AgentPrincipal">Agent<wbr>Principal</a></dt><dd>AI-16 (#204): First-class agent principal metadata. Attached to a
+<code>Consumer</code> with <code>consumer_type: agent</code> to carry agent-specific
+attribution and permission data.</dd><dt><a class="struct" href="struct.AnalyticsConfig.html" title="struct dwara_core::config::AnalyticsConfig">Analytics<wbr>Config</a></dt><dd>The embedded analytics store config (DW-043, <code>gateway.analytics</code>).</dd><dt><a class="struct" href="struct.AnalyticsDimension.html" title="struct dwara_core::config::AnalyticsDimension">Analytics<wbr>Dimension</a></dt><dd>One custom analytics dimension (DW-043,
+<code>analytics.dimensions[]</code>).</dd><dt><a class="struct" href="struct.AnalyticsExports.html" title="struct dwara_core::config::AnalyticsExports">Analytics<wbr>Exports</a></dt><dd>Scheduled usage-report exports (DW-120, <code>analytics.exports</code>).</dd><dt><a class="struct" href="struct.AnalyticsInsights.html" title="struct dwara_core::config::AnalyticsInsights">Analytics<wbr>Insights</a></dt><dd>ML traffic insights config (DW-092, <code>analytics.insights</code>).</dd><dt><a class="struct" href="struct.AnalyticsLiveSketches.html" title="struct dwara_core::config::AnalyticsLiveSketches">Analytics<wbr>Live<wbr>Sketches</a></dt><dd>Live in-process sketches config (DW-092, <code>analytics.live_sketches</code>).</dd><dt><a class="struct" href="struct.AnalyticsReplayCapture.html" title="struct dwara_core::config::AnalyticsReplayCapture">Analytics<wbr>Replay<wbr>Capture</a></dt><dd>Replay time-travel debugging capture config (DW-102,
+<code>analytics.replay_capture</code>). Opt-in capture of request detail
+(redacted headers, auth identity) into the raw analytics table for
+offline replay against candidate configs. The capture reuses the
+existing fire-and-forget analytics writer path and the existing PII
+redaction patterns (<code>ai::redaction</code>); body capture is OFF by
+default (PII risk).</dd><dt><a class="struct" href="struct.AnalyticsRetention.html" title="struct dwara_core::config::AnalyticsRetention">Analytics<wbr>Retention</a></dt><dd>Per-granularity retention (DW-043, <code>analytics.retention</code>).</dd><dt><a class="struct" href="struct.AnalyticsSampledDegradation.html" title="struct dwara_core::config::AnalyticsSampledDegradation">Analytics<wbr>Sampled<wbr>Degradation</a></dt><dd>Sampled degradation config (REL-10, #221). See
+<a href="struct.AnalyticsConfig.html#structfield.sampled_degradation" title="field dwara_core::config::AnalyticsConfig::sampled_degradation"><code>AnalyticsConfig::sampled_degradation</code></a>.</dd><dt><a class="struct" href="struct.AnalyticsStreamConfig.html" title="struct dwara_core::config::AnalyticsStreamConfig">Analytics<wbr>Stream<wbr>Config</a></dt><dd>Real-time access-record stream (DW-121,
+<code>gateway.analytics_stream</code>).</dd><dt><a class="struct" href="struct.AnalyticsStreamKafka.html" title="struct dwara_core::config::AnalyticsStreamKafka">Analytics<wbr>Stream<wbr>Kafka</a></dt><dd>The Kafka batch sink (SCALE-08, #187,
+<code>gateway.analytics_stream.sink.kafka</code>). Produces each flushed
+batch as NDJSON messages to a Kafka topic via a Kafka REST Proxy
+(HTTP-based, no native client dependency). The REST Proxy
+endpoint receives the batch as an HTTP POST with the
+<code>Content-Type: application/vnd.kafka.binary.v2+json</code> media type;
+each NDJSON line becomes a Kafka message value (base64 encoded
+per the REST Proxy spec). TLS is via <code>https://</code>; SASL auth is via
+headers (e.g. <code>Authorization: Basic ...</code>).</dd><dt><a class="struct" href="struct.AnalyticsStreamWebhook.html" title="struct dwara_core::config::AnalyticsStreamWebhook">Analytics<wbr>Stream<wbr>Webhook</a></dt><dd>The webhook batch sink (DW-121,
+<code>gateway.analytics_stream.sink.webhook</code>). Same URL/header/retry
+grammar as <code>gateway.webhooks[]</code> (DW-044) — the delivery engine is
+shared — minus the <code>events</code> filter (a record stream has no kinds to
+filter: every record goes to the sink).</dd><dt><a class="struct" href="struct.AnomalyPolicy.html" title="struct dwara_core::config::AnomalyPolicy">Anomaly<wbr>Policy</a></dt><dd>Anomaly scoring policy (DW-090, <code>policies[].anomaly</code>): lightweight
+statistical detection of abusive request patterns. Each enabled
+signal produces a normalized [0, 1] score from the request shape
+(header entropy, header count/bytes, path length/depth, query count,
+body size, unusual method); the overall score is the average of the
+configured signals’ scores. A score at or above <code>threshold</code> is
+blocked (403 <code>anomaly_blocked</code>) unless <code>dry_run</code> is set.</dd><dt><a class="struct" href="struct.Authz.html" title="struct dwara_core::config::Authz">Authz</a></dt><dd>Route-level authorization rules (DW-020, feature analysis 4.7).</dd><dt><a class="struct" href="struct.BodySchema.html" title="struct dwara_core::config::BodySchema">Body<wbr>Schema</a></dt><dd>A minimal JSON-Schema subset (DW-047) for request-body validation.</dd><dt><a class="struct" href="struct.BreakerConfig.html" title="struct dwara_core::config::BreakerConfig">Breaker<wbr>Config</a></dt><dd>Per-upstream circuit breaker knobs (DW-015). All fields default; a
+<code>breaker:</code> block with no keys enables the breaker with the defaults.</dd><dt><a class="struct" href="struct.CanaryAnalysis.html" title="struct dwara_core::config::CanaryAnalysis">Canary<wbr>Analysis</a></dt><dd>Auto-canary analysis (DW-091): metrics-driven promotion/rollback of
+canary split weights. A background controller compares the canary
+side against the baseline on error rate or latency; on regression it
+rolls the canary weight back (toward 0), on success it promotes
+(toward the total weight). Severe regression (&gt;2x the rollback
+threshold) triggers an immediate rollback to 0. The total weight
+stays constant: when the canary weight changes, the baseline
+absorbs the difference, preserving the hash distribution for
+existing sessions (the DW-040 invariant). Weight changes are
+TRANSIENT (a Generation swap) and revert on config reload.</dd><dt><a class="struct" href="struct.CanaryRule.html" title="struct dwara_core::config::CanaryRule">Canary<wbr>Rule</a></dt><dd>One canary analysis rule (DW-091): a metric to compare and the
+threshold that triggers the rule.</dd><dt><a class="struct" href="struct.CertPin.html" title="struct dwara_core::config::CertPin">CertPin</a></dt><dd>A single certificate pin: the SHA-256 hash of the upstream
+certificate’s SubjectPublicKeyInfo (SPKI), as lowercase hex (64
+chars). Pinning the SPKI (rather than the full certificate) allows
+rotation of the leaf certificate as long as the key pair is
+unchanged.</dd><dt><a class="struct" href="struct.CertPinningConfig.html" title="struct dwara_core::config::CertPinningConfig">Cert<wbr>Pinning<wbr>Config</a></dt><dd>DW-109 / SEC-04: certificate pinning configuration for an upstream.
+Holds a list of allowed SPKI SHA-256 hashes (lowercase hex, 64
+chars). A peer cert whose SPKI hash matches ANY entry is accepted;
+otherwise the connection is rejected (fail-closed).</dd><dt><a class="struct" href="struct.CompiledContentTypeFilter.html" title="struct dwara_core::config::CompiledContentTypeFilter">Compiled<wbr>Content<wbr>Type<wbr>Filter</a></dt><dd>Snapshot-compiled form of a compression policy’s content-type prefix
+lists (DW-027): every include/exclude entry trimmed and lowercased
+once at snapshot-compile time; the request path compares the
+response’s (lowercased) media type against the precomputed prefixes
+instead of re-normalizing config strings per response. Same
+placement rationale as <a href="struct.CompiledCorsOrigins.html" title="struct dwara_core::config::CompiledCorsOrigins"><code>CompiledCorsOrigins</code></a>.</dd><dt><a class="struct" href="struct.CompiledCorsOrigins.html" title="struct dwara_core::config::CompiledCorsOrigins">Compiled<wbr>Cors<wbr>Origins</a></dt><dd>Snapshot-compiled form of a <code>cors.allowed_origins</code> list (DW-027): the
+wildcard flag plus the normalized form of every specific entry,
+computed once at snapshot-compile time so the request path never
+re-parses config strings (per-request work is the request’s own
+origin only). Lives in <code>config</code> beside <a href="fn.normalize_origin.html" title="fn dwara_core::config::normalize_origin"><code>normalize_origin</code></a> because
+the compiled set is the grammar’s runtime consumer: <code>snapshot</code>
+builds it into the route table (<code>snapshot::RouteTable</code>) and
+<code>dataplane::cors</code> matches against it. Validation has already
+rejected entries that do not normalize, so compilation drops
+nothing on any publishable config; entries that would fail
+normalization are skipped exactly as the pre-compiled matcher was.</dd><dt><a class="struct" href="struct.CompiledDeprecation.html" title="struct dwara_core::config::CompiledDeprecation">Compiled<wbr>Deprecation</a></dt><dd>Snapshot-compiled form of a <a href="struct.Deprecation.html" title="struct dwara_core::config::Deprecation"><code>Deprecation</code></a> block (DW-048): the
+emitted header VALUES, precomputed at snapshot-compile time — the
+HTTP-date strings are parsed once here (never per response) and the
+RFC 9745 structured date is rendered from the parsed seconds. Lives
+in <code>config</code> beside <a href="struct.CompiledCorsOrigins.html" title="struct dwara_core::config::CompiledCorsOrigins"><code>CompiledCorsOrigins</code></a> for the same reason:
+<code>snapshot</code> builds it into the route table and <code>dataplane::versioning</code>
+consumes it. Validation has already rejected unparseable dates, so
+compilation drops nothing on any publishable config; entries that
+would fail are skipped exactly like the CORS matcher’s fallback.</dd><dt><a class="struct" href="struct.Compression.html" title="struct dwara_core::config::Compression">Compression</a></dt><dd>Route-scoped response compression policy (DW-027, feature analysis
+4.13).</dd><dt><a class="struct" href="struct.ConfigConvergenceConfig.html" title="struct dwara_core::config::ConfigConvergenceConfig">Config<wbr>Convergence<wbr>Config</a></dt><dd>Config convergence config (DW-054, <code>gateway.config_convergence</code>).</dd><dt><a class="struct" href="struct.ConfigError.html" title="struct dwara_core::config::ConfigError">Config<wbr>Error</a></dt><dd>Error produced when a configuration document fails to parse.</dd><dt><a class="struct" href="struct.Consumer.html" title="struct dwara_core::config::Consumer">Consumer</a></dt><dd>Identity of an API caller (app/team/user); owns credentials, quotas, and
+the analytics identity.</dd><dt><a class="struct" href="struct.ConsumerQuotas.html" title="struct dwara_core::config::ConsumerQuotas">Consumer<wbr>Quotas</a></dt><dd>Per-consumer request budgets (DW-033): daily and/or monthly request
+caps in fixed UTC calendar windows, counted by the state store’s
+quota counters. At least one budget must be set and every set budget
+must be &gt; 0 (validation); a budget of 0 would deny the consumer’s
+first request and is expressed by omitting the field instead.</dd><dt><a class="struct" href="struct.Cors.html" title="struct dwara_core::config::Cors">Cors</a></dt><dd>Route-scoped CORS policy (DW-027, feature analysis 4.14).</dd><dt><a class="struct" href="struct.CrsRule.html" title="struct dwara_core::config::CrsRule">CrsRule</a></dt><dd>SEC-08 (#212): A single OWASP CRS-compatible WAF rule. Each rule
+has a numeric ID (CRS convention: 9xxxx), a severity level, a
+phase (1 = request headers, 2 = request body), a list of tags, a
+regex pattern, and the inspection targets to apply the pattern
+to. Rules are evaluated in order; matching rules add their
+severity to the request’s anomaly score. The request is blocked
+when the score exceeds the configured threshold.</dd><dt><a class="struct" href="struct.Deprecation.html" title="struct dwara_core::config::Deprecation">Deprecation</a></dt><dd>Route-level API deprecation policy (DW-048): automates the RFC
+deprecation signal headers on every response of the route.</dd><dt><a class="struct" href="struct.DnsDiscovery.html" title="struct dwara_core::config::DnsDiscovery">DnsDiscovery</a></dt><dd>DNS-based dynamic upstream discovery (DW-042): when present on an
+upstream, a background discovery task resolves <code>hostname</code> via DNS,
+watches the record TTL, and re-resolves when the TTL expires (or at
+<code>refresh_interval_s</code>, whichever comes first), updating the upstream’s
+endpoint set live — without a restart. The <code>endpoints</code> field becomes
+the INITIAL/fallback set: used until the first resolution completes
+and as a fallback when DNS fails and <code>fail_open</code> is true. When
+absent, endpoints remain static (the current behavior — no change).</dd><dt><a class="struct" href="struct.Endpoint.html" title="struct dwara_core::config::Endpoint">Endpoint</a></dt><dd>One <code>address:port</code> inside an upstream.</dd><dt><a class="struct" href="struct.FaultAbort.html" title="struct dwara_core::config::FaultAbort">Fault<wbr>Abort</a></dt><dd>Abort fault injection (DW-062): short-circuit the request with a
+configured HTTP status, sampled by percentage.</dd><dt><a class="struct" href="struct.FaultDelay.html" title="struct dwara_core::config::FaultDelay">Fault<wbr>Delay</a></dt><dd>Delay fault injection (DW-062): inject a fixed delay before
+forwarding the request, sampled by percentage.</dd><dt><a class="struct" href="struct.FaultInjection.html" title="struct dwara_core::config::FaultInjection">Fault<wbr>Injection</a></dt><dd>Fault injection configuration (DW-062, <code>routes[].fault_injection</code>).
+Percentage-based delays and aborts for chaos testing. A delay
+injects a fixed latency before the request is forwarded; an abort
+short-circuits with a configured status without contacting the
+upstream. Both may be present simultaneously — the abort is
+evaluated first, and if it does not fire, the delay is applied.</dd><dt><a class="struct" href="struct.FilterChainConfig.html" title="struct dwara_core::config::FilterChainConfig">Filter<wbr>Chain<wbr>Config</a></dt><dd>SCALE-12 (#191): per-phase dry-run configuration. When dry-run is
+enabled for a phase, the phase executes its checks but does NOT
+enforce (reject/block). Failures are logged as warnings and the
+request continues. This enables safe policy rollout: enable a
+phase in dry-run mode, observe the would-be rejections, then
+switch to enforcement.</dd><dt><a class="struct" href="struct.FleetConfig.html" title="struct dwara_core::config::FleetConfig">Fleet<wbr>Config</a></dt><dd>Fleet operations config (DW-098, <code>gateway.fleet</code>).</dd><dt><a class="struct" href="struct.FleetUpgradeConfig.html" title="struct dwara_core::config::FleetUpgradeConfig">Fleet<wbr>Upgrade<wbr>Config</a></dt><dd>Rolling-upgrade and version-skew policy (DW-098,
+<code>gateway.fleet.upgrade</code>).</dd><dt><a class="struct" href="struct.FleetUpgradeOrderEntry.html" title="struct dwara_core::config::FleetUpgradeOrderEntry">Fleet<wbr>Upgrade<wbr>Order<wbr>Entry</a></dt><dd>A label-selector entry in the upgrade order list.</dd><dt><a class="struct" href="struct.Gateway.html" title="struct dwara_core::config::Gateway">Gateway</a></dt><dd>Root of a dwara configuration: one gateway process, N listeners, and one
+compiled config generation.</dd><dt><a class="struct" href="struct.GeoipConfig.html" title="struct dwara_core::config::GeoipConfig">Geoip<wbr>Config</a></dt><dd>The GeoIP database config (DW-050, <code>gateway.geoip</code>). One MaxMind-
+format database serves both country and ASN predicates (a
+GeoLite2-Country, GeoLite2-ASN, or combined database — whichever
+subtrees it carries are the ones the rules can use). The file is
+opened at startup (a failed open is LOUD but non-fatal: the gateway
+serves with geo lookups resolving UNKNOWN) and hot-reloaded: the
+watcher swaps the reader when the file changes, with no restart.</dd><dt><a class="struct" href="struct.GeoipRules.html" title="struct dwara_core::config::GeoipRules">Geoip<wbr>Rules</a></dt><dd>GeoIP allow/deny rules on the effective client IP (DW-050,
+<code>authorization.geoip</code>). Countries are ISO 3166-1 alpha-2 codes
+(case-insensitive in config, compared uppercase); ASNs are plain
+numbers. Evaluation mirrors <code>allowed_consumers</code>/<code>denied_consumers</code>:
+a denied match rejects (403) regardless of the allow lists; a
+NON-EMPTY allow list admits only matches; empty allow lists
+constrain nothing. The UNKNOWN case (unresolvable address, no
+database) matches neither side.</dd><dt><a class="struct" href="struct.GlobalWaf.html" title="struct dwara_core::config::GlobalWaf">Global<wbr>Waf</a></dt><dd>SEC-08 (#212): Global WAF policy with CRS-compatible rules. When
+enabled, the rules are evaluated on every request (regardless of
+route-level WAF config). The anomaly score is accumulated across
+all matching rules; the request is blocked when the score exceeds
+the threshold. Rule exclusions can disable specific rules by ID or
+tag. The paranoia level controls which rules are active (1 =
+default, 2 = more aggressive, 3 = paranoid, 4 = very paranoid).</dd><dt><a class="struct" href="struct.GraphqlFederation.html" title="struct dwara_core::config::GraphqlFederation">Graphql<wbr>Federation</a></dt><dd>Federation passthrough config (DP-11, #256,
+<code>routes[].graphql.federation</code>).</dd><dt><a class="struct" href="struct.GraphqlPersistedQueries.html" title="struct dwara_core::config::GraphqlPersistedQueries">Graphql<wbr>Persisted<wbr>Queries</a></dt><dd>Persisted-query enforcement config (DW-099,
+<code>routes[].graphql.persisted_queries</code>).</dd><dt><a class="struct" href="struct.GraphqlTranslation.html" title="struct dwara_core::config::GraphqlTranslation">Graphql<wbr>Translation</a></dt><dd>REST &lt;-&gt; GraphQL translation config (DW-100,
+<code>routes[].translation.graphql</code>).</dd><dt><a class="struct" href="struct.GrpcWeb.html" title="struct dwara_core::config::GrpcWeb">GrpcWeb</a></dt><dd>Route-scoped gRPC-Web policy (DW-101, <code>routes[].grpc_web</code>).</dd><dt><a class="struct" href="struct.GrpcWebDescriptor.html" title="struct dwara_core::config::GrpcWebDescriptor">Grpc<wbr>WebDescriptor</a></dt><dd>A .proto descriptor file entry (DW-101,
+<code>routes[].grpc_web.transcoding.descriptors[]</code>).</dd><dt><a class="struct" href="struct.GrpcWebTranscoding.html" title="struct dwara_core::config::GrpcWebTranscoding">Grpc<wbr>WebTranscoding</a></dt><dd>gRPC-Web JSON transcoding configuration (DW-101,
+<code>routes[].grpc_web.transcoding</code>).</dd><dt><a class="struct" href="struct.HedgeConfig.html" title="struct dwara_core::config::HedgeConfig">Hedge<wbr>Config</a></dt><dd>Request hedging configuration (DW-063, <code>upstreams[].retries.hedge</code>).</dd><dt><a class="struct" href="struct.HmacAuth.html" title="struct dwara_core::config::HmacAuth">Hmac<wbr>Auth</a></dt><dd>Gateway-wide HMAC request-signing policy (DW-036). The credential
+itself (key id + secret) lives on a consumer
+(<code>credentials: [{type: hmac, ...}]</code>); this block carries the
+VERIFICATION policy that applies to every signed request.</dd><dt><a class="struct" href="struct.Http2ListenerConfig.html" title="struct dwara_core::config::Http2ListenerConfig">Http2<wbr>Listener<wbr>Config</a></dt><dd>HTTP/2 flow-control tuning for a listener (PERF-11, #244,
+<code>listeners[].http2</code>). Every field is optional; an omitted field
+keeps the process-wide default from <code>DWARA_H2_*</code> env vars. This
+allows per-listener tuning for streaming (SSE) workloads where
+larger windows reduce flow-control stalls on long-lived streams.</dd><dt><a class="struct" href="struct.IpAcl.html" title="struct dwara_core::config::IpAcl">IpAcl</a></dt><dd>IP access control on the effective client IP (DW-020, feature
+analysis 4.15). Entries are IP addresses (e.g. <code>10.1.2.3</code>) or CIDRs
+(e.g. <code>10.0.0.0/8</code>); anything else fails config validation (the same
+parser as <code>gateway.trusted_proxies</code>). Evaluation order: the <code>deny</code>
+list first (a match rejects with 403 regardless of the allow list),
+then the <code>allow</code> list, then <code>default</code> for IPs matched by neither.</dd><dt><a class="struct" href="struct.JwtProvider.html" title="struct dwara_core::config::JwtProvider">JwtProvider</a></dt><dd>One JWT verification provider (DW-019).</dd><dt><a class="struct" href="struct.L4Config.html" title="struct dwara_core::config::L4Config">L4Config</a></dt><dd>L4 proxying configuration for a <code>tcp</code> or <code>udp</code> listener (DW-103).</dd><dt><a class="struct" href="struct.LicenseConfig.html" title="struct dwara_core::config::LicenseConfig">License<wbr>Config</a></dt><dd>Enterprise license configuration (DW-032, <code>gateway.license</code>).</dd><dt><a class="struct" href="struct.LifecycleConfig.html" title="struct dwara_core::config::LifecycleConfig">Lifecycle<wbr>Config</a></dt><dd>API lifecycle management config (DW-110, <code>gateway.lifecycle</code>).</dd><dt><a class="struct" href="struct.LifecycleJourneyConfig.html" title="struct dwara_core::config::LifecycleJourneyConfig">Lifecycle<wbr>Journey<wbr>Config</a></dt><dd>Journey recorder config (DW-110, <code>gateway.lifecycle.journey</code>).</dd><dt><a class="struct" href="struct.LifecyclePortalConfig.html" title="struct dwara_core::config::LifecyclePortalConfig">Lifecycle<wbr>Portal<wbr>Config</a></dt><dd>Developer portal config (DW-110, <code>gateway.lifecycle.portal</code>).</dd><dt><a class="struct" href="struct.LifecyclePortalSpec.html" title="struct dwara_core::config::LifecyclePortalSpec">Lifecycle<wbr>Portal<wbr>Spec</a></dt><dd>One OpenAPI spec source for the developer portal (DW-110,
+<code>gateway.lifecycle.portal.specs[]</code>).</dd><dt><a class="struct" href="struct.LifecycleProfilesConfig.html" title="struct dwara_core::config::LifecycleProfilesConfig">Lifecycle<wbr>Profiles<wbr>Config</a></dt><dd>Environment profile overlays config (DW-110,
+<code>gateway.lifecycle.profiles</code>).</dd><dt><a class="struct" href="struct.Listener.html" title="struct dwara_core::config::Listener">Listener</a></dt><dd>Entry point: bind address + port + TLS termination (or passthrough) config.</dd><dt><a class="struct" href="struct.ListenerTls.html" title="struct dwara_core::config::ListenerTls">Listener<wbr>Tls</a></dt><dd>TLS handling for a listener: terminate at the edge or pass through.</dd><dt><a class="struct" href="struct.LocalityContext.html" title="struct dwara_core::config::LocalityContext">Locality<wbr>Context</a></dt><dd>DW-094 (Ent): the edge’s locality context — its region and zone.
+Threaded into the balancer at request time to enable locality-aware
+endpoint selection. When both <code>region</code> and <code>zone</code> are <code>None</code>, the
+balancer skips locality filtering (the OSS behavior).</dd><dt><a class="struct" href="struct.Maintenance.html" title="struct dwara_core::config::Maintenance">Maintenance</a></dt><dd>Route maintenance mode (DW-041): a per-route availability state that
+short-circuits every matched request with a gateway-generated 503.</dd><dt><a class="struct" href="struct.MirrorConfig.html" title="struct dwara_core::config::MirrorConfig">Mirror<wbr>Config</a></dt><dd>Shadow traffic mirroring configuration (DW-062,
+<code>routes[].mirror</code>). Fire-and-forget duplicate requests to a named
+mirror upstream; the mirror response is discarded and never impacts
+the primary request’s latency. A percentage controls sampling.</dd><dt><a class="struct" href="struct.MockAction.html" title="struct dwara_core::config::MockAction">Mock<wbr>Action</a></dt><dd>A canned response served without any upstream contact (DW-047,
+<code>routes[].action.mock</code>). The body comes from either <code>body</code> (an
+inline string) or <code>body_file</code> (a path relative to the config file
+directory); exactly one of the two may be set, or neither for an
+empty body. <code>delay_ms</code> simulates latency (useful for testing
+timeouts and retries against a mock). Validation rejects a status
+outside 100..=599, a <code>delay_ms</code> above 30000, and setting both
+<code>body</code> and <code>body_file</code>.</dd><dt><a class="struct" href="struct.MtlsConsumerMapping.html" title="struct dwara_core::config::MtlsConsumerMapping">Mtls<wbr>Consumer<wbr>Mapping</a></dt><dd>mTLS client-certificate consumer mapping (DW-035,
+<code>gateway.mtls_consumer_mapping</code>).</dd><dt><a class="struct" href="struct.MtlsFingerprintMapping.html" title="struct dwara_core::config::MtlsFingerprintMapping">Mtls<wbr>Fingerprint<wbr>Mapping</a></dt><dd>One fingerprint-to-consumer mapping entry (DW-035,
+<code>mtls_consumer_mapping.consumers[]</code>).</dd><dt><a class="struct" href="struct.MtlsForwardHeaders.html" title="struct dwara_core::config::MtlsForwardHeaders">Mtls<wbr>Forward<wbr>Headers</a></dt><dd>Identity-forwarding headers for mTLS client auth (DW-035,
+<code>gateway.mtls_forward_headers</code>).</dd><dt><a class="struct" href="struct.NameValueMatch.html" title="struct dwara_core::config::NameValueMatch">Name<wbr>Value<wbr>Match</a></dt><dd>One query-parameter or cookie criterion: the parameter/cookie must be
+present; when <code>value</code> is given it must equal that exact string.</dd><dt><a class="struct" href="struct.NanoServiceAction.html" title="struct dwara_core::config::NanoServiceAction">Nano<wbr>Service<wbr>Action</a></dt><dd>A WASM route handler (nano-service) action (DW-106,
+<code>routes[].action</code> with <code>type: nano_service</code>). The gateway loads the
+named WASM module, calls its <code>handle</code> export with the serialized
+request (method, path, headers, body), and returns the response the
+module produces (status, headers, body). No upstream is contacted.</dd><dt><a class="struct" href="struct.OAuth2ClientCredentials.html" title="struct dwara_core::config::OAuth2ClientCredentials">OAuth2<wbr>Client<wbr>Credentials</a></dt><dd>OAuth2 client-credentials configuration for an upstream (DW-035,
+<code>upstreams[].oauth2_client_credentials</code>).</dd><dt><a class="struct" href="struct.OAuth2Mtls.html" title="struct dwara_core::config::OAuth2Mtls">OAuth2<wbr>Mtls</a></dt><dd>mTLS client certificate for an OAuth2 token endpoint (DW-035,
+<code>oauth2_client_credentials.mtls</code>).</dd><dt><a class="struct" href="struct.OidcLoginConfig.html" title="struct dwara_core::config::OidcLoginConfig">Oidc<wbr>Login<wbr>Config</a></dt><dd>SEC-05: OIDC browser login flow configuration for a route. The
+gateway redirects unauthenticated browser requests to the IdP,
+exchanges the authorization code for tokens, sets a session cookie,
+and validates the cookie on subsequent requests.</dd><dt><a class="struct" href="struct.OidcProvider.html" title="struct dwara_core::config::OidcProvider">Oidc<wbr>Provider</a></dt><dd>One OIDC provider (DW-034): an OpenID Connect issuer whose Bearer
+tokens are validated by token introspection (RFC 7662) rather than
+local JWT signature verification. The gateway fetches the issuer’s
+discovery document (<code>{issuer}/.well-known/openid-configuration</code>) to
+learn the introspection, revocation, authorization, and token
+endpoints, then introspects presented Bearer tokens (caching the
+result keyed by token hash with a configurable TTL). The provider
+also backs the authorization-code + PKCE relying-party flow, token
+exchange (RFC 8693), and token revocation (RFC 7009).</dd><dt><a class="struct" href="struct.OpenApiMeta.html" title="struct dwara_core::config::OpenApiMeta">Open<wbr>ApiMeta</a></dt><dd>OpenAPI import metadata attached to a route (DW-047). No runtime
+effect; purely for traceability from the generated config back to
+the source spec operation.</dd><dt><a class="struct" href="struct.PassiveHealth.html" title="struct dwara_core::config::PassiveHealth">Passive<wbr>Health</a></dt><dd>Passive health / outlier detection knobs (DW-012). All fields default;
+a <code>health:</code> block with no keys enables ejection with the defaults.</dd><dt><a class="struct" href="struct.PathMatch.html" title="struct dwara_core::config::PathMatch">Path<wbr>Match</a></dt><dd>How a route’s path pattern is interpreted.</dd><dt><a class="struct" href="struct.PeakEwmaConfig.html" title="struct dwara_core::config::PeakEwmaConfig">Peak<wbr>Ewma<wbr>Config</a></dt><dd>Peak-EWMA load-balancing tuning (DW-090, <code>upstreams[].peak_ewma</code>).
+Only consulted when <code>load_balancer: peak_ewma</code>; ignored otherwise.</dd><dt><a class="struct" href="struct.PluginConfig.html" title="struct dwara_core::config::PluginConfig">Plugin<wbr>Config</a></dt><dd>A plugin definition (DW-055 / DW-119). Each plugin is either a
+proxy-wasm <code>.wasm</code> module loaded at startup (<code>wasm</code>) or a compiled-in
+native Rust filter (<code>native</code>), run on the request pipeline phases it
+declares. Routes reference plugins by name. Exactly one of <code>wasm</code> or
+<code>native</code> must be set (validation enforces this).</dd><dt><a class="struct" href="struct.PluginLimitsConfig.html" title="struct dwara_core::config::PluginLimitsConfig">Plugin<wbr>Limits<wbr>Config</a></dt><dd>Resource limits for a proxy-wasm plugin (DW-055 decision 4; §9.3).</dd><dt><a class="struct" href="struct.PluginRegistryConfig.html" title="struct dwara_core::config::PluginRegistryConfig">Plugin<wbr>Registry<wbr>Config</a></dt><dd>SCALE-12 (#192)/DW-165: plugin registry configuration. When
+present, signatures of <code>source:</code>-referenced artifacts are verified
+against the registry’s pinned public keys and resolved artifacts
+are cached in the registry’s cache directory. This enables
+fleet-consistent plugin pinning: all gateways in a fleet reference
+the same registry and get the same signed artifacts.</dd><dt><a class="struct" href="struct.PluginSourceConfig.html" title="struct dwara_core::config::PluginSourceConfig">Plugin<wbr>Source<wbr>Config</a></dt><dd>SCALE-12 (#192)/DW-165: remote/signed plugin source configuration.
+The gateway resolves the .wasm artifact at every publish: cache
+lookup first, then a download from <code>url</code> on a miss, then SHA-256
+<code>digest</code> verification (mandatory) and Ed25519 <code>signature</code>
+verification (when configured) — only then is the artifact loaded.
+Resolution failures are fail-closed per plugin (Crashed at publish,
+its routes answer 500), never a partial load.</dd><dt><a class="struct" href="struct.Policy.html" title="struct dwara_core::config::Policy">Policy</a></dt><dd>Named reusable rule bundle (rate limit, timeouts, …); attachable at
+several scopes. Plugin-backed phases arrive with the M3 plugin system.</dd><dt><a class="struct" href="struct.RateLimit.html" title="struct dwara_core::config::RateLimit">Rate<wbr>Limit</a></dt><dd>Local GCRA-style rate limit.</dd><dt><a class="struct" href="struct.RateLimitRule.html" title="struct dwara_core::config::RateLimitRule">Rate<wbr>Limit<wbr>Rule</a></dt><dd>One rate-limit rule (DW-017): a key selector plus one or more stacked
+windows. <code>selector</code> names the request attributes that form the
+counter key (all listed attributes are joined into ONE key, so
+<code>[ip, route]</code> limits each (client IP, route) pair independently);
+<code>requests_per</code> carries the sustained rates per window (at least one
+window must be present); <code>burst</code> is the bucket size (defaults to the
+window’s request count).</dd><dt><a class="struct" href="struct.RateRequestsPer.html" title="struct dwara_core::config::RateRequestsPer">Rate<wbr>Requests<wbr>Per</a></dt><dd>Sustained rates per window (DW-017). At least one field must be set
+and every set field must be &gt; 0; each set field becomes one stacked
+GCRA cell (a request must satisfy ALL set windows).</dd><dt><a class="struct" href="struct.RedisCacheConfig.html" title="struct dwara_core::config::RedisCacheConfig">Redis<wbr>Cache<wbr>Config</a></dt><dd>Distributed Redis-backed response cache config (SCALE-04, #183,
+<code>gateway.redis_cache</code>, ent feature).</dd><dt><a class="struct" href="struct.RedisHaConfig.html" title="struct dwara_core::config::RedisHaConfig">Redis<wbr>HaConfig</a></dt><dd>Redis HA and multi-region config (SCALE-11, #248). Embedded in
+each Redis-backed config block (rate limiter, quotas, cache) to
+control the connection topology and per-request timeout.</dd><dt><a class="struct" href="struct.RedisQuotaConfig.html" title="struct dwara_core::config::RedisQuotaConfig">Redis<wbr>Quota<wbr>Config</a></dt><dd>Distributed Redis-backed consumer request quotas config (DW-155,
+<code>gateway.redis_quotas</code>).</dd><dt><a class="struct" href="struct.RedisRateLimiterConfig.html" title="struct dwara_core::config::RedisRateLimiterConfig">Redis<wbr>Rate<wbr>Limiter<wbr>Config</a></dt><dd>Distributed Redis-backed GCRA rate limiter config (DW-031,
+<code>gateway.redis_rate_limiter</code>).</dd><dt><a class="struct" href="struct.RequestLimits.html" title="struct dwara_core::config::RequestLimits">Request<wbr>Limits</a></dt><dd>Route-scoped request size limits (DW-027, feature analysis 4.16).</dd><dt><a class="struct" href="struct.RequestValidation.html" title="struct dwara_core::config::RequestValidation">Request<wbr>Validation</a></dt><dd>Route-scoped request-body validation (DW-047,
+<code>routes[].request_validation</code>).</dd><dt><a class="struct" href="struct.RetryConfig.html" title="struct dwara_core::config::RetryConfig">Retry<wbr>Config</a></dt><dd>Upstream retry knobs (DW-014). All fields default; a <code>retries:</code> block
+with no keys is equivalent to retries off (<code>attempts</code> defaults to 0).</dd><dt><a class="struct" href="struct.Route.html" title="struct dwara_core::config::Route">Route</a></dt><dd>Match rules (path/host/method/header) plus action and attached policies.</dd><dt><a class="struct" href="struct.RouteGraphql.html" title="struct dwara_core::config::RouteGraphql">Route<wbr>Graphql</a></dt><dd>Route-scoped GraphQL awareness config (DW-099, <code>routes[].graphql</code>).</dd><dt><a class="struct" href="struct.RouteMatch.html" title="struct dwara_core::config::RouteMatch">Route<wbr>Match</a></dt><dd>Matching rules for incoming requests.</dd><dt><a class="struct" href="struct.RouteSlo.html" title="struct dwara_core::config::RouteSlo">Route<wbr>Slo</a></dt><dd>Per-route SLO objectives (DW-052, <code>routes[].slo</code>).</dd><dt><a class="struct" href="struct.RouteWaf.html" title="struct dwara_core::config::RouteWaf">Route<wbr>Waf</a></dt><dd>Route-scoped WAF-lite config (DW-051, <code>routes[].waf</code>).</dd><dt><a class="struct" href="struct.RouteWebsocket.html" title="struct dwara_core::config::RouteWebsocket">Route<wbr>Websocket</a></dt><dd>Route-scoped WebSocket policy (DW-039, <code>routes[].websocket</code>).</dd><dt><a class="struct" href="struct.Service.html" title="struct dwara_core::config::Service">Service</a></dt><dd>The logical API being exposed: base path, version, default policies;
+targets exactly one upstream, or a weighted split of upstreams
+since DW-040 (canary / blue-green).</dd><dt><a class="struct" href="struct.ServiceSplit.html" title="struct dwara_core::config::ServiceSplit">Service<wbr>Split</a></dt><dd>Weighted traffic split across upstreams (DW-040,
+<code>services[].split</code>): canary releases and blue-green switches at the
+SERVICE level — each target is a full upstream (its own endpoints,
+protocol, health, and balancer), so a canary pool is isolated from
+the stable one by construction. The pick is a deterministic
+weighted hash (see <a href="struct.Service.html#structfield.split" title="field dwara_core::config::Service::split"><code>Service::split</code></a>): ratios hold statistically
+per request and exactly per session when sticky affinity is on.</dd><dt><a class="struct" href="struct.SniRoute.html" title="struct dwara_core::config::SniRoute">SniRoute</a></dt><dd>One SNI-to-upstream routing rule for TLS passthrough.</dd><dt><a class="struct" href="struct.SoapTranslation.html" title="struct dwara_core::config::SoapTranslation">Soap<wbr>Translation</a></dt><dd>SOAP/XML translation config (DW-100, <code>routes[].translation.soap</code>).</dd><dt><a class="struct" href="struct.SplitTarget.html" title="struct dwara_core::config::SplitTarget">Split<wbr>Target</a></dt><dd>One weighted target of a service split (DW-040).</dd><dt><a class="struct" href="struct.StickyAffinity.html" title="struct dwara_core::config::StickyAffinity">Sticky<wbr>Affinity</a></dt><dd>Cookie affinity for a service (DW-040, <code>services[].sticky</code>).</dd><dt><a class="struct" href="struct.Timeouts.html" title="struct dwara_core::config::Timeouts">Timeouts</a></dt><dd>Timeout hints, in milliseconds.</dd><dt><a class="struct" href="struct.TlsCertificate.html" title="struct dwara_core::config::TlsCertificate">TlsCertificate</a></dt><dd>One SNI-scoped certificate pair for TLS termination.</dd><dt><a class="struct" href="struct.TokenBudget.html" title="struct dwara_core::config::TokenBudget">Token<wbr>Budget</a></dt><dd>An AI token budget (DW-078, <code>policies[].token_budget</code>): limits of
+TOTALS over windows — provider-reported tokens per minute and/or
+cost per UTC calendar day, enforced per consumer or shared per
+policy (team). See the <code>ai::budget</code> module docs for the
+check-then-spend contract.</dd><dt><a class="struct" href="struct.Translation.html" title="struct dwara_core::config::Translation">Translation</a></dt><dd>Route-scoped protocol translation policy (DW-100,
+<code>routes[].translation</code>).</dd><dt><a class="struct" href="struct.Upstream.html" title="struct dwara_core::config::Upstream">Upstream</a></dt><dd>Load-balancing pool: algorithm, protocol, endpoints.</dd><dt><a class="struct" href="struct.UpstreamLocality.html" title="struct dwara_core::config::UpstreamLocality">Upstream<wbr>Locality</a></dt><dd>DW-094 (Ent): locality-aware routing and data residency configuration
+for an upstream. Controls how the balancer uses endpoint <code>region</code>/
+<code>zone</code> fields to filter or prefer endpoints.</dd><dt><a class="struct" href="struct.UpstreamMtls.html" title="struct dwara_core::config::UpstreamMtls">Upstream<wbr>Mtls</a></dt><dd>SEC-03: upstream mTLS client certificate configuration. Reuses the
+two-path shape (cert file + key file) proven by the OAuth2 mTLS
+config (<code>OAuth2Mtls</code>).</dd><dt><a class="struct" href="struct.UpstreamPoolConfig.html" title="struct dwara_core::config::UpstreamPoolConfig">Upstream<wbr>Pool<wbr>Config</a></dt><dd>DP-03: hyper connection-pool and HTTP/2 tuning for an upstream
+(<code>upstreams[].pool</code>). Every field is optional; an omitted field
+keeps hyper-util’s built-in default (the same value the gateway
+used before this block existed), so the block is purely additive.
+Validation rejects zero/negative-forbidden values; the runtime
+clamps nothing beyond the documented bounds.</dd><dt><a class="struct" href="struct.Webhook.html" title="struct dwara_core::config::Webhook">Webhook</a></dt><dd>One alert/event webhook target (DW-044, <code>gateway.webhooks[]</code>).
+Compiled per generation into an <code>events::webhook::WebhookTarget</code>
+(secret references resolved at compile time, URL decomposed); see
+that module for the delivery contract.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.AcmeChallenge.html" title="enum dwara_core::config::AcmeChallenge">Acme<wbr>Challenge</a></dt><dd>ACME challenge type.</dd><dt><a class="enum" href="enum.AdditionalProperties.html" title="enum dwara_core::config::AdditionalProperties">Additional<wbr>Properties</a></dt><dd>The <code>additionalProperties</code> keyword accepts either a boolean or a
+nested schema; this union models both.</dd><dt><a class="enum" href="enum.AdminRole.html" title="enum dwara_core::config::AdminRole">Admin<wbr>Role</a></dt><dd>Admin roles.</dd><dt><a class="enum" href="enum.AgentPermissionLevel.html" title="enum dwara_core::config::AgentPermissionLevel">Agent<wbr>Permission<wbr>Level</a></dt><dd>AI-16 (#204): Agent permission levels for first-class agent
+principals. Mirrors the <code>Permission</code> enum in the MCP module but
+lives in config for declarative assignment.</dd><dt><a class="enum" href="enum.AiEndpoint.html" title="enum dwara_core::config::AiEndpoint">AiEndpoint</a></dt><dd>AI-02: which AI endpoint a route serves. The <code>chat</code> endpoint (the
+default) uses the full adapter translation pipeline (DW-075). The
+other endpoints are proxied as a passthrough: the request body is
+forwarded to the provider’s upstream as-is, and the response is
+returned as-is. Model governance (allowlist check) still applies
+using the <code>model</code> field from the request body.</dd><dt><a class="enum" href="enum.AiIngressDialect.html" title="enum dwara_core::config::AiIngressDialect">AiIngress<wbr>Dialect</a></dt><dd>AI-05 (#195): The client-facing request dialect for an AI route.
+Determines how the gateway parses the incoming request body.</dd><dt><a class="enum" href="enum.AnalyticsExportFormat.html" title="enum dwara_core::config::AnalyticsExportFormat">Analytics<wbr>Export<wbr>Format</a></dt><dd>One export output format (DW-120, <code>analytics.exports.formats[]</code>).
+Closed set: <code>csv</code>, <code>json</code>, <code>parquet_csv</code>.</dd><dt><a class="enum" href="enum.AnalyticsExportWindow.html" title="enum dwara_core::config::AnalyticsExportWindow">Analytics<wbr>Export<wbr>Window</a></dt><dd>One export schedule kind (DW-120, <code>analytics.exports.window</code>).
+Closed set; fixed UTC calendar windows.</dd><dt><a class="enum" href="enum.AnalyticsStreamSink.html" title="enum dwara_core::config::AnalyticsStreamSink">Analytics<wbr>Stream<wbr>Sink</a></dt><dd>The access-record stream’s sink (DW-121,
+<code>gateway.analytics_stream.sink</code>). Closed set, internally tagged
+(<code>type: webhook</code> or <code>type: kafka</code>): <code>webhook</code> ships today; <code>kafka</code>
+(SCALE-08, #187) produces NDJSON batches to a Kafka topic via a
+Kafka REST Proxy (HTTP-based, no native client dependency). The
+variant payloads carry their own <code>deny_unknown_fields</code>, so a
+misspelled knob inside a sink is still a rejected config.</dd><dt><a class="enum" href="enum.AnomalySignal.html" title="enum dwara_core::config::AnomalySignal">Anomaly<wbr>Signal</a></dt><dd>One anomaly signal (DW-090). Each produces a normalized [0, 1]
+sub-score from one request-shape dimension.</dd><dt><a class="enum" href="enum.CanaryMetric.html" title="enum dwara_core::config::CanaryMetric">Canary<wbr>Metric</a></dt><dd>The metric a canary rule compares (DW-091).</dd><dt><a class="enum" href="enum.CompressionAlgorithm.html" title="enum dwara_core::config::CompressionAlgorithm">Compression<wbr>Algorithm</a></dt><dd>One response compression algorithm (DW-027).</dd><dt><a class="enum" href="enum.ConsumerType.html" title="enum dwara_core::config::ConsumerType">Consumer<wbr>Type</a></dt><dd>The principal kind of a consumer (DW-113): <code>user</code> (the default —
+a human or application calling the gateway) or <code>agent</code> (a bot
+principal with bot credentials, per-agent quotas/token budgets,
+tool allowlists, and a session audit trail). Agent traffic is
+identifiable, governable, and billable; the type threads through
+Identity into analytics for typed attribution.</dd><dt><a class="enum" href="enum.Credential.html" title="enum dwara_core::config::Credential">Credential</a></dt><dd>One authenticator bound to a consumer: API key, JWT issuer/audience
+binding, mTLS client-certificate match, or HMAC signing key (DW-036).</dd><dt><a class="enum" href="enum.DimensionSource.html" title="enum dwara_core::config::DimensionSource">Dimension<wbr>Source</a></dt><dd>The source of a custom analytics dimension value (DW-093). The
+default (when <code>source</code> is absent) is <a href="enum.DimensionSource.html#variant.Header" title="variant dwara_core::config::DimensionSource::Header"><code>DimensionSource::Header</code></a>,
+preserving the original DW-043 header-only config shape.</dd><dt><a class="enum" href="enum.FilterPhase.html" title="enum dwara_core::config::FilterPhase">Filter<wbr>Phase</a></dt><dd>SCALE-12 (#191): formalized request-pipeline filter phases. The
+default order is the order the variants are declared (the same
+order the dataplane has always executed them). Per-route
+<code>filter_chain</code> overrides can reorder a subset of these phases;
+phases not listed in an override keep their default relative
+order.</dd><dt><a class="enum" href="enum.HashOn.html" title="enum dwara_core::config::HashOn">HashOn</a></dt><dd>What to hash for consistent-hash load balancers (<code>ip_hash</code> and
+<code>maglev</code>). DP-07 (#236): extends the hash key source beyond the
+client IP to support cookie-based sticky sessions and header-based
+affinity.</dd><dt><a class="enum" href="enum.IpAclDefault.html" title="enum dwara_core::config::IpAclDefault">IpAcl<wbr>Default</a></dt><dd>Fallback decision of an <a href="struct.IpAcl.html" title="struct dwara_core::config::IpAcl"><code>IpAcl</code></a> for IPs matched by neither list.</dd><dt><a class="enum" href="enum.ListenerProtocol.html" title="enum dwara_core::config::ListenerProtocol">Listener<wbr>Protocol</a></dt><dt><a class="enum" href="enum.LoadBalancer.html" title="enum dwara_core::config::LoadBalancer">Load<wbr>Balancer</a></dt><dt><a class="enum" href="enum.LocalityMode.html" title="enum dwara_core::config::LocalityMode">Locality<wbr>Mode</a></dt><dd>DW-094 (Ent): locality routing mode.</dd><dt><a class="enum" href="enum.OriginSignal.html" title="enum dwara_core::config::OriginSignal">Origin<wbr>Signal</a></dt><dd>One upstream-originated signal the adaptive controller honors
+(DW-089).</dd><dt><a class="enum" href="enum.PathMatchKind.html" title="enum dwara_core::config::PathMatchKind">Path<wbr>Match<wbr>Kind</a></dt><dt><a class="enum" href="enum.PathRewrite.html" title="enum dwara_core::config::PathRewrite">Path<wbr>Rewrite</a></dt><dd>Path rewrite applied before proxying (DW-010). Exactly one variant per
+proxy action; there is no rewrite chaining in v1. All variants operate
+on the path component only — the inbound query string is re-attached
+untouched.</dd><dt><a class="enum" href="enum.PluginPhase.html" title="enum dwara_core::config::PluginPhase">Plugin<wbr>Phase</a></dt><dd>The phases a plugin can hook (DW-055, §9.3 phase contract).</dd><dt><a class="enum" href="enum.ProbeKind.html" title="enum dwara_core::config::ProbeKind">Probe<wbr>Kind</a></dt><dd>Kind of active health probe.</dd><dt><a class="enum" href="enum.RateLimitSelector.html" title="enum dwara_core::config::RateLimitSelector">Rate<wbr>Limit<wbr>Selector</a></dt><dd>One attribute of a rate-limit key (DW-017).</dd><dt><a class="enum" href="enum.RedisTopology.html" title="enum dwara_core::config::RedisTopology">Redis<wbr>Topology</a></dt><dd>Redis deployment topology (SCALE-11, #248). Controls how the
+gateway connects to Redis for the distributed rate limiter,
+quotas, and shared cache. The default <code>single</code> mode uses one
+Redis URL (the existing behavior). <code>sentinel</code> mode resolves the
+master through a Sentinel deployment. <code>cluster</code> mode connects
+to a Redis Cluster.</dd><dt><a class="enum" href="enum.RouteAction.html" title="enum dwara_core::config::RouteAction">Route<wbr>Action</a></dt><dd>What the gateway does when a route matches.</dd><dt><a class="enum" href="enum.TlsMode.html" title="enum dwara_core::config::TlsMode">TlsMode</a></dt><dt><a class="enum" href="enum.TokenBudgetScope.html" title="enum dwara_core::config::TokenBudgetScope">Token<wbr>Budget<wbr>Scope</a></dt><dd>The budget’s key scope (DW-078).</dd><dt><a class="enum" href="enum.TranslationKind.html" title="enum dwara_core::config::TranslationKind">Translation<wbr>Kind</a></dt><dd>The protocol translation direction (DW-100,
+<code>routes[].translation.kind</code>).</dd><dt><a class="enum" href="enum.UpstreamProtocol.html" title="enum dwara_core::config::UpstreamProtocol">Upstream<wbr>Protocol</a></dt><dt><a class="enum" href="enum.VersionSkewPolicyConfig.html" title="enum dwara_core::config::VersionSkewPolicyConfig">Version<wbr>Skew<wbr>Policy<wbr>Config</a></dt><dd>The version-skew policy, mirroring the CP/DP
+<code>cluster_sync::VersionSkewPolicy</code> but living in the config schema
+(so the gateway config carries it, not just the controller
+runtime).</dd><dt><a class="enum" href="enum.ZeroRttPolicy.html" title="enum dwara_core::config::ZeroRttPolicy">Zero<wbr>RttPolicy</a></dt><dd>0-RTT (early data) acceptance policy for HTTP/3 (DW-088).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.ANALYTICS_DEFAULT_RETENTION_MS.html" title="constant dwara_core::config::ANALYTICS_DEFAULT_RETENTION_MS">ANALYTICS_<wbr>DEFAULT_<wbr>RETENTION_<wbr>MS</a></dt><dd>Default per-granularity retention (ms), indexed [raw, 1m, 5m, 1h,
+1d] — a week of traffic at every granularity a week query wants,
+bounded disk at the 1-minute grain (DW-043). Lives in <code>config</code>
+(the lowest consuming domain) so both validation and the analytics
+store read ONE definition.</dd><dt><a class="constant" href="constant.CURRENT_CONFIG_VERSION.html" title="constant dwara_core::config::CURRENT_CONFIG_VERSION">CURRENT_<wbr>CONFIG_<wbr>VERSION</a></dt><dd>CFG-03 (#239): the current config schema version. Increment when
+the schema gains a breaking change (removed fields, renamed
+fields, changed semantics). The <code>dwara lint</code> command warns when a
+config’s <code>version</code> is older than this; <code>dwara migrate</code> upgrades
+configs to this version.</dd><dt><a class="constant" href="constant.DEFAULT_HMAC_CLOCK_SKEW_SECS.html" title="constant dwara_core::config::DEFAULT_HMAC_CLOCK_SKEW_SECS">DEFAULT_<wbr>HMAC_<wbr>CLOCK_<wbr>SKEW_<wbr>SECS</a></dt><dd>Default <code>hmac_auth.max_clock_skew_secs</code> (±5 minutes, DW-036 §4.6).</dd><dt><a class="constant" href="constant.DEFAULT_MAINTENANCE_RETRY_AFTER_SECS.html" title="constant dwara_core::config::DEFAULT_MAINTENANCE_RETRY_AFTER_SECS">DEFAULT_<wbr>MAINTENANCE_<wbr>RETRY_<wbr>AFTER_<wbr>SECS</a></dt><dd>Default <code>maintenance.retry_after_secs</code> (DW-041).</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_BATCH_MAX.html" title="constant dwara_core::config::DEFAULT_STREAM_BATCH_MAX">DEFAULT_<wbr>STREAM_<wbr>BATCH_<wbr>MAX</a></dt><dd>Default <code>analytics_stream.batch_max</code> (DW-121): records per flushed
+batch.</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_BUFFER.html" title="constant dwara_core::config::DEFAULT_STREAM_BUFFER">DEFAULT_<wbr>STREAM_<wbr>BUFFER</a></dt><dd>Default <code>analytics_stream.buffer</code> (DW-121): the bounded record
+channel’s capacity when the block is absent at boot (the stream is
+always constructed so a live reload can arm it). Lives in <code>config</code>
+with the retention defaults — the lowest consuming domain — so
+validation docs, the stream, and the binary read one definition.</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_FLUSH_MS.html" title="constant dwara_core::config::DEFAULT_STREAM_FLUSH_MS">DEFAULT_<wbr>STREAM_<wbr>FLUSH_<wbr>MS</a></dt><dd>Default <code>analytics_stream.flush_ms</code> (DW-121): maximum batch latency.</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_WEBHOOK_ATTEMPTS.html" title="constant dwara_core::config::DEFAULT_STREAM_WEBHOOK_ATTEMPTS">DEFAULT_<wbr>STREAM_<wbr>WEBHOOK_<wbr>ATTEMPTS</a></dt><dd>Default <code>analytics_stream.sink.webhook.max_attempts</code> (DW-121).</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_WEBHOOK_BACKOFF_BASE_MS.html" title="constant dwara_core::config::DEFAULT_STREAM_WEBHOOK_BACKOFF_BASE_MS">DEFAULT_<wbr>STREAM_<wbr>WEBHOOK_<wbr>BACKOFF_<wbr>BASE_<wbr>MS</a></dt><dd>Default <code>analytics_stream.sink.webhook.backoff_base_ms</code> (DW-121).</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_WEBHOOK_BACKOFF_CAP_MS.html" title="constant dwara_core::config::DEFAULT_STREAM_WEBHOOK_BACKOFF_CAP_MS">DEFAULT_<wbr>STREAM_<wbr>WEBHOOK_<wbr>BACKOFF_<wbr>CAP_<wbr>MS</a></dt><dd>Default <code>analytics_stream.sink.webhook.backoff_cap_ms</code> (DW-121).</dd><dt><a class="constant" href="constant.DEFAULT_STREAM_WEBHOOK_TIMEOUT_MS.html" title="constant dwara_core::config::DEFAULT_STREAM_WEBHOOK_TIMEOUT_MS">DEFAULT_<wbr>STREAM_<wbr>WEBHOOK_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default <code>analytics_stream.sink.webhook.timeout_ms</code> (DW-121): a
+batch carries up to <code>batch_max</code> records, so its budget starts
+heavier than the alert webhook’s 2000 but stays far under the
+one-minute ceiling.</dd><dt><a class="constant" href="constant.DEFAULT_WEBHOOK_ATTEMPTS.html" title="constant dwara_core::config::DEFAULT_WEBHOOK_ATTEMPTS">DEFAULT_<wbr>WEBHOOK_<wbr>ATTEMPTS</a></dt><dd>Default <code>gateway.webhooks[].max_attempts</code> (DW-044).</dd><dt><a class="constant" href="constant.DEFAULT_WEBHOOK_BACKOFF_BASE_MS.html" title="constant dwara_core::config::DEFAULT_WEBHOOK_BACKOFF_BASE_MS">DEFAULT_<wbr>WEBHOOK_<wbr>BACKOFF_<wbr>BASE_<wbr>MS</a></dt><dd>Default <code>gateway.webhooks[].backoff_base_ms</code> (DW-044).</dd><dt><a class="constant" href="constant.DEFAULT_WEBHOOK_BACKOFF_CAP_MS.html" title="constant dwara_core::config::DEFAULT_WEBHOOK_BACKOFF_CAP_MS">DEFAULT_<wbr>WEBHOOK_<wbr>BACKOFF_<wbr>CAP_<wbr>MS</a></dt><dd>Default <code>gateway.webhooks[].backoff_cap_ms</code> (DW-044).</dd><dt><a class="constant" href="constant.DEFAULT_WEBHOOK_TIMEOUT_MS.html" title="constant dwara_core::config::DEFAULT_WEBHOOK_TIMEOUT_MS">DEFAULT_<wbr>WEBHOOK_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default <code>gateway.webhooks[].timeout_ms</code> (DW-044): one shared
+delivery budget, generous for a remote alerting endpoint, small
+enough that a hung target cannot pile up deliveries.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.gateway_to_yaml.html" title="fn dwara_core::config::gateway_to_yaml">gateway_<wbr>to_<wbr>yaml</a></dt><dd>Serialize a <a href="struct.Gateway.html" title="struct dwara_core::config::Gateway"><code>Gateway</code></a> to normalized YAML text.</dd><dt><a class="fn" href="fn.json_schema.html" title="fn dwara_core::config::json_schema">json_<wbr>schema</a></dt><dd>Build the JSON Schema for the root <a href="struct.Gateway.html" title="struct dwara_core::config::Gateway"><code>Gateway</code></a> type.</dd><dt><a class="fn" href="fn.normalize_origin.html" title="fn dwara_core::config::normalize_origin">normalize_<wbr>origin</a></dt><dd>Canonical form of one origin (DW-027): lowercase scheme and host,
+default port dropped, no userinfo, no path/query — the exact string
+the runtime CORS matcher compares request <code>Origin</code> values against
+and validation checks config entries with. <code>None</code> when the input is
+not a well-formed <code>http(s)</code> origin. Lives in <code>config</code> (the lowest
+consuming domain) so validation (<code>snapshot::validate</code>) and matching
+(<code>dataplane::cors</code>) share one grammar, the same way <code>net.rs</code> owns the
+IP/CIDR grammar.</dd><dt><a class="fn" href="fn.parse_gateway.html" title="fn dwara_core::config::parse_gateway">parse_<wbr>gateway</a></dt><dd>Parse a YAML configuration document into a <a href="struct.Gateway.html" title="struct dwara_core::config::Gateway"><code>Gateway</code></a>, rejecting invalid
+input with path-precise error messages.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_CONNECTION_CAP","DEFAULT_CONNECT_TIMEOUT_MS","DEFAULT_HAPPY_EYEBALLS_MS","DEFAULT_MAX_PENDING"],"enum":["UpstreamBodyError","UpstreamError"],"fn":["effective_cap","happy_dial","happy_dial_via","refresh_observation_gauges"],"struct":["UpstreamBody","UpstreamHandle","UpstreamRegistry","UpstreamStats"]};

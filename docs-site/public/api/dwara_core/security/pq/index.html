@@ -1,0 +1,60 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Post-quantum TLS (DW-105): X25519+ML-KEM hybrid key exchange."><title>dwara_core::security::pq - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module pq</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module pq</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#experimental" title="Experimental">Experimental</a></li><li><a href="#fips-incompatibility" title="FIPS incompatibility">FIPS incompatibility</a></li><li><a href="#opt-in" title="Opt-in">Opt-in</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>security</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">security</a></div><h1>Module <span>pq</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/security/pq.rs.html#1-232">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Post-quantum TLS (DW-105): X25519+ML-KEM hybrid key exchange.</p>
+<p>This module wires the X25519+ML-KEM hybrid key-exchange group into
+rustls. The hybrid group combines a classical ECDH secret (X25519)
+with a post-quantum KEM secret (ML-KEM, formerly Kyber) so that the
+negotiated session key remains confidential even if a future quantum
+adversary can break ECDH. The classical X25519 share is kept as a
+fallback, so a client that does not support the hybrid group still
+completes a classical handshake (rustls’s kx group list is a
+preference order: the first group the client supports wins, so
+prepending the hybrid group PREFERS it without removing the
+classical fallback).</p>
+<h2 id="experimental"><a class="doc-anchor" href="#experimental">§</a>Experimental</h2>
+<p>The rustls API for post-quantum key exchange is EXPERIMENTAL and not
+yet stable: the specific kx group type, its registration path, and
+the provider integration may change between rustls releases. This
+module is therefore structured so the config schema EXISTS and
+COMPILES regardless of whether the experimental PQ API is available
+in the pinned rustls version. When the experimental API is not
+reachable, <a href="fn.install_pq_kx_group.html" title="fn dwara_core::security::pq::install_pq_kx_group"><code>install_pq_kx_group</code></a> is a documented no-op (it logs
+and returns <a href="enum.PqMode.html#variant.Disabled" title="variant dwara_core::security::pq::PqMode::Disabled"><code>PqMode::Disabled</code></a>); when the API stabilizes, the real
+wiring lands here without touching config, validation, or metrics.</p>
+<h2 id="fips-incompatibility"><a class="doc-anchor" href="#fips-incompatibility">§</a>FIPS incompatibility</h2>
+<p>ML-KEM is NOT on the FIPS-validated list for aws-lc-rs. Combining PQ
+hybrid key exchange with FIPS mode (Enterprise <code>ent</code> cargo feature)
+is
+REJECTED at config validation: a listener or upstream with <code>pq: true</code> while FIPS mode is active fails validation naming the field.
+The two features must not combine unless both algorithms are on a
+validated list (a future NIST FIPS 203 module path would lift this).</p>
+<h2 id="opt-in"><a class="doc-anchor" href="#opt-in">§</a>Opt-in</h2>
+<p>PQ hybrid key exchange is opt-in per listener and per upstream via
+the additive <code>pq: true</code> config field. When the <code>pq</code> cargo feature is
+OFF, <code>pq: true</code> is accepted by the parser (additive-only, strict
+serde preserved) but is INERT: no kx group is prepended, and
+validation emits a warning issue so the operator knows the build
+does not include the PQ feature.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PqHandshakeResult.html" title="struct dwara_core::security::pq::PqHandshakeResult">PqHandshake<wbr>Result</a></dt><dd>The outcome of a PQ hybrid handshake attempt, captured for the
+<code>dwara_tls_pq_handshakes_total{result}</code> metric. The <code>kx_group</code> field
+carries the negotiated group name when the hybrid group was used, or
+the classical fallback group name when the client did not support
+the hybrid group (a <code>fallback</code> result).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PqMode.html" title="enum dwara_core::security::pq::PqMode">PqMode</a></dt><dd>The post-quantum TLS mode of the gateway.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.PQ_KX_GROUP_NAME.html" title="constant dwara_core::security::pq::PQ_KX_GROUP_NAME">PQ_<wbr>KX_<wbr>GROUP_<wbr>NAME</a></dt><dd>The canonical name of the X25519+ML-KEM hybrid key-exchange group as
+rustls would register it. Used as the <code>kx_group</code> label on
+<a href="struct.PqHandshakeResult.html" title="struct dwara_core::security::pq::PqHandshakeResult"><code>PqHandshakeResult</code></a> and in logs. The exact rustls type name may
+differ when the experimental API stabilizes; this constant is the
+operator-facing label.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.install_pq_kx_group.html" title="fn dwara_core::security::pq::install_pq_kx_group">install_<wbr>pq_<wbr>kx_<wbr>group</a></dt><dd>Prepend the X25519+ML-KEM hybrid key-exchange group to the rustls
+provider’s kx group list, so the hybrid group is PREFERRED while the
+classical X25519 group remains as a fallback for non-PQ clients.</dd><dt><a class="fn" href="fn.pq_api_available.html" title="fn dwara_core::security::pq::pq_api_available">pq_<wbr>api_<wbr>available</a></dt><dd>True when the <code>pq</code> cargo feature is compiled in AND the
+experimental rustls PQ API is reachable. Used by validation to
+distinguish “feature on but API inert” (warn) from “feature off”
+(warn) — both warn, but the message differs. The rustls 0.23.43
+crate exposes the <code>X25519MLKEM768</code> hybrid kx group via the
+aws-lc-rs provider, so this returns <code>true</code>.</dd><dt><a class="fn" href="fn.pq_handshake_metric.html" title="fn dwara_core::security::pq::pq_handshake_metric">pq_<wbr>handshake_<wbr>metric</a></dt><dd>The metric label for a <a href="struct.PqHandshakeResult.html" title="struct dwara_core::security::pq::PqHandshakeResult"><code>PqHandshakeResult</code></a>: <code>success</code> when the
+hybrid group was negotiated, <code>fallback</code> when the client fell back to
+a classical group, <code>disabled</code> when PQ is off. This is the closed
+three-value label set for <code>dwara_tls_pq_handshakes_total{result}</code>.</dd><dt><a class="fn" href="fn.pq_provider.html" title="fn dwara_core::security::pq::pq_provider">pq_<wbr>provider</a></dt><dd>Build a <code>CryptoProvider</code> from the aws-lc-rs default provider with
+the <code>X25519MLKEM768</code> hybrid kx group prepended to the kx group list.
+This is the per-config PQ support path (matching the FIPS pattern:
+<code>fips_provider()</code> returns a per-config provider). The server and
+client config builders use this when <code>pq: true</code> is set, passing the
+returned provider to <code>ServerConfig::builder_with_provider</code> or
+<code>ClientConfig::builder_with_provider</code>.</dd></dl></section></div></main></body></html>

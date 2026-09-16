@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ExecutionError","Value"],"fn":["value_to_bool","value_to_float","value_to_int","value_to_string"],"mod":["everywhere","jit"],"struct":["CelContext","CelProgram","ParseError","ParseErrors"],"type":["CelResult"]};

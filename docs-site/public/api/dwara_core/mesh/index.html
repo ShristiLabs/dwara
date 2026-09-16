@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Service mesh mode (DW-107): sidecar traffic interception plus SPIFFE/SPIRE mTLS identity."><title>dwara_core::mesh - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module mesh</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module mesh</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-is-implemented-today" title="What is implemented today">What is implemented today</a></li><li><a href="#gating" title="Gating">Gating</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#reexports">Module Items</a></h3><ul class="block"><li><a href="#reexports" title="Re-exports">Re-exports</a></li><li><a href="#modules" title="Modules">Modules</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>core</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_core</a></div><h1>Module <span>mesh</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_core/mesh/mod.rs.html#1-77">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Service mesh mode (DW-107): sidecar traffic interception plus
+SPIFFE/SPIRE mTLS identity.</p>
+<p>This module is SCAFFOLDED (Enterprise-only). The
+service mesh mode runs dwara as a SIDECAR in each pod: an init
+container configures iptables (or TPROXY) redirects so all inbound
+traffic to the local application and all outbound traffic from the
+local application to remote services flows through the sidecar. The
+sidecar then terminates mTLS on inbound connections (verifying the
+peer’s SPIFFE SVID, applying policies, then forwarding to the local
+app over loopback) and wraps outbound connections in mTLS (applying
+policies, then dialing the remote service’s sidecar with the local
+workload’s SVID).</p>
+<p>Identity is provided by SPIFFE/SPIRE: each workload fetches X.509
+SVIDs (SPIFFE Verifiable Identity Documents) from the SPIRE Workload
+API over a Unix domain socket. The SVID certificate’s URI SAN carries
+the SPIFFE ID (<code>spiffe://&lt;trust-domain&gt;/&lt;path&gt;</code>), which is the
+authentication identity used for policy decisions. The trust bundle
+(the SPIRE signing CAs) is used to verify peer SVIDs.</p>
+<h2 id="what-is-implemented-today"><a class="doc-anchor" href="#what-is-implemented-today">§</a>What is implemented today</h2>
+<p>The scaffold compiles and the config schema is always present so
+configs round-trip without the feature. What is implemented:</p>
+<ul>
+<li><a href="spiffe/struct.SpiffeClient.html" title="struct dwara_core::mesh::spiffe::SpiffeClient"><code>spiffe::SpiffeClient</code></a>: the Workload API client is implemented
+behind a transport abstraction (<a href="spiffe/trait.WorkloadApiTransport.html" title="trait dwara_core::mesh::spiffe::WorkloadApiTransport"><code>spiffe::WorkloadApiTransport</code></a>).
+The production gRPC transport (<code>spiffe::grpc::GrpcWorkloadApi</code>)
+uses tonic over a Unix domain socket (ent-gated); a test fake
+(<a href="spiffe/struct.FakeWorkloadApi.html" title="struct dwara_core::mesh::spiffe::FakeWorkloadApi"><code>spiffe::FakeWorkloadApi</code></a>) is provided for deterministic tests.
+The client fetches X.509 SVIDs and the trust bundle, and exposes
+the refresh-result metric seam. The SVID material (cert chain,
+private key, expiry) and the trust bundle (CA certs) are the
+integration point for <code>security::tls</code>.</li>
+</ul>
+<p>What is STUBBED (documented no-ops pending production hardening):</p>
+<ul>
+<li><a href="sidecar/struct.SidecarController.html" title="struct dwara_core::mesh::sidecar::SidecarController"><code>sidecar::SidecarController</code></a>: the inbound/outbound listener
+configuration and the iptables/TPROXY redirect bootstrap are
+scaffolded. The controller records the configured listeners and
+documents the redirect setup, but does NOT install iptables rules
+or open sockets (that wiring lands when the sidecar bootstrap is
+production-ready).</li>
+<li>The full gRPC client wiring in <code>spiffe::grpc::GrpcWorkloadApi</code>:
+the transport abstraction and the trait-based seam are landed; the
+full gRPC call (proto-generated client, codec, path) is the
+remaining wiring. The <code>connect()</code> method establishes the tonic
+channel over the Unix socket; the fetch methods return a clear
+“not yet connected” error until the proto client is wired.</li>
+</ul>
+<h2 id="gating"><a class="doc-anchor" href="#gating">§</a>Gating</h2>
+<p>The scaffold compiles into every build (there is no <code>mesh</code> cargo
+feature). The <code>mesh</code> config block is accepted but inert: validation
+warns, and no sidecar listeners or SPIFFE client are wired until the
+sidecar bootstrap is production-ready. Ent-only: validation warns
+when mesh is configured without the <code>ent</code> feature (mirrors the
+FIPS/credential-pool ent-gate pattern).</p>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>mesh</code> depends on <code>config</code> (the config schema) and <code>observability</code>
+(the mesh/SPIFFE metrics). It does NOT import <code>security</code> directly:
+the TLS integration point is a documented seam (the mTLS TLS config
+in <code>security::tls</code> would consume the SVID cert/key and trust bundle
+produced here), kept as a seam so the dependency direction stays
+downward (mesh is a peer of security, both above config).</p>
+</div></details><h2 id="reexports" class="section-header">Re-exports<a href="#reexports" class="anchor">§</a></h2><dl class="item-table reexports"><dt id="reexport.SidecarConfig"><code>pub use sidecar::<a class="struct" href="sidecar/struct.SidecarConfig.html" title="struct dwara_core::mesh::sidecar::SidecarConfig">SidecarConfig</a>;</code></dt><dt id="reexport.SidecarController"><code>pub use sidecar::<a class="struct" href="sidecar/struct.SidecarController.html" title="struct dwara_core::mesh::sidecar::SidecarController">SidecarController</a>;</code></dt><dt id="reexport.SidecarMode"><code>pub use sidecar::<a class="enum" href="sidecar/enum.SidecarMode.html" title="enum dwara_core::mesh::sidecar::SidecarMode">SidecarMode</a>;</code></dt><dt id="reexport.SidecarRedirectMode"><code>pub use sidecar::<a class="enum" href="sidecar/enum.SidecarRedirectMode.html" title="enum dwara_core::mesh::sidecar::SidecarRedirectMode">SidecarRedirectMode</a>;</code></dt><dt id="reexport.FakeWorkloadApi"><code>pub use spiffe::<a class="struct" href="spiffe/struct.FakeWorkloadApi.html" title="struct dwara_core::mesh::spiffe::FakeWorkloadApi">FakeWorkloadApi</a>;</code></dt><dt id="reexport.SpiffeClient"><code>pub use spiffe::<a class="struct" href="spiffe/struct.SpiffeClient.html" title="struct dwara_core::mesh::spiffe::SpiffeClient">SpiffeClient</a>;</code></dt><dt id="reexport.SpiffeConfig"><code>pub use spiffe::<a class="struct" href="spiffe/struct.SpiffeConfig.html" title="struct dwara_core::mesh::spiffe::SpiffeConfig">SpiffeConfig</a>;</code></dt><dt id="reexport.SpiffeError"><code>pub use spiffe::<a class="enum" href="spiffe/enum.SpiffeError.html" title="enum dwara_core::mesh::spiffe::SpiffeError">SpiffeError</a>;</code></dt><dt id="reexport.SpiffeIdentity"><code>pub use spiffe::<a class="struct" href="spiffe/struct.SpiffeIdentity.html" title="struct dwara_core::mesh::spiffe::SpiffeIdentity">SpiffeIdentity</a>;</code></dt><dt id="reexport.SpiffeSvid"><code>pub use spiffe::<a class="struct" href="spiffe/struct.SpiffeSvid.html" title="struct dwara_core::mesh::spiffe::SpiffeSvid">SpiffeSvid</a>;</code></dt><dt id="reexport.SpiffeTrustBundle"><code>pub use spiffe::<a class="struct" href="spiffe/struct.SpiffeTrustBundle.html" title="struct dwara_core::mesh::spiffe::SpiffeTrustBundle">SpiffeTrustBundle</a>;</code></dt><dt id="reexport.SvidRefreshResult"><code>pub use spiffe::<a class="enum" href="spiffe/enum.SvidRefreshResult.html" title="enum dwara_core::mesh::spiffe::SvidRefreshResult">SvidRefreshResult</a>;</code></dt><dt id="reexport.WorkloadApiTransport"><code>pub use spiffe::<a class="trait" href="spiffe/trait.WorkloadApiTransport.html" title="trait dwara_core::mesh::spiffe::WorkloadApiTransport">WorkloadApiTransport</a>;</code></dt></dl><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="sidecar/index.html" title="mod dwara_core::mesh::sidecar">sidecar</a></dt><dd>Sidecar traffic interception (DW-107).</dd><dt><a class="mod" href="spiffe/index.html" title="mod dwara_core::mesh::spiffe">spiffe</a></dt><dd>SPIFFE/SPIRE mTLS identity (DW-107).</dd></dl></section></div></main></body></html>

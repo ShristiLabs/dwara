@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EnvProfile"],"fn":["apply_profile"],"struct":["AppliedProfile"]};

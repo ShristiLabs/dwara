@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Prompt experimentation (DW-086): A/B model comparison, prompt versioning, regression evals, and feedback ingestion."><title>dwara_core::ai::experiments - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module experiments</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module experiments</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#ab-tests" title="A/B tests">A/B tests</a></li><li><a href="#prompt-versioning" title="Prompt versioning">Prompt versioning</a></li><li><a href="#eval-runner" title="Eval runner">Eval runner</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>experiments</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/experiments.rs.html#1-987">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Prompt experimentation (DW-086): A/B model comparison, prompt
+versioning, regression evals, and feedback ingestion.</p>
+<h2 id="ab-tests"><a class="doc-anchor" href="#ab-tests">§</a>A/B tests</h2>
+<p>A model alias declares <code>ab_test: &lt;name&gt;</code> to be served by an
+experiment. The experiment’s variants each name a plain model alias
+(chain/canary), an optional prompt version, and a weight. The
+<a href="struct.CompiledAbTest.html" title="struct dwara_core::ai::experiments::CompiledAbTest"><code>CompiledAbTest</code></a> resolves each variant’s model alias to its
+primary <a href="../struct.RouteTarget.html" title="struct dwara_core::ai::RouteTarget"><code>RouteTarget</code></a> at compile time (the same composition
+pattern as DW-085 routing policies). At request time, a
+deterministic weighted pick by request id selects a variant — the
+same slot semantics as canary splits (ratios hold per request, and
+re-sending a request with the same id lands on the same variant).</p>
+<h2 id="prompt-versioning"><a class="doc-anchor" href="#prompt-versioning">§</a>Prompt versioning</h2>
+<p>Each prompt declares one or more versions (each with a system
+message) and an active version. The active version can be
+overridden at runtime via the admin API (stored in the state
+store). When a variant references a prompt version, or when an
+eval references a prompt version, the system message is prepended
+to the request’s messages (BEFORE any existing system message).</p>
+<h2 id="eval-runner"><a class="doc-anchor" href="#eval-runner">§</a>Eval runner</h2>
+<p>The eval runner makes DIRECT provider calls via <code>hyper_util</code> (the
+same pattern as the DW-083 semantic cache and DW-085 routing
+policy classifier). Each golden-set case is sent as a user message
+to the provider; the response is scored by the case’s scorer
+(<code>exact_match</code>, <code>contains</code>, <code>regex</code>). Results are stored in
+analytics. The verdict is computed from stored eval results (pass
+rate, cost tiebreaker).</p>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only. The eval runner’s HTTP call reuses
+the same <code>hyper_util</code> client pattern as the DW-083 semantic cache
+and DW-085 routing policy (no new dependencies).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AutoPromotionConfig.html" title="struct dwara_core::ai::experiments::AutoPromotionConfig">Auto<wbr>Promotion<wbr>Config</a></dt><dd>AI-10 (#199): Auto-promotion configuration. When attached to an
+A/B test, the eval runner can automatically promote the winning
+variant when the pass-rate improvement exceeds the threshold.</dd><dt><a class="struct" href="struct.AutoPromotionDecision.html" title="struct dwara_core::ai::experiments::AutoPromotionDecision">Auto<wbr>Promotion<wbr>Decision</a></dt><dd>AI-10 (#199): The result of an auto-promotion decision.</dd><dt><a class="struct" href="struct.CompiledAbTest.html" title="struct dwara_core::ai::experiments::CompiledAbTest">Compiled<wbr>AbTest</a></dt><dd>A compiled A/B test (DW-086): two or more variants with resolved
+targets. At request time, a deterministic weighted pick by request
+id selects a variant. Built at <a href="../struct.AiRuntime.html" title="struct dwara_core::ai::AiRuntime"><code>AiRuntime</code></a>
+compile time from the config block; immutable once built.</dd><dt><a class="struct" href="struct.CompiledAbVariant.html" title="struct dwara_core::ai::experiments::CompiledAbVariant">Compiled<wbr>AbVariant</a></dt><dd>One compiled A/B test variant (DW-086): the resolved model alias
+target, the optional prompt-version system message, and the
+variant’s weight and name (for analytics attribution).</dd><dt><a class="struct" href="struct.EvalCaseResult.html" title="struct dwara_core::ai::experiments::EvalCaseResult">Eval<wbr>Case<wbr>Result</a></dt><dd>One eval case result (DW-086): the output of running one golden-
+set case against a provider.</dd><dt><a class="struct" href="struct.EvalRunResult.html" title="struct dwara_core::ai::experiments::EvalRunResult">Eval<wbr>RunResult</a></dt><dd>The result of running one eval against one model (DW-086).</dd><dt><a class="struct" href="struct.ExperimentDecision.html" title="struct dwara_core::ai::experiments::ExperimentDecision">Experiment<wbr>Decision</a></dt><dd>The decision an A/B test made for one request (DW-086). The
+dataplane records this as a metric and an analytics assignment
+row. Carries the variant name and the model alias for attribution.</dd><dt><a class="struct" href="struct.ExperimentVerdict.html" title="struct dwara_core::ai::experiments::ExperimentVerdict">Experiment<wbr>Verdict</a></dt><dd>The verdict of an A/B test comparison (DW-086): computed from
+stored eval results. The variant with the higher pass rate wins;
+on a tie, the lower average latency wins (the cost tiebreaker —
+latency is a proxy for cost when the same provider serves both
+variants, and the actual cost is in the spend table).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.EvalScorer.html" title="enum dwara_core::ai::experiments::EvalScorer">Eval<wbr>Scorer</a></dt><dd>The scorer for an eval case (DW-086, AI-10/#199).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.active_prompt_system.html" title="fn dwara_core::ai::experiments::active_prompt_system">active_<wbr>prompt_<wbr>system</a></dt><dd>Resolve the active version for a prompt, considering runtime
+overrides. Returns the system message of the active (or
+overridden) version, or None when the prompt does not exist.</dd><dt><a class="fn" href="fn.compute_verdict.html" title="fn dwara_core::ai::experiments::compute_verdict">compute_<wbr>verdict</a></dt><dd>Compute the verdict from a set of eval run results (DW-086). Each
+result is one variant’s eval run. The variant with the highest
+pass rate wins; on a tie, the lowest average latency wins; on a
+full tie (same pass rate AND same latency), the verdict is a tie
+(winner = None).</dd><dt><a class="fn" href="fn.evaluate_auto_promotion.html" title="fn dwara_core::ai::experiments::evaluate_auto_promotion">evaluate_<wbr>auto_<wbr>promotion</a></dt><dd>AI-10 (#199): Evaluate whether the winning variant should be
+auto-promoted based on the eval results and the promotion config.
+Returns a decision describing whether to promote and why.</dd><dt><a class="fn" href="fn.run_eval.html" title="fn dwara_core::ai::experiments::run_eval">run_<wbr>eval</a></dt><dd>Run an eval against a model alias (DW-086). The <code>provider_url</code> is
+the full URL, <code>auth_header</code> is the optional Authorization header,
+<code>provider_model</code> is the provider’s own model identifier, and
+<code>system_message</code> is the optional prompt-version system message
+(from the eval’s <code>prompt</code> reference, resolved by the caller).
+Returns the per-case results.</dd></dl></section></div></main></body></html>

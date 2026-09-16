@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_RETRY_STATUSES","RETRY_BUDGET_WINDOW_MS"],"fn":["backoff_with_full_jitter","jitter_delay","nominal_backoff_ms","retry_sleep_under_total_deadline","retry_sleep_within_total"],"struct":["HedgeParams","RetryBudget","RetryParams"]};

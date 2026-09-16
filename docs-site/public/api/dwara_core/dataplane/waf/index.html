@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="WAF-lite heuristic filtering (DW-051)."><title>dwara_core::dataplane::waf - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module waf</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module waf</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#request-path-position" title="Request-path position">Request-path position</a></li><li><a href="#inspection-targets" title="Inspection targets">Inspection targets</a></li><li><a href="#match-result" title="Match result">Match result</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>waf</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/waf.rs.html#1-897">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>WAF-lite heuristic filtering (DW-051).</p>
+<p>A lightweight, pattern-matching web application filter that inspects
+the request path, query string, selected headers, and body (when JSON
+or form-urlencoded) for common SQL-injection, XSS, and path-traversal
+signatures. This is NOT a full WAF — it is a first-line traffic filter
+that rejects obvious attack signatures before authentication or rate
+limiting.</p>
+<h3 id="request-path-position"><a class="doc-anchor" href="#request-path-position">§</a>Request-path position</h3>
+<p>The WAF check runs AFTER the route method allowlist and BEFORE the
+route limits (DW-027): a content filter that should reject malicious
+requests before any resource is spent on auth or rate limiting. It
+inspects the ORIGINAL request (before path rewrite / transforms).</p>
+<h3 id="inspection-targets"><a class="doc-anchor" href="#inspection-targets">§</a>Inspection targets</h3>
+<ul>
+<li><strong>Path</strong>: the original request URI path (after routing match, before
+rewrite).</li>
+<li><strong>Query string</strong>: the raw query string.</li>
+<li><strong>Headers</strong>: User-Agent, Referer, Cookie, X-Forwarded-For.</li>
+<li><strong>Body</strong>: when the content type is <code>application/json</code> or
+<code>application/x-www-form-urlencoded</code>, up to <code>max_body_inspect_bytes</code>.</li>
+</ul>
+<h3 id="match-result"><a class="doc-anchor" href="#match-result">§</a>Match result</h3>
+<p>A <a href="struct.WafMatch.html" title="struct dwara_core::dataplane::waf::WafMatch"><code>WafMatch</code></a> carries the filter category, the pattern that matched,
+the inspection target, and a truncated value preview (max 64 chars —
+never the full payload, which could be huge or sensitive). In
+<code>dry_run</code> mode the match is logged and the request continues; otherwise
+a 403 <code>waf_blocked</code> error envelope is returned.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.BodyInspectionResult.html" title="struct dwara_core::dataplane::waf::BodyInspectionResult">Body<wbr>Inspection<wbr>Result</a></dt><dd>The outcome of body inspection: either a match was found (and the
+body is reconstructed for forwarding), or no match was found. The
+reconstructed body is a concrete type so the caller can continue
+the request path regardless of the original body’s type.</dd><dt><a class="struct" href="struct.CompiledCrsRule.html" title="struct dwara_core::dataplane::waf::CompiledCrsRule">Compiled<wbr>CrsRule</a></dt><dd>A compiled CRS rule: the compiled regex, metadata, and the
+resolved target set. Built once per config generation.</dd><dt><a class="struct" href="struct.CrsGeneration.html" title="struct dwara_core::dataplane::waf::CrsGeneration">CrsGeneration</a></dt><dd>A compiled CRS WAF generation: the rule set, exclusions, and
+anomaly threshold. Built once per config generation.</dd><dt><a class="struct" href="struct.CrsResult.html" title="struct dwara_core::dataplane::waf::CrsResult">CrsResult</a></dt><dd>The result of CRS evaluation: the total anomaly score and the
+list of matching rule IDs (for logging).</dd><dt><a class="struct" href="struct.WafGeneration.html" title="struct dwara_core::dataplane::waf::WafGeneration">WafGeneration</a></dt><dd>A compiled WAF generation: the regex sets for each enabled filter
+category, plus any custom patterns. Built once per config generation
+and reused across requests.</dd><dt><a class="struct" href="struct.WafMatch.html" title="struct dwara_core::dataplane::waf::WafMatch">WafMatch</a></dt><dd>A WAF match result: the filter, pattern, target, and a truncated
+value preview for logging. The preview is capped at 64 chars and
+never carries the full payload (which could be huge or sensitive).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.WafBody.html" title="enum dwara_core::dataplane::waf::WafBody">WafBody</a></dt><dd>A body that replays buffered bytes (inspected by the WAF) then
+streams the remaining original body. When the entire body fit within
+the inspection cap, <code>rest</code> is <code>None</code> and the body is fully buffered.</dd><dt><a class="enum" href="enum.WafFilter.html" title="enum dwara_core::dataplane::waf::WafFilter">WafFilter</a></dt><dd>The filter category a matched pattern belongs to.</dd><dt><a class="enum" href="enum.WafTarget.html" title="enum dwara_core::dataplane::waf::WafTarget">WafTarget</a></dt><dd>The inspection target where a match was found.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.crs_from_gateway.html" title="fn dwara_core::dataplane::waf::crs_from_gateway">crs_<wbr>from_<wbr>gateway</a></dt><dd>Build a CRS generation from the gateway config (if the global WAF
+is enabled). Convenience wrapper for the proxy path.</dd><dt><a class="fn" href="fn.inspect_body.html" title="fn dwara_core::dataplane::waf::inspect_body">inspect_<wbr>body</a></dt><dd>Inspect the request body for WAF signatures. Buffers up to
+<code>max_body_inspect_bytes</code> from the body, runs the pattern match on
+the buffered slice, and returns the reconstructed body for
+forwarding. When the body exceeds the cap, only the prefix is
+inspected (a malicious payload beyond the cap is not caught — the
+trade-off for a bounded inspection cost).</dd><dt><a class="fn" href="fn.should_inspect_body.html" title="fn dwara_core::dataplane::waf::should_inspect_body">should_<wbr>inspect_<wbr>body</a></dt><dd>The headers that signal a body worth inspecting: JSON or
+form-urlencoded content types.</dd></dl></section></div></main></body></html>

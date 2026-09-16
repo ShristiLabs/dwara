@@ -1,0 +1,72 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Enterprise licensing gate (DW-032)."><title>dwara_core::extensions::licensing - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module licensing</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module licensing</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#verification-model" title="Verification model">Verification model</a></li><li><a href="#grace-period" title="Grace period">Grace period</a></li><li><a href="#startup-vs-reload" title="Startup vs reload">Startup vs reload</a></li><li><a href="#feature-claim-flags" title="Feature claim flags">Feature claim flags</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>extensions</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">extensions</a></div><h1>Module <span>licensing</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/extensions/licensing.rs.html#1-566">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Enterprise licensing gate (DW-032).</p>
+<p>The edition boundary as a runtime value: a <a href="struct.LicenseGate.html" title="struct dwara_core::extensions::licensing::LicenseGate"><code>LicenseGate</code></a> holds an
+optional verified license and answers the two questions every
+enterprise feature asks before it engages — “are we in enterprise
+mode?” (<a href="struct.LicenseGate.html#method.is_enterprise" title="method dwara_core::extensions::licensing::LicenseGate::is_enterprise"><code>LicenseGate::is_enterprise</code></a>) and “does this license grant
+feature X?” (<a href="struct.LicenseGate.html#method.has_feature" title="method dwara_core::extensions::licensing::LicenseGate::has_feature"><code>LicenseGate::has_feature</code></a>). OSS builds (the default,
+no <code>ent</code> cargo feature) compile a stub gate that is always
+<a href="struct.LicenseGate.html#method.none" title="associated function dwara_core::extensions::licensing::LicenseGate::none"><code>LicenseGate::none</code></a>: every enterprise feature is inert by
+construction, and no <code>licensing-core</code> dependency is pulled in.</p>
+<h2 id="verification-model"><a class="doc-anchor" href="#verification-model">§</a>Verification model</h2>
+<p>When the <code>ent</code> feature is compiled in, <code>LicenseGate::from_file</code>
+reads a license file, verifies its Ed25519 signature against the
+product’s public key, and checks expiry. The public key is NEVER
+user-configurable in the YAML (an operator must not be able to
+substitute their own key to forge a license): it comes from the
+<code>DWARA_LICENSE_PUBLIC_KEY</code> environment variable or, when unset, the
+compiled-in development key (local/CI only — production MUST set the
+env var). The product ID is pinned to <code>"dwara"</code> so a license issued
+for another ShristiLabs product cannot be replayed here.</p>
+<h2 id="grace-period"><a class="doc-anchor" href="#grace-period">§</a>Grace period</h2>
+<p>A license that has passed its <code>expires_at</code> timestamp is not
+immediately fatal. For a configurable grace window (default 7 days,
+0..=30) after expiry, enterprise features keep working and a warning
+is logged — the operator has a buffer to renew. After the grace
+window the gate degrades to OSS: <a href="struct.LicenseGate.html#method.is_enterprise" title="method dwara_core::extensions::licensing::LicenseGate::is_enterprise"><code>LicenseGate::is_enterprise</code></a>
+returns false and every enterprise feature falls back to its OSS
+behavior. This is the done-when: “Invalid/expired license degrades to
+OSS feature set gracefully.”</p>
+<h2 id="startup-vs-reload"><a class="doc-anchor" href="#startup-vs-reload">§</a>Startup vs reload</h2>
+<p>The gate is built once at startup (dwara-bin) and rebuilt on every
+config reload that carries a <code>license</code> block. A signature-invalid
+license REFUSES to start (exit 1) at cold start; on reload, a
+signature-invalid license keeps the running generation serving (the
+same atomic-not-publish rollback as every other reload failure). A
+missing license file refuses to start at cold start and keeps serving
+on reload.</p>
+<h2 id="feature-claim-flags"><a class="doc-anchor" href="#feature-claim-flags">§</a>Feature claim flags</h2>
+<p>The license’s <code>features</code> vector carries claim strings. The gate
+checks them by exact string match. The current enterprise features
+and their claim strings:</p>
+<ul>
+<li><code>redis_rate_limiter</code> — DW-031 (not yet implemented; the gate
+provides the check, the feature will call it).</li>
+<li><code>config_convergence</code> — DW-054 (not yet implemented; same).</li>
+<li><code>redis_cache</code> — SCALE-04 (#183): Redis-backed shared response cache.</li>
+</ul>
+<p>Future enterprise features add their claim string here and call
+<a href="struct.LicenseGate.html#method.has_feature" title="method dwara_core::extensions::licensing::LicenseGate::has_feature"><code>LicenseGate::has_feature</code></a> at their config-validation site.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.LicenseGate.html" title="struct dwara_core::extensions::licensing::LicenseGate">License<wbr>Gate</a></dt><dd>The enterprise licensing gate.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.LicenseLoadError.html" title="enum dwara_core::extensions::licensing::LicenseLoadError">License<wbr>Load<wbr>Error</a></dt><dd>Error produced while loading or verifying a license.</dd><dt><a class="enum" href="enum.LicenseStatus.html" title="enum dwara_core::extensions::licensing::LicenseStatus">License<wbr>Status</a></dt><dd>The runtime status of the license gate, mirrored by the
+<code>dwara_license_status</code> metric (0..=3).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_GRACE_PERIOD_DAYS.html" title="constant dwara_core::extensions::licensing::DEFAULT_GRACE_PERIOD_DAYS">DEFAULT_<wbr>GRACE_<wbr>PERIOD_<wbr>DAYS</a></dt><dd>Default grace period (days) after a license expires before the gate
+degrades to OSS. Configurable via <code>gateway.license.grace_period_days</code>
+(0..=30); 0 means no grace (immediate degradation on expiry). The
+canonical value lives in <a href="../../config/limits/index.html" title="mod dwara_core::config::limits"><code>crate::config::limits</code></a> (the lowest domain)
+so both this module and <code>snapshot::validate</code> read the same number
+without an upward import; this re-export is the convenience path for
+gate consumers.</dd><dt><a class="constant" href="constant.FEATURE_CONFIG_CONVERGENCE.html" title="constant dwara_core::extensions::licensing::FEATURE_CONFIG_CONVERGENCE">FEATURE_<wbr>CONFIG_<wbr>CONVERGENCE</a></dt><dd>License claim string for config convergence (DW-054).</dd><dt><a class="constant" href="constant.FEATURE_FIPS.html" title="constant dwara_core::extensions::licensing::FEATURE_FIPS">FEATURE_<wbr>FIPS</a></dt><dd>License claim string for FIPS 140-3 mode (DW-111). A license that
+carries this claim REQUIRES the gateway to be running in FIPS mode
+(the <code>fips</code> cargo feature compiled in and the self-test passed). When
+the license grants this claim but the gateway is NOT in FIPS mode,
+the license is invalid (config-time check).</dd><dt><a class="constant" href="constant.FEATURE_REDIS_CACHE.html" title="constant dwara_core::extensions::licensing::FEATURE_REDIS_CACHE">FEATURE_<wbr>REDIS_<wbr>CACHE</a></dt><dd>License claim string for the Redis shared response cache (SCALE-04,
+#183). A license that carries this claim enables the Redis-backed
+response cache so a fleet of N instances shares one cache and
+achieves fleet-wide hit ratios instead of N x cold caches.</dd><dt><a class="constant" href="constant.FEATURE_REDIS_QUOTAS.html" title="constant dwara_core::extensions::licensing::FEATURE_REDIS_QUOTAS">FEATURE_<wbr>REDIS_<wbr>QUOTAS</a></dt><dd>License claim string for the Redis distributed quota backend
+(DW-155). A license that carries this claim enables the Redis-backed
+quota checker so a fleet of N instances shares one counter per
+(consumer, budget, window) and enforces the CONFIGURED cap.</dd><dt><a class="constant" href="constant.FEATURE_REDIS_RATE_LIMITER.html" title="constant dwara_core::extensions::licensing::FEATURE_REDIS_RATE_LIMITER">FEATURE_<wbr>REDIS_<wbr>RATE_<wbr>LIMITER</a></dt><dd>License claim string for the Redis rate-limiter backend (DW-031).</dd><dt><a class="constant" href="constant.MAX_GRACE_PERIOD_DAYS.html" title="constant dwara_core::extensions::licensing::MAX_GRACE_PERIOD_DAYS">MAX_<wbr>GRACE_<wbr>PERIOD_<wbr>DAYS</a></dt><dd>Maximum configurable grace period (days). Re-exported from
+<a href="../../config/limits/index.html" title="mod dwara_core::config::limits"><code>crate::config::limits</code></a> for the same reason as
+<a href="constant.DEFAULT_GRACE_PERIOD_DAYS.html" title="constant dwara_core::extensions::licensing::DEFAULT_GRACE_PERIOD_DAYS"><code>DEFAULT_GRACE_PERIOD_DAYS</code></a>.</dd><dt><a class="constant" href="constant.PRODUCT_ID.html" title="constant dwara_core::extensions::licensing::PRODUCT_ID">PRODUCT_<wbr>ID</a></dt><dd>The product ID this gateway verifies licenses for. Pinned so a
+license issued for another ShristiLabs product cannot be replayed
+against dwara even in the unlikely event of key reuse.</dd><dt><a class="constant" href="constant.PUBLIC_KEY_ENV_VAR.html" title="constant dwara_core::extensions::licensing::PUBLIC_KEY_ENV_VAR">PUBLIC_<wbr>KEY_<wbr>ENV_<wbr>VAR</a></dt><dd>The environment variable holding the base64-encoded Ed25519 public
+key for license verification. When unset, the compiled-in development
+key is used (local/CI only; production MUST set this).</dd></dl></section></div></main></body></html>

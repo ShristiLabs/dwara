@@ -1,0 +1,38 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="AI cost attribution (DW-079): pricing tables and per-call cost computation."><title>dwara_core::ai::cost - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module cost</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module cost</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#cost-computation" title="Cost computation">Cost computation</a></li><li><a href="#dependency-direction" title="Dependency direction">Dependency direction</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>ai</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">ai</a></div><h1>Module <span>cost</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/ai/cost.rs.html#1-161">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>AI cost attribution (DW-079): pricing tables and per-call cost
+computation.</p>
+<p>The pricing table is a COMPILED view of the <code>ai.pricing</code> config map:
+provider model identifier -&gt; per-1k-token micro-USD rates. It lives
+on the dataplane behind an ArcSwap and is swapped on every config
+reload (the same pattern as the AI budget engine), so a pricing
+change takes effect on the NEXT request without a restart.</p>
+<h2 id="cost-computation"><a class="doc-anchor" href="#cost-computation">§</a>Cost computation</h2>
+<p><code>cost_micros</code> computes integer micro-USD for one call’s usage:</p>
+<div class="example-wrap"><pre class="language-text"><code>(input_tokens  - cached_tokens) * input_per_1k_micros  / 1000
++ cached_tokens * cached_input_per_1k_micros           / 1000
++ output_tokens * output_per_1k_micros                 / 1000</code></pre></div>
+<p>When <code>batch</code> is true, the batch rates (<code>batch_input_per_1k_micros</code>,
+<code>batch_output_per_1k_micros</code>) replace the standard input/output
+rates when declared; cached-token pricing is NOT combined with
+batch rates (a batch request uses the batch rate for all input
+tokens — the provider’s batch API does not report a separate cached
+tier). When optional fields are absent, the standard rates apply
+(the fallback).</p>
+<p>Integer division truncates (the per-1k rate is the provider’s
+published unit; sub-micro-USD fractions are lost — the honest
+rounding boundary, pinned by tests). Saturating adds guard against
+overflow. An UNKNOWN model (no pricing entry) returns <code>None</code> — the
+caller applies the <code>unknown_model_policy</code> (allow / fail_closed /
+alert, DW-AI-03). The original fail-open behavior (cost 0) is
+preserved by the <code>allow</code> policy at the call site.</p>
+<h2 id="dependency-direction"><a class="doc-anchor" href="#dependency-direction">§</a>Dependency direction</h2>
+<p><code>ai</code> depends on <code>config</code> only (see <code>scripts/check_deps.py</code>); this
+module reads <code>config::ai::AiConfig</code> and <code>ai::types::Usage</code>, both
+same-level or lower. The spend RECORD DTO lives in <code>analytics</code> (a
+plain struct, not importing <code>ai::types::Usage</code>) — the dataplane
+converts at the call site, keeping the dependency direction
+downward.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PricingTable.html" title="struct dwara_core::ai::cost::PricingTable">Pricing<wbr>Table</a></dt><dd>The compiled pricing table (DW-079): provider model -&gt; rates. Built
+at dataplane refresh from the published config; immutable once
+built. Stored on the dataplane behind an ArcSwap and swapped on
+reload, so a pricing change applies to the next request with no
+restart.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,62 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Upstream retries: resolved parameters, retry budget, backoff with full jitter (DW-014, feature analysis 4.11)."><title>dwara_core::resilience::retries - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module retries</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module retries</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#what-retries-are" title="What retries are">What retries are</a></li><li><a href="#retry-budget" title="Retry budget">Retry budget</a></li><li><a href="#backoff" title="Backoff">Backoff</a></li><li><a href="#total-latency" title="Total latency">Total latency</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>resilience</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">resilience</a></div><h1>Module <span>retries</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/resilience/retries.rs.html#1-397">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Upstream retries: resolved parameters, retry budget, backoff with full
+jitter (DW-014, feature analysis 4.11).</p>
+<h2 id="what-retries-are"><a class="doc-anchor" href="#what-retries-are">§</a>What retries are</h2>
+<p>All knobs live on the UPSTREAM (<code>upstreams[].retries</code>); there is no
+per-route retry configuration in v1. <a href="struct.RetryParams.html" title="struct dwara_core::resilience::retries::RetryParams"><code>RetryParams</code></a> is the resolved,
+validated form carried by each <code>UpstreamHandle</code>;
+<a href="../../config/struct.RetryConfig.html" title="struct dwara_core::config::RetryConfig"><code>RetryConfig</code></a> is the serde schema form (defaults applied there).</p>
+<h2 id="retry-budget"><a class="doc-anchor" href="#retry-budget">§</a>Retry budget</h2>
+<p>Each upstream owns one <a href="struct.RetryBudget.html" title="struct dwara_core::resilience::retries::RetryBudget"><code>RetryBudget</code></a>: a rolling 10-second window of
+<code>(timestamp, is_retry)</code> events. A request may be retried only while the
+invariant <code>(retries + 1) * 100 &lt;= percent * totals</code> holds inside the
+window, where <code>totals</code> counts proxied requests to that upstream (one
+record per request, not per attempt) and <code>retries</code> counts retry
+attempts. The check-and-reserve is a single lock-protected step, so the
+invariant is never transiently violated by concurrent requests; the
+conservative form (charging the retry BEFORE it happens) means a fresh
+window with little volume grants few or no retries rather than allowing
+a burst — a deliberately safe bias for a gateway protecting an already
+struggling upstream. Budget state is carried across config reloads
+(keyed by upstream name, exactly like balancer state).</p>
+<h2 id="backoff"><a class="doc-anchor" href="#backoff">§</a>Backoff</h2>
+<p>Nominal delay before retry n (n = 1 for the first retry) is
+<code>min(base * 2^(n-1), cap)</code> (saturating). The actual sleep applies FULL
+JITTER, AWS style: a uniform random duration in <code>[0, nominal]</code>
+(<code>backoff_with_full_jitter</code>). Full jitter avoids the thundering-herd
+synchronization of decorrelated jitter while still bounding the worst
+case by the nominal delay. Randomness is a process-local xorshift64*
+seed under a CAS loop — the same pattern as the load balancer’s
+<code>random-2</code> draws, no <code>rand</code> dependency.</p>
+<h2 id="total-latency"><a class="doc-anchor" href="#total-latency">§</a>Total latency</h2>
+<p>The cross-attempt total deadline (<code>total_deadline</code>, REL-01) caps the
+wall-clock time from the first attempt to the last, INCLUDING backoff
+delays between attempts. When set, a retry whose backoff would cross
+the deadline is aborted and the last response/error is returned to the
+client; the per-attempt <code>read_ms</code> timeout still bounds each individual
+attempt. Absent (the default) leaves the cross-attempt budget
+unbounded — worst case the retry loop adds up to
+<code>attempts * (read_ms + backoff_cap_ms)</code> of latency to a single request
+(each attempt pays its own read timeout plus at most the backoff cap
+before it). Standard in Envoy and NGINX.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.HedgeParams.html" title="struct dwara_core::resilience::retries::HedgeParams">Hedge<wbr>Params</a></dt><dd>Resolved (validated) hedge parameters for one upstream (DW-063).
+<code>hedge_after</code> is <code>None</code> when hedging is disabled (no <code>hedge</code> block or
+<code>hedge_after_ms == 0</code>). When enabled, a speculative duplicate is sent
+after <code>hedge_after</code> without a response; at most <code>hedge_max</code> copies
+per request.</dd><dt><a class="struct" href="struct.RetryBudget.html" title="struct dwara_core::resilience::retries::RetryBudget">Retry<wbr>Budget</a></dt><dd>Per-upstream rolling-window retry budget. Share via <code>Arc</code> from the
+upstream handle; the lock is taken once per proxied request (record)
+and once per retry decision (reserve) — never per attempt frame.</dd><dt><a class="struct" href="struct.RetryParams.html" title="struct dwara_core::resilience::retries::RetryParams">Retry<wbr>Params</a></dt><dd>Resolved (validated) retry parameters for one upstream. <code>attempts == 0</code>
+disables retries entirely — the single-attempt path then performs no
+body buffering and no extra per-request work (the budget denominator is
+still recorded: the window counts all proxied traffic).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_RETRY_STATUSES.html" title="constant dwara_core::resilience::retries::DEFAULT_RETRY_STATUSES">DEFAULT_<wbr>RETRY_<wbr>STATUSES</a></dt><dd>Default retry statuses (<code>502, 503, 504</code>).</dd><dt><a class="constant" href="constant.RETRY_BUDGET_WINDOW_MS.html" title="constant dwara_core::resilience::retries::RETRY_BUDGET_WINDOW_MS">RETRY_<wbr>BUDGET_<wbr>WINDOW_<wbr>MS</a></dt><dd>Rolling window the retry budget accounts over (milliseconds).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.backoff_with_full_jitter.html" title="fn dwara_core::resilience::retries::backoff_with_full_jitter">backoff_<wbr>with_<wbr>full_<wbr>jitter</a></dt><dd>Full-jitter sleep duration for retry number <code>retry</code> (1 = the first
+retry): a uniform draw in <code>[0, nominal_backoff_ms(base, cap, retry)]</code>
+(AWS “Exponential Backoff and Jitter” full jitter). Pure in <code>rand</code> so
+tests can pin bounds; the production draw is <a href="fn.jitter_delay.html" title="fn dwara_core::resilience::retries::jitter_delay"><code>jitter_delay</code></a>.</dd><dt><a class="fn" href="fn.jitter_delay.html" title="fn dwara_core::resilience::retries::jitter_delay">jitter_<wbr>delay</a></dt><dd><a href="fn.backoff_with_full_jitter.html" title="fn dwara_core::resilience::retries::backoff_with_full_jitter"><code>backoff_with_full_jitter</code></a> drawing from the process-local rng.</dd><dt><a class="fn" href="fn.nominal_backoff_ms.html" title="fn dwara_core::resilience::retries::nominal_backoff_ms">nominal_<wbr>backoff_<wbr>ms</a></dt><dd>Nominal (pre-jitter) backoff for retry number <code>retry</code> (1 = the first
+retry): <code>min(base * 2^(retry-1), cap)</code>, saturating on both the shift
+and the multiply.</dd><dt><a class="fn" href="fn.retry_sleep_under_total_deadline.html" title="fn dwara_core::resilience::retries::retry_sleep_under_total_deadline">retry_<wbr>sleep_<wbr>under_<wbr>total_<wbr>deadline</a></dt><dd>Returns the sleep duration to use for a retry under an optional
+cross-attempt total deadline (REL-01), or <code>None</code> when the deadline has
+been exhausted and the retry must be aborted. When the deadline is set
+and the full <code>delay</code> would cross it, the sleep is clamped to the
+remaining slice so the loop never sleeps past the deadline. Pure in
+<code>elapsed</code> so tests can pin the clock; the production wrapper is
+<a href="fn.retry_sleep_within_total.html" title="fn dwara_core::resilience::retries::retry_sleep_within_total"><code>retry_sleep_within_total</code></a>.</dd><dt><a class="fn" href="fn.retry_sleep_within_total.html" title="fn dwara_core::resilience::retries::retry_sleep_within_total">retry_<wbr>sleep_<wbr>within_<wbr>total</a></dt><dd><a href="fn.retry_sleep_under_total_deadline.html" title="fn dwara_core::resilience::retries::retry_sleep_under_total_deadline"><code>retry_sleep_under_total_deadline</code></a> reading the wall clock from
+<code>started</code> (the instant captured at the first attempt of the retry loop).</dd></dl></section></div></main></body></html>

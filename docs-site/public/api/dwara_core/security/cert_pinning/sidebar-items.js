@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CertPinError"],"fn":["client_config_with_pinning"],"struct":["CertPin","CertPinVerifier"]};

@@ -1,0 +1,842 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/dwara-core/src/dataplane/transforms.rs`."><title>transforms.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">dwara_core/dataplane/</div>transforms.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="doccomment">//! Request/response transforms and security-header injection (DW-028,
+<a href=#2 id=2 data-nosnippet>2</a>//! feature analysis 4.12 + the 5-Security header-injection row).
+<a href=#3 id=3 data-nosnippet>3</a>//!
+<a href=#4 id=4 data-nosnippet>4</a>//! ## The streaming split (the issue's done-when)
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! "Streaming is preserved unless a transform explicitly buffers." The
+<a href=#7 id=7 data-nosnippet>7</a>//! implementation splits exactly there:
+<a href=#8 id=8 data-nosnippet>8</a>//!
+<a href=#9 id=9 data-nosnippet>9</a>//! - [`apply_header_ops`], [`apply_query_ops`], and
+<a href=#10 id=10 data-nosnippet>10</a>//!   [`apply_security_headers`] never touch a body. A route carrying
+<a href=#11 id=11 data-nosnippet>11</a>//!   only these forwards and streams byte-identically to a route with
+<a href=#12 id=12 data-nosnippet>12</a>//!   no transforms block at all.
+<a href=#13 id=13 data-nosnippet>13</a>//! - [`transform_request_body`] / [`transform_response_body`] are the
+<a href=#14 id=14 data-nosnippet>14</a>//!   ONE explicitly buffering path: they apply only when the route
+<a href=#15 id=15 data-nosnippet>15</a>//!   configured a JSON body transform AND the body declares itself
+<a href=#16 id=16 data-nosnippet>16</a>//!   JSON AND it is non-empty, and they buffer at most
+<a href=#17 id=17 data-nosnippet>17</a>//!   `max_bytes` — enforced against a declared `Content-Length` up
+<a href=#18 id=18 data-nosnippet>18</a>//!   front and against the live stream frame by frame. Over-cap fails
+<a href=#19 id=19 data-nosnippet>19</a>//!   CLOSED (413 request-side, 502 response-side): passing the body
+<a href=#20 id=20 data-nosnippet>20</a>//!   through untransformed would be fail-open in exactly the masking
+<a href=#21 id=21 data-nosnippet>21</a>//!   direction DW-029 builds on this machinery for.
+<a href=#22 id=22 data-nosnippet>22</a>//!
+<a href=#23 id=23 data-nosnippet>23</a>//! ## Where each piece runs (the documented order)
+<a href=#24 id=24 data-nosnippet>24</a>//!
+<a href=#25 id=25 data-nosnippet>25</a>//! Request side, inside the proxy action on the FORWARD path: DW-010
+<a href=#26 id=26 data-nosnippet>26</a>//! path rewrite, then [`apply_query_ops`] (the rewrite re-attaches the
+<a href=#27 id=27 data-nosnippet>27</a>//! original query verbatim, this block is the only thing that may
+<a href=#28 id=28 data-nosnippet>28</a>//! change it), then hop-by-hop stripping and the gateway's trusted
+<a href=#29 id=29 data-nosnippet>29</a>//! headers (`X-Forwarded-*`, `X-Consumer-*`), then [`apply_header_ops`]
+<a href=#30 id=30 data-nosnippet>30</a>//! — ops see the near-final forwarded request, which is also why they
+<a href=#31 id=31 data-nosnippet>31</a>//! MAY remove the trust headers (the operator owns the upstream's
+<a href=#32 id=32 data-nosnippet>32</a>//! contract; see `config::transforms`), and finally the body transform
+<a href=#33 id=33 data-nosnippet>33</a>//! BEFORE retry buffering, so a retried attempt replays the
+<a href=#34 id=34 data-nosnippet>34</a>//! TRANSFORMED bytes.
+<a href=#35 id=35 data-nosnippet>35</a>//!
+<a href=#36 id=36 data-nosnippet>36</a>//! Response side, in the decoration tail: FIELD MASKING first (DW-029,
+<a href=#37 id=37 data-nosnippet>37</a>//! [`mask_response_body`] — before anything else can so much as read
+<a href=#38 id=38 data-nosnippet>38</a>//! the body: once the sentinel replaces a secret, the original bytes
+<a href=#39 id=39 data-nosnippet>39</a>//! exist nowhere in the gateway, so no later stage — operator
+<a href=#40 id=40 data-nosnippet>40</a>//! transforms, the compression codec — can resurrect or re-emit them),
+<a href=#41 id=41 data-nosnippet>41</a>//! then the body transform (compression then encodes the transformed
+<a href=#42 id=42 data-nosnippet>42</a>//! bytes and its eligibility check sees the final content type), then
+<a href=#43 id=43 data-nosnippet>43</a>//! header ops, then the existing compression -&gt; versioning -&gt; CORS
+<a href=#44 id=44 data-nosnippet>44</a>//! stages, then [`apply_security_headers`] (last policy stamp before
+<a href=#45 id=45 data-nosnippet>45</a>//! rate headers), then rate headers.
+<a href=#46 id=46 data-nosnippet>46</a>//!
+<a href=#47 id=47 data-nosnippet>47</a>//! Response HEADER and BODY transforms apply to action responses only;
+<a href=#48 id=48 data-nosnippet>48</a>//! security headers apply to every route-matched response including
+<a href=#49 id=49 data-nosnippet>49</a>//! gateway short-circuits (see `config::transforms::SecurityHeaders`
+<a href=#50 id=50 data-nosnippet>50</a>//! for the asymmetry with deprecation stamps). MASKING applies to
+<a href=#51 id=51 data-nosnippet>51</a>//! PROXY action responses only: the leak surface it guards is the
+<a href=#52 id=52 data-nosnippet>52</a>//! upstream's output — gateway-authored bodies (redirect, respond) are
+<a href=#53 id=53 data-nosnippet>53</a>//! operator config bytes with no upstream data to redact, and bodiless
+<a href=#54 id=54 data-nosnippet>54</a>//! statuses (1xx/101/204/304) have nothing to leak; both pass.
+<a href=#55 id=55 data-nosnippet>55</a>//!
+<a href=#56 id=56 data-nosnippet>56</a>//! ## Masking's inverted gate posture (DW-029)
+<a href=#57 id=57 data-nosnippet>57</a>//!
+<a href=#58 id=58 data-nosnippet>58</a>//! The DW-028 body transform PASSES THROUGH what it cannot handle
+<a href=#59 id=59 data-nosnippet>59</a>//! (encoded or non-JSON bodies) — a convenience transform skipping
+<a href=#60 id=60 data-nosnippet>60</a>//! itself is harmless. Masking inverts every one of those gates into a
+<a href=#61 id=61 data-nosnippet>61</a>//! 502 REFUSAL: the gateway cannot prove the configured fields absent
+<a href=#62 id=62 data-nosnippet>62</a>//! from bytes it cannot parse, and for a redaction policy a skipped
+<a href=#63 id=63 data-nosnippet>63</a>//! pass IS the leak (the module docs of `config::transforms` carry the
+<a href=#64 id=64 data-nosnippet>64</a>//! full argument). A route that configures masking pins its proxied
+<a href=#65 id=65 data-nosnippet>65</a>//! responses to the contract "identity-encoded JSON within the cap,
+<a href=#66 id=66 data-nosnippet>66</a>//! with every configured pointer present" — an upstream that violates
+<a href=#67 id=67 data-nosnippet>67</a>//! it answers 502 with a generic envelope, and one `dwara::policy`
+<a href=#68 id=68 data-nosnippet>68</a>//! warn event names the refusal class server-side. Every successful
+<a href=#69 id=69 data-nosnippet>69</a>//! mask emits one `dwara::policy` info event (the audit trail the
+<a href=#70 id=70 data-nosnippet>70</a>//! issue's done-when asks for: route, consumer, count, request-id).
+<a href=#71 id=71 data-nosnippet>71</a>//!
+<a href=#72 id=72 data-nosnippet>72</a>//! ## Why header/query ops are lenient where JSON pointers are strict
+<a href=#73 id=73 data-nosnippet>73</a>//!
+<a href=#74 id=74 data-nosnippet>74</a>//! A header may legitimately be absent from a given request; renaming
+<a href=#75 id=75 data-nosnippet>75</a>//! or removing an absent header is a no-op, not an error. A JSON
+<a href=#76 id=76 data-nosnippet>76</a>//! pointer that does not resolve is a DATA-SHAPE violation against a
+<a href=#77 id=77 data-nosnippet>77</a>//! contract the operator pinned — and in the remove direction a
+<a href=#78 id=78 data-nosnippet>78</a>//! silent miss is the leak the policy exists to prevent. Leniency and
+<a href=#79 id=79 data-nosnippet>79</a>//! strictness each sit where their failure mode says they belong.
+<a href=#80 id=80 data-nosnippet>80</a>//!
+<a href=#81 id=81 data-nosnippet>81</a>//! ## Framing after a body transform
+<a href=#82 id=82 data-nosnippet>82</a>//!
+<a href=#83 id=83 data-nosnippet>83</a>//! Both body transforms rewrite `Content-Length` to the transformed
+<a href=#84 id=84 data-nosnippet>84</a>//! body's exact length (the buffered bytes ARE the body; any stale
+<a href=#85 id=85 data-nosnippet>85</a>//! declared length would misframe the hop). Framing headers are
+<a href=#86 id=86 data-nosnippet>86</a>//! meanwhile rejected from header ops by validation
+<a href=#87 id=87 data-nosnippet>87</a>//! (`config::transforms::is_forbidden_*_header`), so exactly one
+<a href=#88 id=88 data-nosnippet>88</a>//! component — this module — ever writes them.
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a></span><span class="kw">use </span>bytes::Bytes;
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">use </span>http_body_util::Full;
+<a href=#92 id=92 data-nosnippet>92</a><span class="kw">use </span>hyper::header::{
+<a href=#93 id=93 data-nosnippet>93</a>    HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_SECURITY_POLICY,
+<a href=#94 id=94 data-nosnippet>94</a>    CONTENT_TYPE, STRICT_TRANSPORT_SECURITY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+<a href=#95 id=95 data-nosnippet>95</a>};
+<a href=#96 id=96 data-nosnippet>96</a><span class="kw">use </span>hyper::{Response, Uri};
+<a href=#97 id=97 data-nosnippet>97</a>
+<a href=#98 id=98 data-nosnippet>98</a><span class="kw">use </span><span class="kw">crate</span>::config::transforms <span class="kw">as </span>t;
+<a href=#99 id=99 data-nosnippet>99</a><span class="kw">use </span><span class="kw">crate</span>::config::transforms::{CompiledJsonTransform, HeaderOps, QueryOps, SecurityHeaders};
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a><span class="kw">use </span><span class="kw">crate</span>::dataplane::proxy::ProxyBody;
+<a href=#102 id=102 data-nosnippet>102</a>
+<a href=#103 id=103 data-nosnippet>103</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#104 id=104 data-nosnippet>104</a>// Header ops
+<a href=#105 id=105 data-nosnippet>105</a>// ---------------------------------------------------------------------------
+<a href=#106 id=106 data-nosnippet>106</a>
+<a href=#107 id=107 data-nosnippet>107</a></span><span class="doccomment">/// Apply header manipulation ops in the frozen order (DW-028): `set`
+<a href=#108 id=108 data-nosnippet>108</a>/// (replace-all), `add` (append), `rename` (relabel every value), then
+<a href=#109 id=109 data-nosnippet>109</a>/// `remove` — see [`HeaderOps`] for the rationale. Every name/value
+<a href=#110 id=110 data-nosnippet>110</a>/// was validated representable at config publish; the `if let Ok`
+<a href=#111 id=111 data-nosnippet>111</a>/// skips are generation-tear backstops (never a panic, never a 500),
+<a href=#112 id=112 data-nosnippet>112</a>/// the same posture as the respond-action headers.
+<a href=#113 id=113 data-nosnippet>113</a></span><span class="kw">pub fn </span>apply_header_ops(headers: <span class="kw-2">&amp;mut </span>HeaderMap, ops: <span class="kw-2">&amp;</span>HeaderOps) {
+<a href=#114 id=114 data-nosnippet>114</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span><span class="kw-2">&amp;</span>ops.set {
+<a href=#115 id=115 data-nosnippet>115</a>        <span class="kw">if let </span>(<span class="prelude-val">Ok</span>(n), <span class="prelude-val">Ok</span>(v)) = (
+<a href=#116 id=116 data-nosnippet>116</a>            HeaderName::from_bytes(name.as_bytes()),
+<a href=#117 id=117 data-nosnippet>117</a>            HeaderValue::from_str(value),
+<a href=#118 id=118 data-nosnippet>118</a>        ) {
+<a href=#119 id=119 data-nosnippet>119</a>            headers.insert(n, v);
+<a href=#120 id=120 data-nosnippet>120</a>        }
+<a href=#121 id=121 data-nosnippet>121</a>    }
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="kw">for </span>(name, value) <span class="kw">in </span><span class="kw-2">&amp;</span>ops.add {
+<a href=#123 id=123 data-nosnippet>123</a>        <span class="kw">if let </span>(<span class="prelude-val">Ok</span>(n), <span class="prelude-val">Ok</span>(v)) = (
+<a href=#124 id=124 data-nosnippet>124</a>            HeaderName::from_bytes(name.as_bytes()),
+<a href=#125 id=125 data-nosnippet>125</a>            HeaderValue::from_str(value),
+<a href=#126 id=126 data-nosnippet>126</a>        ) {
+<a href=#127 id=127 data-nosnippet>127</a>            headers.append(n, v);
+<a href=#128 id=128 data-nosnippet>128</a>        }
+<a href=#129 id=129 data-nosnippet>129</a>    }
+<a href=#130 id=130 data-nosnippet>130</a>    <span class="comment">// Rename: move EVERY value of `from` onto `to` (appending after any
+<a href=#131 id=131 data-nosnippet>131</a>    // values `to` already carries); an absent `from` is a no-op (a
+<a href=#132 id=132 data-nosnippet>132</a>    // header may simply not be present on this request).
+<a href=#133 id=133 data-nosnippet>133</a>    </span><span class="kw">for </span>(from, to) <span class="kw">in </span><span class="kw-2">&amp;</span>ops.rename {
+<a href=#134 id=134 data-nosnippet>134</a>        <span class="kw">if let </span>(<span class="prelude-val">Ok</span>(f), <span class="prelude-val">Ok</span>(to_n)) = (
+<a href=#135 id=135 data-nosnippet>135</a>            HeaderName::from_bytes(from.as_bytes()),
+<a href=#136 id=136 data-nosnippet>136</a>            HeaderName::from_bytes(to.as_bytes()),
+<a href=#137 id=137 data-nosnippet>137</a>        ) {
+<a href=#138 id=138 data-nosnippet>138</a>            <span class="kw">let </span>values: Vec&lt;HeaderValue&gt; = headers.get_all(<span class="kw-2">&amp;</span>f).iter().cloned().collect();
+<a href=#139 id=139 data-nosnippet>139</a>            headers.remove(<span class="kw-2">&amp;</span>f);
+<a href=#140 id=140 data-nosnippet>140</a>            <span class="kw">for </span>v <span class="kw">in </span>values {
+<a href=#141 id=141 data-nosnippet>141</a>                headers.append(<span class="kw-2">&amp;</span>to_n, v);
+<a href=#142 id=142 data-nosnippet>142</a>            }
+<a href=#143 id=143 data-nosnippet>143</a>        }
+<a href=#144 id=144 data-nosnippet>144</a>    }
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">for </span>name <span class="kw">in </span><span class="kw-2">&amp;</span>ops.remove {
+<a href=#146 id=146 data-nosnippet>146</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(n) = HeaderName::from_bytes(name.as_bytes()) {
+<a href=#147 id=147 data-nosnippet>147</a>            headers.remove(<span class="kw-2">&amp;</span>n);
+<a href=#148 id=148 data-nosnippet>148</a>        }
+<a href=#149 id=149 data-nosnippet>149</a>    }
+<a href=#150 id=150 data-nosnippet>150</a>}
+<a href=#151 id=151 data-nosnippet>151</a>
+<a href=#152 id=152 data-nosnippet>152</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#153 id=153 data-nosnippet>153</a>// Query ops
+<a href=#154 id=154 data-nosnippet>154</a>// ---------------------------------------------------------------------------
+<a href=#155 id=155 data-nosnippet>155</a>
+<a href=#156 id=156 data-nosnippet>156</a></span><span class="doccomment">/// Apply query manipulation ops to a request URI (DW-028). Returns the
+<a href=#157 id=157 data-nosnippet>157</a>/// rebuilt URI, or `None` when nothing changed (the caller keeps the
+<a href=#158 id=158 data-nosnippet>158</a>/// original — its bytes are already correct). Original pairs are
+<a href=#159 id=159 data-nosnippet>159</a>/// carried VERBATIM (no decode/re-encode round trip: a client's exact
+<a href=#160 id=160 data-nosnippet>160</a>/// percent-encoding spelling survives); only pairs a named op touches
+<a href=#161 id=161 data-nosnippet>161</a>/// are encoded, by the shared percent-encoder below.
+<a href=#162 id=162 data-nosnippet>162</a>///
+<a href=#163 id=163 data-nosnippet>163</a>/// Per-pair application order (deterministic, documented): a key named
+<a href=#164 id=164 data-nosnippet>164</a>/// by `remove` or owned by `set` is dropped from its original position
+<a href=#165 id=165 data-nosnippet>165</a>/// (`set` re-emits its pair at the end; `remove` just drops), then
+<a href=#166 id=166 data-nosnippet>166</a>/// `rename` re-labels surviving pairs in place (value bytes verbatim),
+<a href=#167 id=167 data-nosnippet>167</a>/// and `add` pairs append at the end (after `set`, both in sorted key
+<a href=#168 id=168 data-nosnippet>168</a>/// order). Key matching is on RAW bytes — neither the config key nor
+<a href=#169 id=169 data-nosnippet>169</a>/// the request key is percent-decoded first, so `set: {a: "1"}`
+<a href=#170 id=170 data-nosnippet>170</a>/// matches the literal `a=1`, never `%61=1`.
+<a href=#171 id=171 data-nosnippet>171</a></span><span class="kw">pub fn </span>apply_query_ops(uri: <span class="kw-2">&amp;</span>Uri, ops: <span class="kw-2">&amp;</span>QueryOps) -&gt; <span class="prelude-ty">Option</span>&lt;Uri&gt; {
+<a href=#172 id=172 data-nosnippet>172</a>    <span class="kw">let </span><span class="kw-2">mut </span>emitted: Vec&lt;String&gt; = Vec::new();
+<a href=#173 id=173 data-nosnippet>173</a>    <span class="kw">for </span>(k, v) <span class="kw">in </span>ops.set.iter().chain(ops.add.iter()) {
+<a href=#174 id=174 data-nosnippet>174</a>        emitted.push(<span class="macro">format!</span>(
+<a href=#175 id=175 data-nosnippet>175</a>            <span class="string">"{}={}"</span>,
+<a href=#176 id=176 data-nosnippet>176</a>            encode_query_component(k),
+<a href=#177 id=177 data-nosnippet>177</a>            encode_query_component(v)
+<a href=#178 id=178 data-nosnippet>178</a>        ));
+<a href=#179 id=179 data-nosnippet>179</a>    }
+<a href=#180 id=180 data-nosnippet>180</a>    <span class="kw">let </span><span class="prelude-val">Some</span>(original) = uri.query() <span class="kw">else </span>{
+<a href=#181 id=181 data-nosnippet>181</a>        <span class="kw">if </span>emitted.is_empty() {
+<a href=#182 id=182 data-nosnippet>182</a>            <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#183 id=183 data-nosnippet>183</a>        }
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="comment">// No query yet: set/add build one from scratch.
+<a href=#185 id=185 data-nosnippet>185</a>        </span><span class="kw">return </span>rebuild(uri, <span class="kw-2">&amp;</span>emitted.join(<span class="string">"&amp;"</span>));
+<a href=#186 id=186 data-nosnippet>186</a>    };
+<a href=#187 id=187 data-nosnippet>187</a>
+<a href=#188 id=188 data-nosnippet>188</a>    <span class="kw">let </span><span class="kw-2">mut </span>carried: Vec&lt;String&gt; = Vec::new();
+<a href=#189 id=189 data-nosnippet>189</a>    <span class="kw">for </span>raw_pair <span class="kw">in </span>original.split(<span class="string">'&amp;'</span>) {
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="kw">if </span>raw_pair.is_empty() {
+<a href=#191 id=191 data-nosnippet>191</a>            <span class="kw">continue</span>; <span class="comment">// a trailing/doubled '&amp;' contributes nothing
+<a href=#192 id=192 data-nosnippet>192</a>        </span>}
+<a href=#193 id=193 data-nosnippet>193</a>        <span class="kw">let </span>key = raw_pair.split(<span class="string">'='</span>).next().unwrap_or(<span class="string">""</span>);
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="comment">// Set-owned and removed keys do not carry (set re-emits at the
+<a href=#195 id=195 data-nosnippet>195</a>        // end; remove is gone for good).
+<a href=#196 id=196 data-nosnippet>196</a>        </span><span class="kw">if </span>ops.remove.iter().any(|r| r == key) || ops.set.contains_key(key) {
+<a href=#197 id=197 data-nosnippet>197</a>            <span class="kw">continue</span>;
+<a href=#198 id=198 data-nosnippet>198</a>        }
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">let </span>key_out = <span class="kw">match </span>ops.rename.get(key) {
+<a href=#200 id=200 data-nosnippet>200</a>            <span class="prelude-val">Some</span>(to) =&gt; encode_query_component(to).into_owned(),
+<a href=#201 id=201 data-nosnippet>201</a>            <span class="prelude-val">None </span>=&gt; key.to_string(),
+<a href=#202 id=202 data-nosnippet>202</a>        };
+<a href=#203 id=203 data-nosnippet>203</a>        <span class="kw">let </span>piece = <span class="kw">match </span>raw_pair.split_once(<span class="string">'='</span>) {
+<a href=#204 id=204 data-nosnippet>204</a>            <span class="prelude-val">Some</span>((<span class="kw">_</span>, value)) =&gt; <span class="macro">format!</span>(<span class="string">"{key_out}={value}"</span>),
+<a href=#205 id=205 data-nosnippet>205</a>            <span class="prelude-val">None </span>=&gt; key_out,
+<a href=#206 id=206 data-nosnippet>206</a>        };
+<a href=#207 id=207 data-nosnippet>207</a>        carried.push(piece);
+<a href=#208 id=208 data-nosnippet>208</a>    }
+<a href=#209 id=209 data-nosnippet>209</a>    <span class="kw">let </span><span class="kw-2">mut </span>all = carried;
+<a href=#210 id=210 data-nosnippet>210</a>    all.extend(emitted);
+<a href=#211 id=211 data-nosnippet>211</a>    <span class="kw">if </span>all.is_empty() {
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="comment">// Everything removed, nothing emitted: the query disappears.
+<a href=#213 id=213 data-nosnippet>213</a>        </span><span class="kw">return </span>rebuild(uri, <span class="string">""</span>);
+<a href=#214 id=214 data-nosnippet>214</a>    }
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="kw">let </span>joined = all.join(<span class="string">"&amp;"</span>);
+<a href=#216 id=216 data-nosnippet>216</a>    <span class="kw">if </span>joined == original {
+<a href=#217 id=217 data-nosnippet>217</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#218 id=218 data-nosnippet>218</a>    }
+<a href=#219 id=219 data-nosnippet>219</a>    rebuild(uri, <span class="kw-2">&amp;</span>joined)
+<a href=#220 id=220 data-nosnippet>220</a>}
+<a href=#221 id=221 data-nosnippet>221</a>
+<a href=#222 id=222 data-nosnippet>222</a><span class="doccomment">/// Percent-encode one query component for emission (DW-028): encode
+<a href=#223 id=223 data-nosnippet>223</a>/// every byte outside the RFC 3986 unreserved set and the query-safe
+<a href=#224 id=224 data-nosnippet>224</a>/// sub-delims, ALWAYS encoding the three structural bytes (`&amp;`, `=`,
+<a href=#225 id=225 data-nosnippet>225</a>/// `#`) and space. Validation rejects control/non-ASCII input; the
+<a href=#226 id=226 data-nosnippet>226</a>/// encoder stays defensive for any byte.
+<a href=#227 id=227 data-nosnippet>227</a></span><span class="kw">fn </span>encode_query_component(s: <span class="kw-2">&amp;</span>str) -&gt; std::borrow::Cow&lt;<span class="lifetime">'_</span>, str&gt; {
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="kw">fn </span>safe(b: u8) -&gt; bool {
+<a href=#229 id=229 data-nosnippet>229</a>        <span class="macro">matches!</span>(b,
+<a href=#230 id=230 data-nosnippet>230</a>            <span class="string">b'A'</span>..=<span class="string">b'Z' </span>| <span class="string">b'a'</span>..=<span class="string">b'z' </span>| <span class="string">b'0'</span>..=<span class="string">b'9'
+<a href=#231 id=231 data-nosnippet>231</a>            </span>| <span class="string">b'-' </span>| <span class="string">b'.' </span>| <span class="string">b'_' </span>| <span class="string">b'~'
+<a href=#232 id=232 data-nosnippet>232</a>            </span>| <span class="string">b'!' </span>| <span class="string">b'$' </span>| <span class="string">b'\'' </span>| <span class="string">b'(' </span>| <span class="string">b')' </span>| <span class="string">b'*' </span>| <span class="string">b'+' </span>| <span class="string">b',' </span>| <span class="string">b';' </span>| <span class="string">b':' </span>| <span class="string">b'@' </span>| <span class="string">b'/' </span>| <span class="string">b'?'</span>)
+<a href=#233 id=233 data-nosnippet>233</a>    }
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="kw">if </span>s.bytes().all(safe) {
+<a href=#235 id=235 data-nosnippet>235</a>        <span class="kw">return </span>std::borrow::Cow::Borrowed(s);
+<a href=#236 id=236 data-nosnippet>236</a>    }
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="kw">let </span><span class="kw-2">mut </span>out = String::with_capacity(s.len());
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="kw">for </span>b <span class="kw">in </span>s.bytes() {
+<a href=#239 id=239 data-nosnippet>239</a>        <span class="kw">if </span>safe(b) {
+<a href=#240 id=240 data-nosnippet>240</a>            out.push(b <span class="kw">as </span>char);
+<a href=#241 id=241 data-nosnippet>241</a>        } <span class="kw">else </span>{
+<a href=#242 id=242 data-nosnippet>242</a>            out.push_str(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"%{b:02X}"</span>));
+<a href=#243 id=243 data-nosnippet>243</a>        }
+<a href=#244 id=244 data-nosnippet>244</a>    }
+<a href=#245 id=245 data-nosnippet>245</a>    std::borrow::Cow::Owned(out)
+<a href=#246 id=246 data-nosnippet>246</a>}
+<a href=#247 id=247 data-nosnippet>247</a>
+<a href=#248 id=248 data-nosnippet>248</a><span class="doccomment">/// Rebuild `uri` with a new query (`""` = no query). `None` on an
+<a href=#249 id=249 data-nosnippet>249</a>/// unbuildable result — validation keeps ops' emissions in the safe
+<a href=#250 id=250 data-nosnippet>250</a>/// alphabet, so this is a never-fail backstop that keeps the ORIGINAL
+<a href=#251 id=251 data-nosnippet>251</a>/// URI rather than erroring the request.
+<a href=#252 id=252 data-nosnippet>252</a></span><span class="kw">fn </span>rebuild(uri: <span class="kw-2">&amp;</span>Uri, query: <span class="kw-2">&amp;</span>str) -&gt; <span class="prelude-ty">Option</span>&lt;Uri&gt; {
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="kw">let </span>pq = <span class="kw">if </span>query.is_empty() {
+<a href=#254 id=254 data-nosnippet>254</a>        uri.path().to_string()
+<a href=#255 id=255 data-nosnippet>255</a>    } <span class="kw">else </span>{
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="macro">format!</span>(<span class="string">"{}?{}"</span>, uri.path(), query)
+<a href=#257 id=257 data-nosnippet>257</a>    };
+<a href=#258 id=258 data-nosnippet>258</a>    <span class="kw">let </span><span class="prelude-val">Ok</span>(pq) = pq.parse::&lt;hyper::http::uri::PathAndQuery&gt;() <span class="kw">else </span>{
+<a href=#259 id=259 data-nosnippet>259</a>        <span class="kw">return </span><span class="prelude-val">None</span>;
+<a href=#260 id=260 data-nosnippet>260</a>    };
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="kw">let </span><span class="kw-2">mut </span>parts = hyper::http::uri::Parts::from(uri.clone());
+<a href=#262 id=262 data-nosnippet>262</a>    parts.path_and_query = <span class="prelude-val">Some</span>(pq);
+<a href=#263 id=263 data-nosnippet>263</a>    Uri::from_parts(parts).ok()
+<a href=#264 id=264 data-nosnippet>264</a>}
+<a href=#265 id=265 data-nosnippet>265</a>
+<a href=#266 id=266 data-nosnippet>266</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#267 id=267 data-nosnippet>267</a>// Security headers
+<a href=#268 id=268 data-nosnippet>268</a>// ---------------------------------------------------------------------------
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a></span><span class="doccomment">/// Stamp a route's security-header policy onto a response (DW-028).
+<a href=#271 id=271 data-nosnippet>271</a>/// Every present field REPLACES any upstream-sent value: the gateway
+<a href=#272 id=272 data-nosnippet>272</a>/// is the source of truth for its edge policy (the same rule as the
+<a href=#273 id=273 data-nosnippet>273</a>/// deprecation and `X-RateLimit-*` headers). Values are static or
+<a href=#274 id=274 data-nosnippet>274</a>/// validation-checked representable; the `if let Ok` skips are the
+<a href=#275 id=275 data-nosnippet>275</a>/// same generation-tear backstop posture as everywhere in the tail.
+<a href=#276 id=276 data-nosnippet>276</a></span><span class="kw">pub fn </span>apply_security_headers(headers: <span class="kw-2">&amp;mut </span>HeaderMap, sh: <span class="kw-2">&amp;</span>SecurityHeaders) {
+<a href=#277 id=277 data-nosnippet>277</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(max_age) = sh.hsts_max_age_secs {
+<a href=#278 id=278 data-nosnippet>278</a>        <span class="kw">let </span><span class="kw-2">mut </span>value = <span class="macro">format!</span>(<span class="string">"max-age={max_age}"</span>);
+<a href=#279 id=279 data-nosnippet>279</a>        <span class="kw">if </span>sh.hsts_include_subdomains {
+<a href=#280 id=280 data-nosnippet>280</a>            value.push_str(<span class="string">"; includeSubDomains"</span>);
+<a href=#281 id=281 data-nosnippet>281</a>        }
+<a href=#282 id=282 data-nosnippet>282</a>        <span class="kw">if </span>sh.hsts_preload {
+<a href=#283 id=283 data-nosnippet>283</a>            value.push_str(<span class="string">"; preload"</span>);
+<a href=#284 id=284 data-nosnippet>284</a>        }
+<a href=#285 id=285 data-nosnippet>285</a>        <span class="comment">// A u64 with the two literal directives is always representable;
+<a href=#286 id=286 data-nosnippet>286</a>        // the parse keeps the shape honest.
+<a href=#287 id=287 data-nosnippet>287</a>        </span><span class="kw">if let </span><span class="prelude-val">Ok</span>(v) = HeaderValue::from_str(<span class="kw-2">&amp;</span>value) {
+<a href=#288 id=288 data-nosnippet>288</a>            headers.insert(STRICT_TRANSPORT_SECURITY, v);
+<a href=#289 id=289 data-nosnippet>289</a>        }
+<a href=#290 id=290 data-nosnippet>290</a>    }
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="kw">if </span>sh.nosniff {
+<a href=#292 id=292 data-nosnippet>292</a>        headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static(<span class="string">"nosniff"</span>));
+<a href=#293 id=293 data-nosnippet>293</a>    }
+<a href=#294 id=294 data-nosnippet>294</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(csp) = <span class="kw-2">&amp;</span>sh.content_security_policy {
+<a href=#295 id=295 data-nosnippet>295</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(v) = HeaderValue::from_str(csp) {
+<a href=#296 id=296 data-nosnippet>296</a>            headers.insert(CONTENT_SECURITY_POLICY, v);
+<a href=#297 id=297 data-nosnippet>297</a>        }
+<a href=#298 id=298 data-nosnippet>298</a>    }
+<a href=#299 id=299 data-nosnippet>299</a>    <span class="kw">if let </span><span class="prelude-val">Some</span>(fo) = sh.frame_options {
+<a href=#300 id=300 data-nosnippet>300</a>        headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static(fo.header_value()));
+<a href=#301 id=301 data-nosnippet>301</a>    }
+<a href=#302 id=302 data-nosnippet>302</a>}
+<a href=#303 id=303 data-nosnippet>303</a>
+<a href=#304 id=304 data-nosnippet>304</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#305 id=305 data-nosnippet>305</a>// Body transforms
+<a href=#306 id=306 data-nosnippet>306</a>// ---------------------------------------------------------------------------
+<a href=#307 id=307 data-nosnippet>307</a>
+<a href=#308 id=308 data-nosnippet>308</a></span><span class="doccomment">/// The lowercase media type of a `Content-Type` header (parameters
+<a href=#309 id=309 data-nosnippet>309</a>/// stripped), when the header is present and textual.
+<a href=#310 id=310 data-nosnippet>310</a></span><span class="kw">pub fn </span>media_type(headers: <span class="kw-2">&amp;</span>HeaderMap) -&gt; <span class="prelude-ty">Option</span>&lt;String&gt; {
+<a href=#311 id=311 data-nosnippet>311</a>    headers
+<a href=#312 id=312 data-nosnippet>312</a>        .get(<span class="kw-2">&amp;</span>CONTENT_TYPE)<span class="question-mark">?
+<a href=#313 id=313 data-nosnippet>313</a>        </span>.to_str()
+<a href=#314 id=314 data-nosnippet>314</a>        .ok()
+<a href=#315 id=315 data-nosnippet>315</a>        .map(|v| {
+<a href=#316 id=316 data-nosnippet>316</a>            v.split(<span class="string">';'</span>)
+<a href=#317 id=317 data-nosnippet>317</a>                .next()
+<a href=#318 id=318 data-nosnippet>318</a>                .unwrap_or(<span class="string">""</span>)
+<a href=#319 id=319 data-nosnippet>319</a>                .trim()
+<a href=#320 id=320 data-nosnippet>320</a>                .to_ascii_lowercase()
+<a href=#321 id=321 data-nosnippet>321</a>        })
+<a href=#322 id=322 data-nosnippet>322</a>        .filter(|mt| !mt.is_empty())
+<a href=#323 id=323 data-nosnippet>323</a>}
+<a href=#324 id=324 data-nosnippet>324</a>
+<a href=#325 id=325 data-nosnippet>325</a><span class="doccomment">/// Does this body's `Content-Type` make it a JSON body-transform
+<a href=#326 id=326 data-nosnippet>326</a>/// candidate (DW-028)? (`application/json` and the `application/
+<a href=#327 id=327 data-nosnippet>327</a>/// &lt;*+json&gt;` family, parameters ignored — see
+<a href=#328 id=328 data-nosnippet>328</a>/// `config::transforms::is_json_media_type`.)
+<a href=#329 id=329 data-nosnippet>329</a></span><span class="kw">pub fn </span>is_json_body(headers: <span class="kw-2">&amp;</span>HeaderMap) -&gt; bool {
+<a href=#330 id=330 data-nosnippet>330</a>    media_type(headers).is_some_and(|mt| t::is_json_media_type(<span class="kw-2">&amp;</span>mt))
+<a href=#331 id=331 data-nosnippet>331</a>}
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a><span class="doccomment">/// Why a REQUEST body transform refused or failed (DW-028). The proxy
+<a href=#334 id=334 data-nosnippet>334</a>/// maps each arm to its client answer: `RouteLimit` keeps the route
+<a href=#335 id=335 data-nosnippet>335</a>/// limit's 413 envelope (the route's cap, not the transform's, bound
+<a href=#336 id=336 data-nosnippet>336</a>/// the body); `SignatureMismatch` keeps the HMAC family's 401 (the
+<a href=#337 id=337 data-nosnippet>337</a>/// client's own signature bound a digest the body did not match);
+<a href=#338 id=338 data-nosnippet>338</a>/// `TooLarge`/`InvalidJson`/`Unresolved` answer 413/400/400 in the
+<a href=#339 id=339 data-nosnippet>339</a>/// transform's own envelope.
+<a href=#340 id=340 data-nosnippet>340</a></span><span class="attr">#[derive(Debug)]
+<a href=#341 id=341 data-nosnippet>341</a></span><span class="kw">pub enum </span>RequestBodyTransformError {
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// The route's own streaming body limit aborted the read (the
+<a href=#343 id=343 data-nosnippet>343</a>    /// limit wrapper inside this body stack tripped mid-buffer).
+<a href=#344 id=344 data-nosnippet>344</a>    </span>RouteLimit,
+<a href=#345 id=345 data-nosnippet>345</a>    <span class="doccomment">/// The signed-body digest did not match (DW-036): the request's
+<a href=#346 id=346 data-nosnippet>346</a>    /// HMAC signature bound a different body.
+<a href=#347 id=347 data-nosnippet>347</a>    </span>SignatureMismatch,
+<a href=#348 id=348 data-nosnippet>348</a>    <span class="doccomment">/// The body exceeded the transform's `max_bytes`.
+<a href=#349 id=349 data-nosnippet>349</a>    </span>TooLarge { cap: u64 },
+<a href=#350 id=350 data-nosnippet>350</a>    <span class="doccomment">/// The body claims JSON but does not parse.
+<a href=#351 id=351 data-nosnippet>351</a>    </span>InvalidJson,
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="doccomment">/// A pointer did not resolve (the strict-failure rule; see the
+<a href=#353 id=353 data-nosnippet>353</a>    /// module docs).
+<a href=#354 id=354 data-nosnippet>354</a>    </span>Unresolved { path: String },
+<a href=#355 id=355 data-nosnippet>355</a>    <span class="doccomment">/// The body stream errored while buffering (client abort, framing
+<a href=#356 id=356 data-nosnippet>356</a>    /// failure).
+<a href=#357 id=357 data-nosnippet>357</a>    </span>Body(String),
+<a href=#358 id=358 data-nosnippet>358</a>}
+<a href=#359 id=359 data-nosnippet>359</a>
+<a href=#360 id=360 data-nosnippet>360</a><span class="doccomment">/// The outcome of the request body-transform step (DW-028).
+<a href=#361 id=361 data-nosnippet>361</a></span><span class="kw">pub enum </span>RequestBodyOutcome&lt;B&gt; {
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="doccomment">/// No transform applied: the ORIGINAL body streams on untouched —
+<a href=#363 id=363 data-nosnippet>363</a>    /// the streaming guarantee. (No policy, non-JSON or encoded
+<a href=#364 id=364 data-nosnippet>364</a>    /// content type, or a declared-empty body.)
+<a href=#365 id=365 data-nosnippet>365</a>    </span>Original(B),
+<a href=#366 id=366 data-nosnippet>366</a>    <span class="doccomment">/// Replacement bytes: the caller rewrites `Content-Length` and
+<a href=#367 id=367 data-nosnippet>367</a>    /// treats the body as replayable (retry attempts re-send these
+<a href=#368 id=368 data-nosnippet>368</a>    /// bytes, never the pre-transform stream).
+<a href=#369 id=369 data-nosnippet>369</a>    </span>Replaced(Bytes),
+<a href=#370 id=370 data-nosnippet>370</a>    <span class="doccomment">/// The transform failed; the caller maps the error to its
+<a href=#371 id=371 data-nosnippet>371</a>    /// 413/401/400 answer.
+<a href=#372 id=372 data-nosnippet>372</a>    </span>Failed(RequestBodyTransformError),
+<a href=#373 id=373 data-nosnippet>373</a>}
+<a href=#374 id=374 data-nosnippet>374</a>
+<a href=#375 id=375 data-nosnippet>375</a><span class="doccomment">/// The REQUEST body transform (DW-028): gate, buffer (capped), parse,
+<a href=#376 id=376 data-nosnippet>376</a>/// apply ops, serialize. Gates in order, cheapest first — no compiled
+<a href=#377 id=377 data-nosnippet>377</a>/// policy (the caller's `None` check), then here: non-JSON content
+<a href=#378 id=378 data-nosnippet>378</a>/// type (bodies of other types stream through untouched), an
+<a href=#379 id=379 data-nosnippet>379</a>/// already-encoded body (the transform does not decode), a declared
+<a href=#380 id=380 data-nosnippet>380</a>/// empty body (nothing to transform — bodiless methods pass), and a
+<a href=#381 id=381 data-nosnippet>381</a>/// declared length over the cap (413 without reading a byte). Only
+<a href=#382 id=382 data-nosnippet>382</a>/// then does anything buffer.
+<a href=#383 id=383 data-nosnippet>383</a>///
+<a href=#384 id=384 data-nosnippet>384</a>/// Reading the body here preserves every wrapper beneath it: the
+<a href=#385 id=385 data-nosnippet>385</a>/// route's limit counting guard and the HMAC digest fold still see
+<a href=#386 id=386 data-nosnippet>386</a>/// the ORIGINAL client bytes (the digest binds what the client
+<a href=#387 id=387 data-nosnippet>387</a>/// signed; the transform then shapes what the upstream receives —
+<a href=#388 id=388 data-nosnippet>388</a>/// enforcement and policy are separable by design).
+<a href=#389 id=389 data-nosnippet>389</a></span><span class="kw">pub async fn </span>transform_request_body&lt;B&gt;(
+<a href=#390 id=390 data-nosnippet>390</a>    body: B,
+<a href=#391 id=391 data-nosnippet>391</a>    compiled: <span class="kw-2">&amp;</span>CompiledJsonTransform,
+<a href=#392 id=392 data-nosnippet>392</a>    headers: <span class="kw-2">&amp;</span>HeaderMap,
+<a href=#393 id=393 data-nosnippet>393</a>) -&gt; RequestBodyOutcome&lt;B&gt;
+<a href=#394 id=394 data-nosnippet>394</a><span class="kw">where
+<a href=#395 id=395 data-nosnippet>395</a>    </span>B: hyper::body::Body&lt;Data = Bytes&gt; + Send + <span class="lifetime">'static</span>,
+<a href=#396 id=396 data-nosnippet>396</a>    B::Error: Into&lt;Box&lt;<span class="kw">dyn </span>std::error::Error + Send + Sync&gt;&gt;,
+<a href=#397 id=397 data-nosnippet>397</a>{
+<a href=#398 id=398 data-nosnippet>398</a>    <span class="kw">if </span>!is_json_body(headers) || headers.contains_key(<span class="kw-2">&amp;</span>CONTENT_ENCODING) {
+<a href=#399 id=399 data-nosnippet>399</a>        <span class="kw">return </span>RequestBodyOutcome::Original(body);
+<a href=#400 id=400 data-nosnippet>400</a>    }
+<a href=#401 id=401 data-nosnippet>401</a>    <span class="kw">let </span>declared = body.size_hint().exact();
+<a href=#402 id=402 data-nosnippet>402</a>    <span class="kw">if </span>declared == <span class="prelude-val">Some</span>(<span class="number">0</span>) {
+<a href=#403 id=403 data-nosnippet>403</a>        <span class="kw">return </span>RequestBodyOutcome::Original(body);
+<a href=#404 id=404 data-nosnippet>404</a>    }
+<a href=#405 id=405 data-nosnippet>405</a>    <span class="kw">let </span>cap = compiled.max_bytes();
+<a href=#406 id=406 data-nosnippet>406</a>    <span class="kw">if </span>declared.is_some_and(|d| d &gt; cap) {
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">return </span>RequestBodyOutcome::Failed(RequestBodyTransformError::TooLarge { cap });
+<a href=#408 id=408 data-nosnippet>408</a>    }
+<a href=#409 id=409 data-nosnippet>409</a>    <span class="kw">let </span>bytes = <span class="kw">match </span>buffer_capped(body, cap).<span class="kw">await </span>{
+<a href=#410 id=410 data-nosnippet>410</a>        <span class="prelude-val">Ok</span>(bytes) =&gt; bytes,
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="prelude-val">Err</span>(e) =&gt; <span class="kw">return </span>RequestBodyOutcome::Failed(e),
+<a href=#412 id=412 data-nosnippet>412</a>    };
+<a href=#413 id=413 data-nosnippet>413</a>    <span class="kw">if </span>bytes.is_empty() {
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="comment">// An UNDECLARED empty stream (e.g. a bodiless method without
+<a href=#415 id=415 data-nosnippet>415</a>        // Content-Length): nothing to transform. The empty buffered
+<a href=#416 id=416 data-nosnippet>416</a>        // body is byte-identical to what arrived.
+<a href=#417 id=417 data-nosnippet>417</a>        </span><span class="kw">return </span>RequestBodyOutcome::Replaced(bytes);
+<a href=#418 id=418 data-nosnippet>418</a>    }
+<a href=#419 id=419 data-nosnippet>419</a>    <span class="kw">match </span>run_json_transform(<span class="kw-2">&amp;</span>bytes, compiled) {
+<a href=#420 id=420 data-nosnippet>420</a>        <span class="prelude-val">Ok</span>(out) =&gt; RequestBodyOutcome::Replaced(out),
+<a href=#421 id=421 data-nosnippet>421</a>        <span class="prelude-val">Err</span>(e) =&gt; RequestBodyOutcome::Failed(e),
+<a href=#422 id=422 data-nosnippet>422</a>    }
+<a href=#423 id=423 data-nosnippet>423</a>}
+<a href=#424 id=424 data-nosnippet>424</a>
+<a href=#425 id=425 data-nosnippet>425</a><span class="doccomment">/// Why a RESPONSE body transform failed (DW-028); every arm answers
+<a href=#426 id=426 data-nosnippet>426</a>/// 502 — the upstream violated the contract the transform pinned (the
+<a href=#427 id=427 data-nosnippet>427</a>/// client never sees upstream detail).
+<a href=#428 id=428 data-nosnippet>428</a></span><span class="attr">#[derive(Debug)]
+<a href=#429 id=429 data-nosnippet>429</a></span><span class="kw">pub enum </span>ResponseBodyTransformError {
+<a href=#430 id=430 data-nosnippet>430</a>    <span class="doccomment">/// Over the transform's `max_bytes` (declared or streamed).
+<a href=#431 id=431 data-nosnippet>431</a>    </span>TooLarge { cap: u64 },
+<a href=#432 id=432 data-nosnippet>432</a>    <span class="doccomment">/// Not valid JSON.
+<a href=#433 id=433 data-nosnippet>433</a>    </span>InvalidJson,
+<a href=#434 id=434 data-nosnippet>434</a>    <span class="doccomment">/// A pointer did not resolve.
+<a href=#435 id=435 data-nosnippet>435</a>    </span>Unresolved { path: String },
+<a href=#436 id=436 data-nosnippet>436</a>    <span class="doccomment">/// The upstream stream died mid-body while buffering.
+<a href=#437 id=437 data-nosnippet>437</a>    </span>Upstream(String),
+<a href=#438 id=438 data-nosnippet>438</a>}
+<a href=#439 id=439 data-nosnippet>439</a>
+<a href=#440 id=440 data-nosnippet>440</a><span class="doccomment">/// The RESPONSE body transform (DW-028), the decoration tail's first
+<a href=#441 id=441 data-nosnippet>441</a>/// stage: gate, buffer (capped), parse, apply ops, serialize. Gates:
+<a href=#442 id=442 data-nosnippet>442</a>/// informational/101/204/304 statuses (no body to shape), non-JSON
+<a href=#443 id=443 data-nosnippet>443</a>/// content type, and an already-encoded body all pass through
+<a href=#444 id=444 data-nosnippet>444</a>/// UNTOUCHED — SSE and streamed downloads on a transformed route keep
+<a href=#445 id=445 data-nosnippet>445</a>/// streaming, the core guarantee of this feature. A declared length
+<a href=#446 id=446 data-nosnippet>446</a>/// over the cap fails 502 without reading.
+<a href=#447 id=447 data-nosnippet>447</a>///
+<a href=#448 id=448 data-nosnippet>448</a>/// Two properties fall out of buffering before headers reach the
+<a href=#449 id=449 data-nosnippet>449</a>/// client: an upstream stream death mid-body answers a CLEAN 502
+<a href=#450 id=450 data-nosnippet>450</a>/// envelope instead of a torn stream, and upstream trailers are
+<a href=#451 id=451 data-nosnippet>451</a>/// dropped (they described the pre-transform body — forwarding a
+<a href=#452 id=452 data-nosnippet>452</a>/// stale checksum trailer alongside replaced bytes would be a lie).
+<a href=#453 id=453 data-nosnippet>453</a></span><span class="kw">pub async fn </span>transform_response_body(
+<a href=#454 id=454 data-nosnippet>454</a>    resp: Response&lt;ProxyBody&gt;,
+<a href=#455 id=455 data-nosnippet>455</a>    compiled: <span class="kw-2">&amp;</span>CompiledJsonTransform,
+<a href=#456 id=456 data-nosnippet>456</a>    rid: <span class="kw-2">&amp;</span>str,
+<a href=#457 id=457 data-nosnippet>457</a>) -&gt; Response&lt;ProxyBody&gt; {
+<a href=#458 id=458 data-nosnippet>458</a>    <span class="kw">use </span>hyper::body::Body <span class="kw">as _</span>;
+<a href=#459 id=459 data-nosnippet>459</a>
+<a href=#460 id=460 data-nosnippet>460</a>    <span class="kw">let </span>status = resp.status();
+<a href=#461 id=461 data-nosnippet>461</a>    <span class="kw">if </span>status.is_informational()
+<a href=#462 id=462 data-nosnippet>462</a>        || status == hyper::StatusCode::SWITCHING_PROTOCOLS
+<a href=#463 id=463 data-nosnippet>463</a>        || status == hyper::StatusCode::NO_CONTENT
+<a href=#464 id=464 data-nosnippet>464</a>        || status == hyper::StatusCode::NOT_MODIFIED
+<a href=#465 id=465 data-nosnippet>465</a>    {
+<a href=#466 id=466 data-nosnippet>466</a>        <span class="kw">return </span>resp;
+<a href=#467 id=467 data-nosnippet>467</a>    }
+<a href=#468 id=468 data-nosnippet>468</a>    <span class="kw">if </span>!is_json_body(resp.headers()) || resp.headers().contains_key(<span class="kw-2">&amp;</span>CONTENT_ENCODING) {
+<a href=#469 id=469 data-nosnippet>469</a>        <span class="kw">return </span>resp;
+<a href=#470 id=470 data-nosnippet>470</a>    }
+<a href=#471 id=471 data-nosnippet>471</a>    <span class="kw">let </span>cap = compiled.max_bytes();
+<a href=#472 id=472 data-nosnippet>472</a>    <span class="kw">if </span>resp.body().size_hint().exact().is_some_and(|d| d &gt; cap) {
+<a href=#473 id=473 data-nosnippet>473</a>        <span class="kw">return </span>response_transform_failure(rid);
+<a href=#474 id=474 data-nosnippet>474</a>    }
+<a href=#475 id=475 data-nosnippet>475</a>
+<a href=#476 id=476 data-nosnippet>476</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>parts, body) = resp.into_parts();
+<a href=#477 id=477 data-nosnippet>477</a>    <span class="kw">let </span>bytes = <span class="kw">match </span>collect_capped(body, cap).<span class="kw">await </span>{
+<a href=#478 id=478 data-nosnippet>478</a>        <span class="prelude-val">Ok</span>(bytes) =&gt; bytes,
+<a href=#479 id=479 data-nosnippet>479</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#480 id=480 data-nosnippet>480</a>            <span class="macro">tracing::warn!</span>(
+<a href=#481 id=481 data-nosnippet>481</a>                code = <span class="string">"response_transform_failed"</span>,
+<a href=#482 id=482 data-nosnippet>482</a>                request_id = %rid,
+<a href=#483 id=483 data-nosnippet>483</a>                error = <span class="question-mark">?</span>e,
+<a href=#484 id=484 data-nosnippet>484</a>                <span class="string">"upstream response failed the route's body transform"
+<a href=#485 id=485 data-nosnippet>485</a>            </span>);
+<a href=#486 id=486 data-nosnippet>486</a>            <span class="kw">return </span>response_transform_failure(rid);
+<a href=#487 id=487 data-nosnippet>487</a>        }
+<a href=#488 id=488 data-nosnippet>488</a>    };
+<a href=#489 id=489 data-nosnippet>489</a>    <span class="comment">// An empty JSON-typed body has nothing to transform; forwarding
+<a href=#490 id=490 data-nosnippet>490</a>    // the collected emptiness is byte-identical to passthrough.
+<a href=#491 id=491 data-nosnippet>491</a>    </span><span class="kw">let </span>out = <span class="kw">if </span>bytes.is_empty() {
+<a href=#492 id=492 data-nosnippet>492</a>        <span class="prelude-val">Ok</span>(bytes)
+<a href=#493 id=493 data-nosnippet>493</a>    } <span class="kw">else </span>{
+<a href=#494 id=494 data-nosnippet>494</a>        run_json_transform(<span class="kw-2">&amp;</span>bytes, compiled)
+<a href=#495 id=495 data-nosnippet>495</a>    };
+<a href=#496 id=496 data-nosnippet>496</a>    <span class="kw">match </span>out {
+<a href=#497 id=497 data-nosnippet>497</a>        <span class="prelude-val">Ok</span>(out) =&gt; {
+<a href=#498 id=498 data-nosnippet>498</a>            <span class="kw">if let </span><span class="prelude-val">Ok</span>(v) = HeaderValue::from_str(<span class="kw-2">&amp;</span>out.len().to_string()) {
+<a href=#499 id=499 data-nosnippet>499</a>                parts.headers.insert(CONTENT_LENGTH, v);
+<a href=#500 id=500 data-nosnippet>500</a>            }
+<a href=#501 id=501 data-nosnippet>501</a>            Response::from_parts(parts, ProxyBody::Full(Full::new(out)))
+<a href=#502 id=502 data-nosnippet>502</a>        }
+<a href=#503 id=503 data-nosnippet>503</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#504 id=504 data-nosnippet>504</a>            <span class="macro">tracing::warn!</span>(
+<a href=#505 id=505 data-nosnippet>505</a>                code = <span class="string">"response_transform_failed"</span>,
+<a href=#506 id=506 data-nosnippet>506</a>                request_id = %rid,
+<a href=#507 id=507 data-nosnippet>507</a>                error = <span class="question-mark">?</span>e,
+<a href=#508 id=508 data-nosnippet>508</a>                <span class="string">"upstream response failed the route's body transform"
+<a href=#509 id=509 data-nosnippet>509</a>            </span>);
+<a href=#510 id=510 data-nosnippet>510</a>            response_transform_failure(rid)
+<a href=#511 id=511 data-nosnippet>511</a>        }
+<a href=#512 id=512 data-nosnippet>512</a>    }
+<a href=#513 id=513 data-nosnippet>513</a>}
+<a href=#514 id=514 data-nosnippet>514</a>
+<a href=#515 id=515 data-nosnippet>515</a><span class="doccomment">/// Buffer a response body up to `cap` bytes (the shared DW-028/DW-029
+<a href=#516 id=516 data-nosnippet>516</a>/// response-side capped collector). Trailers are dropped: they
+<a href=#517 id=517 data-nosnippet>517</a>/// described the pre-transform body, and forwarding a stale checksum
+<a href=#518 id=518 data-nosnippet>518</a>/// trailer alongside replaced bytes would be a lie. Over-cap and
+<a href=#519 id=519 data-nosnippet>519</a>/// mid-body stream death surface as the two failure arms; both callers
+<a href=#520 id=520 data-nosnippet>520</a>/// answer 502 (buffering before headers reach the client is what makes
+<a href=#521 id=521 data-nosnippet>521</a>/// that a clean envelope instead of a torn stream).
+<a href=#522 id=522 data-nosnippet>522</a></span><span class="kw">async fn </span>collect_capped&lt;B&gt;(body: B, cap: u64) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes, ResponseBodyTransformError&gt;
+<a href=#523 id=523 data-nosnippet>523</a><span class="kw">where
+<a href=#524 id=524 data-nosnippet>524</a>    </span>B: hyper::body::Body&lt;Data = Bytes&gt;,
+<a href=#525 id=525 data-nosnippet>525</a>    B::Error: std::fmt::Display,
+<a href=#526 id=526 data-nosnippet>526</a>{
+<a href=#527 id=527 data-nosnippet>527</a>    <span class="kw">use </span>http_body_util::BodyExt <span class="kw">as _</span>;
+<a href=#528 id=528 data-nosnippet>528</a>    <span class="kw">let </span><span class="kw-2">mut </span>body = <span class="macro">std::pin::pin!</span>(body);
+<a href=#529 id=529 data-nosnippet>529</a>    <span class="kw">let </span><span class="kw-2">mut </span>buf: Vec&lt;u8&gt; = Vec::new();
+<a href=#530 id=530 data-nosnippet>530</a>    <span class="kw">loop </span>{
+<a href=#531 id=531 data-nosnippet>531</a>        <span class="kw">match </span>body.as_mut().frame().<span class="kw">await </span>{
+<a href=#532 id=532 data-nosnippet>532</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(frame)) =&gt; {
+<a href=#533 id=533 data-nosnippet>533</a>                <span class="kw">let </span><span class="prelude-val">Ok</span>(data) = frame.into_data() <span class="kw">else </span>{
+<a href=#534 id=534 data-nosnippet>534</a>                    <span class="kw">continue</span>; <span class="comment">// trailer: dropped (see the doc comment)
+<a href=#535 id=535 data-nosnippet>535</a>                </span>};
+<a href=#536 id=536 data-nosnippet>536</a>                <span class="kw">if </span>buf.len() <span class="kw">as </span>u64 + data.len() <span class="kw">as </span>u64 &gt; cap {
+<a href=#537 id=537 data-nosnippet>537</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(ResponseBodyTransformError::TooLarge { cap });
+<a href=#538 id=538 data-nosnippet>538</a>                }
+<a href=#539 id=539 data-nosnippet>539</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>data);
+<a href=#540 id=540 data-nosnippet>540</a>            }
+<a href=#541 id=541 data-nosnippet>541</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(e)) =&gt; {
+<a href=#542 id=542 data-nosnippet>542</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(ResponseBodyTransformError::Upstream(e.to_string()));
+<a href=#543 id=543 data-nosnippet>543</a>            }
+<a href=#544 id=544 data-nosnippet>544</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(Bytes::from(buf)),
+<a href=#545 id=545 data-nosnippet>545</a>        }
+<a href=#546 id=546 data-nosnippet>546</a>    }
+<a href=#547 id=547 data-nosnippet>547</a>}
+<a href=#548 id=548 data-nosnippet>548</a>
+<a href=#549 id=549 data-nosnippet>549</a><span class="doccomment">/// The 502 for a failed response transform: generic message (no
+<a href=#550 id=550 data-nosnippet>550</a>/// upstream internals leak), uniform JSON envelope.
+<a href=#551 id=551 data-nosnippet>551</a></span><span class="kw">fn </span>response_transform_failure(rid: <span class="kw-2">&amp;</span>str) -&gt; Response&lt;ProxyBody&gt; {
+<a href=#552 id=552 data-nosnippet>552</a>    Response::builder()
+<a href=#553 id=553 data-nosnippet>553</a>        .status(hyper::StatusCode::BAD_GATEWAY)
+<a href=#554 id=554 data-nosnippet>554</a>        .header(CONTENT_TYPE, <span class="string">"application/json"</span>)
+<a href=#555 id=555 data-nosnippet>555</a>        .body(ProxyBody::Full(Full::new(
+<a href=#556 id=556 data-nosnippet>556</a>            <span class="kw">crate</span>::observability::envelope_body(
+<a href=#557 id=557 data-nosnippet>557</a>                <span class="string">"response_transform_failed"</span>,
+<a href=#558 id=558 data-nosnippet>558</a>                <span class="string">"upstream response failed the route's transform policy"</span>,
+<a href=#559 id=559 data-nosnippet>559</a>                rid,
+<a href=#560 id=560 data-nosnippet>560</a>            ),
+<a href=#561 id=561 data-nosnippet>561</a>        )))
+<a href=#562 id=562 data-nosnippet>562</a>        .expect(<span class="string">"static 502 response is valid"</span>)
+<a href=#563 id=563 data-nosnippet>563</a>}
+<a href=#564 id=564 data-nosnippet>564</a>
+<a href=#565 id=565 data-nosnippet>565</a><span class="comment">// ---------------------------------------------------------------------------
+<a href=#566 id=566 data-nosnippet>566</a>// Response field masking (DW-029)
+<a href=#567 id=567 data-nosnippet>567</a>// ---------------------------------------------------------------------------
+<a href=#568 id=568 data-nosnippet>568</a>
+<a href=#569 id=569 data-nosnippet>569</a></span><span class="doccomment">/// Why masking refused a response (DW-029). Every arm answers the same
+<a href=#570 id=570 data-nosnippet>570</a>/// 502 envelope; the distinction exists for the server-side
+<a href=#571 id=571 data-nosnippet>571</a>/// `dwara::policy` warn event (which refusal class fired).
+<a href=#572 id=572 data-nosnippet>572</a></span><span class="attr">#[derive(Debug)]
+<a href=#573 id=573 data-nosnippet>573</a></span><span class="kw">enum </span>MaskRefusal {
+<a href=#574 id=574 data-nosnippet>574</a>    <span class="doccomment">/// The upstream sent a content-encoded body: the gateway does not
+<a href=#575 id=575 data-nosnippet>575</a>    /// decode, and cannot prove anything about bytes it cannot read.
+<a href=#576 id=576 data-nosnippet>576</a>    </span>Encoded,
+<a href=#577 id=577 data-nosnippet>577</a>    <span class="doccomment">/// The body is not JSON-media-typed: pointers cannot apply to it,
+<a href=#578 id=578 data-nosnippet>578</a>    /// so its contents cannot be proven clean.
+<a href=#579 id=579 data-nosnippet>579</a>    </span>NotJson,
+<a href=#580 id=580 data-nosnippet>580</a>    <span class="doccomment">/// Over the masking cap (declared or streamed).
+<a href=#581 id=581 data-nosnippet>581</a>    </span>TooLarge { cap: u64 },
+<a href=#582 id=582 data-nosnippet>582</a>    <span class="doccomment">/// JSON-typed but unparseable.
+<a href=#583 id=583 data-nosnippet>583</a>    </span>InvalidJson,
+<a href=#584 id=584 data-nosnippet>584</a>    <span class="doccomment">/// A configured pointer did not resolve (schema drift; the strict
+<a href=#585 id=585 data-nosnippet>585</a>    /// miss-is-the-leak rule).
+<a href=#586 id=586 data-nosnippet>586</a>    </span>Unresolved { path: String },
+<a href=#587 id=587 data-nosnippet>587</a>    <span class="doccomment">/// The upstream stream died mid-body while buffering.
+<a href=#588 id=588 data-nosnippet>588</a>    </span>Upstream(String),
+<a href=#589 id=589 data-nosnippet>589</a>}
+<a href=#590 id=590 data-nosnippet>590</a>
+<a href=#591 id=591 data-nosnippet>591</a><span class="kw">impl </span>std::fmt::Display <span class="kw">for </span>MaskRefusal {
+<a href=#592 id=592 data-nosnippet>592</a>    <span class="kw">fn </span>fmt(<span class="kw-2">&amp;</span><span class="self">self</span>, f: <span class="kw-2">&amp;mut </span>std::fmt::Formatter&lt;<span class="lifetime">'_</span>&gt;) -&gt; std::fmt::Result {
+<a href=#593 id=593 data-nosnippet>593</a>        <span class="kw">match </span><span class="self">self </span>{
+<a href=#594 id=594 data-nosnippet>594</a>            MaskRefusal::Encoded =&gt; {
+<a href=#595 id=595 data-nosnippet>595</a>                <span class="macro">write!</span>(f, <span class="string">"response is content-encoded; masking cannot read it"</span>)
+<a href=#596 id=596 data-nosnippet>596</a>            }
+<a href=#597 id=597 data-nosnippet>597</a>            MaskRefusal::NotJson =&gt; {
+<a href=#598 id=598 data-nosnippet>598</a>                <span class="macro">write!</span>(
+<a href=#599 id=599 data-nosnippet>599</a>                    f,
+<a href=#600 id=600 data-nosnippet>600</a>                    <span class="string">"response is not JSON; masking cannot prove fields absent"
+<a href=#601 id=601 data-nosnippet>601</a>                </span>)
+<a href=#602 id=602 data-nosnippet>602</a>            }
+<a href=#603 id=603 data-nosnippet>603</a>            MaskRefusal::TooLarge { cap } =&gt; {
+<a href=#604 id=604 data-nosnippet>604</a>                <span class="macro">write!</span>(f, <span class="string">"response exceeds the masking cap of {cap} bytes"</span>)
+<a href=#605 id=605 data-nosnippet>605</a>            }
+<a href=#606 id=606 data-nosnippet>606</a>            MaskRefusal::InvalidJson =&gt; <span class="macro">write!</span>(f, <span class="string">"response claims JSON but does not parse"</span>),
+<a href=#607 id=607 data-nosnippet>607</a>            MaskRefusal::Unresolved { path } =&gt; {
+<a href=#608 id=608 data-nosnippet>608</a>                <span class="macro">write!</span>(f, <span class="string">"masking pointer '{path}' does not resolve"</span>)
+<a href=#609 id=609 data-nosnippet>609</a>            }
+<a href=#610 id=610 data-nosnippet>610</a>            MaskRefusal::Upstream(e) =&gt; <span class="macro">write!</span>(f, <span class="string">"upstream stream failed mid-body: {e}"</span>),
+<a href=#611 id=611 data-nosnippet>611</a>        }
+<a href=#612 id=612 data-nosnippet>612</a>    }
+<a href=#613 id=613 data-nosnippet>613</a>}
+<a href=#614 id=614 data-nosnippet>614</a>
+<a href=#615 id=615 data-nosnippet>615</a><span class="doccomment">/// The RESPONSE field masking pass (DW-029), the decoration tail's
+<a href=#616 id=616 data-nosnippet>616</a>/// first stage and the security floor of the response path. Gates, in
+<a href=#617 id=617 data-nosnippet>617</a>/// order — every one of them FAILS CLOSED (the inverted posture; see
+<a href=#618 id=618 data-nosnippet>618</a>/// the module docs): bodiless statuses pass (nothing to leak), then a
+<a href=#619 id=619 data-nosnippet>619</a>/// content-encoded body, a non-JSON content type, a declared length
+<a href=#620 id=620 data-nosnippet>620</a>/// over the cap, an over-cap or dying stream, unparseable JSON, and a
+<a href=#621 id=621 data-nosnippet>621</a>/// pointer miss each answer 502 with a generic envelope plus one
+<a href=#622 id=622 data-nosnippet>622</a>/// `dwara::policy` warn event naming the refusal class server-side.
+<a href=#623 id=623 data-nosnippet>623</a>/// The gateway's OWN compression (DW-027) runs later in the tail, so
+<a href=#624 id=624 data-nosnippet>624</a>/// it can never trip the encoding gate — only upstream-pre-encoded
+<a href=#625 id=625 data-nosnippet>625</a>/// responses do.
+<a href=#626 id=626 data-nosnippet>626</a>///
+<a href=#627 id=627 data-nosnippet>627</a>/// On success every effective pointer (route floor plus the consumer's
+<a href=#628 id=628 data-nosnippet>628</a>/// groups — the union rule, `config::transforms::Masking`) is replaced
+<a href=#629 id=629 data-nosnippet>629</a>/// with the fixed sentinel, `Content-Length` is rewritten, and one
+<a href=#630 id=630 data-nosnippet>630</a>/// `dwara::policy` info event records route, consumer, masked count,
+<a href=#631 id=631 data-nosnippet>631</a>/// and request-id: the audit trail the issue's done-when requires.
+<a href=#632 id=632 data-nosnippet>632</a></span><span class="kw">pub async fn </span>mask_response_body(
+<a href=#633 id=633 data-nosnippet>633</a>    resp: Response&lt;ProxyBody&gt;,
+<a href=#634 id=634 data-nosnippet>634</a>    compiled: <span class="kw-2">&amp;</span><span class="kw">crate</span>::config::transforms::CompiledMasking,
+<a href=#635 id=635 data-nosnippet>635</a>    consumer_groups: <span class="kw-2">&amp;</span>[String],
+<a href=#636 id=636 data-nosnippet>636</a>    route: <span class="kw-2">&amp;</span>str,
+<a href=#637 id=637 data-nosnippet>637</a>    consumer: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#638 id=638 data-nosnippet>638</a>    rid: <span class="kw-2">&amp;</span>str,
+<a href=#639 id=639 data-nosnippet>639</a>) -&gt; Response&lt;ProxyBody&gt; {
+<a href=#640 id=640 data-nosnippet>640</a>    <span class="kw">use </span>hyper::body::Body <span class="kw">as _</span>;
+<a href=#641 id=641 data-nosnippet>641</a>
+<a href=#642 id=642 data-nosnippet>642</a>    <span class="kw">let </span>status = resp.status();
+<a href=#643 id=643 data-nosnippet>643</a>    <span class="kw">if </span>status.is_informational()
+<a href=#644 id=644 data-nosnippet>644</a>        || status == hyper::StatusCode::SWITCHING_PROTOCOLS
+<a href=#645 id=645 data-nosnippet>645</a>        || status == hyper::StatusCode::NO_CONTENT
+<a href=#646 id=646 data-nosnippet>646</a>        || status == hyper::StatusCode::NOT_MODIFIED
+<a href=#647 id=647 data-nosnippet>647</a>    {
+<a href=#648 id=648 data-nosnippet>648</a>        <span class="kw">return </span>resp;
+<a href=#649 id=649 data-nosnippet>649</a>    }
+<a href=#650 id=650 data-nosnippet>650</a>    <span class="kw">if </span>resp.headers().contains_key(<span class="kw-2">&amp;</span>CONTENT_ENCODING) {
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::Encoded);
+<a href=#652 id=652 data-nosnippet>652</a>    }
+<a href=#653 id=653 data-nosnippet>653</a>    <span class="kw">if </span>!is_json_body(resp.headers()) {
+<a href=#654 id=654 data-nosnippet>654</a>        <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::NotJson);
+<a href=#655 id=655 data-nosnippet>655</a>    }
+<a href=#656 id=656 data-nosnippet>656</a>    <span class="kw">let </span>cap = compiled.max_bytes();
+<a href=#657 id=657 data-nosnippet>657</a>    <span class="kw">if </span>resp.body().size_hint().exact().is_some_and(|d| d &gt; cap) {
+<a href=#658 id=658 data-nosnippet>658</a>        <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::TooLarge { cap });
+<a href=#659 id=659 data-nosnippet>659</a>    }
+<a href=#660 id=660 data-nosnippet>660</a>    <span class="kw">let </span>(<span class="kw-2">mut </span>parts, body) = resp.into_parts();
+<a href=#661 id=661 data-nosnippet>661</a>    <span class="kw">let </span>bytes = <span class="kw">match </span>collect_capped(body, cap).<span class="kw">await </span>{
+<a href=#662 id=662 data-nosnippet>662</a>        <span class="prelude-val">Ok</span>(bytes) =&gt; bytes,
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="prelude-val">Err</span>(e) =&gt; {
+<a href=#664 id=664 data-nosnippet>664</a>            <span class="kw">let </span>refusal = <span class="kw">match </span>e {
+<a href=#665 id=665 data-nosnippet>665</a>                ResponseBodyTransformError::TooLarge { cap } =&gt; MaskRefusal::TooLarge { cap },
+<a href=#666 id=666 data-nosnippet>666</a>                <span class="comment">// collect_capped cannot produce the parse/pointer arms;
+<a href=#667 id=667 data-nosnippet>667</a>                // the debug-formatted fallback keeps the match total with
+<a href=#668 id=668 data-nosnippet>668</a>                // no unreachable panic on the request path (server-side
+<a href=#669 id=669 data-nosnippet>669</a>                // log only, like every refusal reason).
+<a href=#670 id=670 data-nosnippet>670</a>                </span>other =&gt; MaskRefusal::Upstream(<span class="macro">format!</span>(<span class="string">"{other:?}"</span>)),
+<a href=#671 id=671 data-nosnippet>671</a>            };
+<a href=#672 id=672 data-nosnippet>672</a>            <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>refusal);
+<a href=#673 id=673 data-nosnippet>673</a>        }
+<a href=#674 id=674 data-nosnippet>674</a>    };
+<a href=#675 id=675 data-nosnippet>675</a>    <span class="comment">// An empty body has nothing to mask — byte-identical passthrough
+<a href=#676 id=676 data-nosnippet>676</a>    // (a proxied HEAD lands here, among others).
+<a href=#677 id=677 data-nosnippet>677</a>    </span><span class="kw">if </span>bytes.is_empty() {
+<a href=#678 id=678 data-nosnippet>678</a>        <span class="kw">if let </span><span class="prelude-val">Ok</span>(v) = HeaderValue::from_str(<span class="string">"0"</span>) {
+<a href=#679 id=679 data-nosnippet>679</a>            parts.headers.insert(CONTENT_LENGTH, v);
+<a href=#680 id=680 data-nosnippet>680</a>        }
+<a href=#681 id=681 data-nosnippet>681</a>        <span class="kw">return </span>Response::from_parts(parts, ProxyBody::Full(Full::new(bytes)));
+<a href=#682 id=682 data-nosnippet>682</a>    }
+<a href=#683 id=683 data-nosnippet>683</a>    <span class="kw">let </span><span class="kw-2">mut </span>doc: serde_json::Value = <span class="kw">match </span>serde_json::from_slice(<span class="kw-2">&amp;</span>bytes) {
+<a href=#684 id=684 data-nosnippet>684</a>        <span class="prelude-val">Ok</span>(doc) =&gt; doc,
+<a href=#685 id=685 data-nosnippet>685</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::InvalidJson),
+<a href=#686 id=686 data-nosnippet>686</a>    };
+<a href=#687 id=687 data-nosnippet>687</a>    <span class="kw">let </span>masked = <span class="kw">match </span>compiled.apply(<span class="kw-2">&amp;mut </span>doc, consumer_groups) {
+<a href=#688 id=688 data-nosnippet>688</a>        <span class="prelude-val">Ok</span>(masked) =&gt; masked,
+<a href=#689 id=689 data-nosnippet>689</a>        <span class="prelude-val">Err</span>(t::JsonTransformError::Unresolved { path }) =&gt; {
+<a href=#690 id=690 data-nosnippet>690</a>            <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::Unresolved { path })
+<a href=#691 id=691 data-nosnippet>691</a>        }
+<a href=#692 id=692 data-nosnippet>692</a>        <span class="comment">// Validation rejects the root pointer for masking; this arm is
+<a href=#693 id=693 data-nosnippet>693</a>        // the same generation-tear backstop mapping the request-side
+<a href=#694 id=694 data-nosnippet>694</a>        // transform uses (RemoveRoot -&gt; empty-path Unresolved).
+<a href=#695 id=695 data-nosnippet>695</a>        </span><span class="prelude-val">Err</span>(t::JsonTransformError::RemoveRoot) =&gt; {
+<a href=#696 id=696 data-nosnippet>696</a>            <span class="kw">return </span>masking_refusal(
+<a href=#697 id=697 data-nosnippet>697</a>                rid,
+<a href=#698 id=698 data-nosnippet>698</a>                route,
+<a href=#699 id=699 data-nosnippet>699</a>                consumer,
+<a href=#700 id=700 data-nosnippet>700</a>                <span class="kw-2">&amp;</span>MaskRefusal::Unresolved {
+<a href=#701 id=701 data-nosnippet>701</a>                    path: String::new(),
+<a href=#702 id=702 data-nosnippet>702</a>                },
+<a href=#703 id=703 data-nosnippet>703</a>            )
+<a href=#704 id=704 data-nosnippet>704</a>        }
+<a href=#705 id=705 data-nosnippet>705</a>    };
+<a href=#706 id=706 data-nosnippet>706</a>    <span class="kw">let </span>out = <span class="kw">match </span>serde_json::to_vec(<span class="kw-2">&amp;</span>doc) {
+<a href=#707 id=707 data-nosnippet>707</a>        <span class="prelude-val">Ok</span>(out) =&gt; Bytes::from(out),
+<a href=#708 id=708 data-nosnippet>708</a>        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span>masking_refusal(rid, route, consumer, <span class="kw-2">&amp;</span>MaskRefusal::InvalidJson),
+<a href=#709 id=709 data-nosnippet>709</a>    };
+<a href=#710 id=710 data-nosnippet>710</a>    <span class="macro">tracing::info!</span>(
+<a href=#711 id=711 data-nosnippet>711</a>        target: <span class="string">"dwara::policy"</span>,
+<a href=#712 id=712 data-nosnippet>712</a>        code = <span class="string">"response_masked"</span>,
+<a href=#713 id=713 data-nosnippet>713</a>        route = route,
+<a href=#714 id=714 data-nosnippet>714</a>        consumer = consumer.unwrap_or(<span class="string">"anonymous"</span>),
+<a href=#715 id=715 data-nosnippet>715</a>        masked = masked,
+<a href=#716 id=716 data-nosnippet>716</a>        request_id = rid,
+<a href=#717 id=717 data-nosnippet>717</a>        <span class="string">"masked response fields (DW-029 audit trail)"
+<a href=#718 id=718 data-nosnippet>718</a>    </span>);
+<a href=#719 id=719 data-nosnippet>719</a>    <span class="kw">if let </span><span class="prelude-val">Ok</span>(v) = HeaderValue::from_str(<span class="kw-2">&amp;</span>out.len().to_string()) {
+<a href=#720 id=720 data-nosnippet>720</a>        parts.headers.insert(CONTENT_LENGTH, v);
+<a href=#721 id=721 data-nosnippet>721</a>    }
+<a href=#722 id=722 data-nosnippet>722</a>    Response::from_parts(parts, ProxyBody::Full(Full::new(out)))
+<a href=#723 id=723 data-nosnippet>723</a>}
+<a href=#724 id=724 data-nosnippet>724</a>
+<a href=#725 id=725 data-nosnippet>725</a><span class="doccomment">/// The fail-closed 502 for a response masking refused: generic client
+<a href=#726 id=726 data-nosnippet>726</a>/// message (no pointer paths, no upstream detail), uniform JSON
+<a href=#727 id=727 data-nosnippet>727</a>/// envelope, and the server-side `dwara::policy` warn event that names
+<a href=#728 id=728 data-nosnippet>728</a>/// the refusal class — the correlation key is the request-id.
+<a href=#729 id=729 data-nosnippet>729</a></span><span class="kw">fn </span>masking_refusal(
+<a href=#730 id=730 data-nosnippet>730</a>    rid: <span class="kw-2">&amp;</span>str,
+<a href=#731 id=731 data-nosnippet>731</a>    route: <span class="kw-2">&amp;</span>str,
+<a href=#732 id=732 data-nosnippet>732</a>    consumer: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>str&gt;,
+<a href=#733 id=733 data-nosnippet>733</a>    refusal: <span class="kw-2">&amp;</span>MaskRefusal,
+<a href=#734 id=734 data-nosnippet>734</a>) -&gt; Response&lt;ProxyBody&gt; {
+<a href=#735 id=735 data-nosnippet>735</a>    <span class="macro">tracing::warn!</span>(
+<a href=#736 id=736 data-nosnippet>736</a>        target: <span class="string">"dwara::policy"</span>,
+<a href=#737 id=737 data-nosnippet>737</a>        code = <span class="string">"response_mask_failed"</span>,
+<a href=#738 id=738 data-nosnippet>738</a>        route = route,
+<a href=#739 id=739 data-nosnippet>739</a>        consumer = consumer.unwrap_or(<span class="string">"anonymous"</span>),
+<a href=#740 id=740 data-nosnippet>740</a>        request_id = rid,
+<a href=#741 id=741 data-nosnippet>741</a>        reason = %refusal,
+<a href=#742 id=742 data-nosnippet>742</a>        <span class="string">"response refused by the route's masking policy (fail-closed)"
+<a href=#743 id=743 data-nosnippet>743</a>    </span>);
+<a href=#744 id=744 data-nosnippet>744</a>    Response::builder()
+<a href=#745 id=745 data-nosnippet>745</a>        .status(hyper::StatusCode::BAD_GATEWAY)
+<a href=#746 id=746 data-nosnippet>746</a>        .header(CONTENT_TYPE, <span class="string">"application/json"</span>)
+<a href=#747 id=747 data-nosnippet>747</a>        .body(ProxyBody::Full(Full::new(
+<a href=#748 id=748 data-nosnippet>748</a>            <span class="kw">crate</span>::observability::envelope_body(
+<a href=#749 id=749 data-nosnippet>749</a>                <span class="string">"response_mask_failed"</span>,
+<a href=#750 id=750 data-nosnippet>750</a>                <span class="string">"response failed the route's masking policy"</span>,
+<a href=#751 id=751 data-nosnippet>751</a>                rid,
+<a href=#752 id=752 data-nosnippet>752</a>            ),
+<a href=#753 id=753 data-nosnippet>753</a>        )))
+<a href=#754 id=754 data-nosnippet>754</a>        .expect(<span class="string">"static 502 response is valid"</span>)
+<a href=#755 id=755 data-nosnippet>755</a>}
+<a href=#756 id=756 data-nosnippet>756</a>
+<a href=#757 id=757 data-nosnippet>757</a><span class="doccomment">/// Buffer a body up to `cap` bytes (the DW-028 transform cap).
+<a href=#758 id=758 data-nosnippet>758</a>/// Distinguishes the two marker errors the gateway's own body
+<a href=#759 id=759 data-nosnippet>759</a>/// wrappers produce (route limit, signature digest) from a generic
+<a href=#760 id=760 data-nosnippet>760</a>/// body failure, so the caller answers with the right status family.
+<a href=#761 id=761 data-nosnippet>761</a></span><span class="kw">async fn </span>buffer_capped&lt;B&gt;(body: B, cap: u64) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes, RequestBodyTransformError&gt;
+<a href=#762 id=762 data-nosnippet>762</a><span class="kw">where
+<a href=#763 id=763 data-nosnippet>763</a>    </span>B: hyper::body::Body&lt;Data = Bytes&gt; + Send + <span class="lifetime">'static</span>,
+<a href=#764 id=764 data-nosnippet>764</a>    B::Error: Into&lt;Box&lt;<span class="kw">dyn </span>std::error::Error + Send + Sync&gt;&gt;,
+<a href=#765 id=765 data-nosnippet>765</a>{
+<a href=#766 id=766 data-nosnippet>766</a>    <span class="kw">use </span>http_body_util::BodyExt <span class="kw">as _</span>;
+<a href=#767 id=767 data-nosnippet>767</a>    <span class="kw">let </span><span class="kw-2">mut </span>body = Box::pin(body);
+<a href=#768 id=768 data-nosnippet>768</a>    <span class="kw">let </span><span class="kw-2">mut </span>buf: Vec&lt;u8&gt; = Vec::new();
+<a href=#769 id=769 data-nosnippet>769</a>    <span class="kw">loop </span>{
+<a href=#770 id=770 data-nosnippet>770</a>        <span class="kw">match </span>body.frame().<span class="kw">await </span>{
+<a href=#771 id=771 data-nosnippet>771</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Ok</span>(frame)) =&gt; {
+<a href=#772 id=772 data-nosnippet>772</a>                <span class="kw">let </span><span class="prelude-val">Ok</span>(data) = frame.into_data() <span class="kw">else </span>{
+<a href=#773 id=773 data-nosnippet>773</a>                    <span class="kw">continue</span>; <span class="comment">// trailers are not body bytes
+<a href=#774 id=774 data-nosnippet>774</a>                </span>};
+<a href=#775 id=775 data-nosnippet>775</a>                <span class="kw">if </span>buf.len() <span class="kw">as </span>u64 + data.len() <span class="kw">as </span>u64 &gt; cap {
+<a href=#776 id=776 data-nosnippet>776</a>                    <span class="kw">return </span><span class="prelude-val">Err</span>(RequestBodyTransformError::TooLarge { cap });
+<a href=#777 id=777 data-nosnippet>777</a>                }
+<a href=#778 id=778 data-nosnippet>778</a>                buf.extend_from_slice(<span class="kw-2">&amp;</span>data);
+<a href=#779 id=779 data-nosnippet>779</a>            }
+<a href=#780 id=780 data-nosnippet>780</a>            <span class="prelude-val">Some</span>(<span class="prelude-val">Err</span>(e)) =&gt; {
+<a href=#781 id=781 data-nosnippet>781</a>                <span class="kw">let </span>boxed: Box&lt;<span class="kw">dyn </span>std::error::Error + Send + Sync&gt; = e.into();
+<a href=#782 id=782 data-nosnippet>782</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(classify_body_error(boxed));
+<a href=#783 id=783 data-nosnippet>783</a>            }
+<a href=#784 id=784 data-nosnippet>784</a>            <span class="prelude-val">None </span>=&gt; <span class="kw">return </span><span class="prelude-val">Ok</span>(Bytes::from(buf)),
+<a href=#785 id=785 data-nosnippet>785</a>        }
+<a href=#786 id=786 data-nosnippet>786</a>    }
+<a href=#787 id=787 data-nosnippet>787</a>}
+<a href=#788 id=788 data-nosnippet>788</a>
+<a href=#789 id=789 data-nosnippet>789</a><span class="doccomment">/// Map a body-wrapper error to its transform failure class: the route
+<a href=#790 id=790 data-nosnippet>790</a>/// limit's marker keeps the limit's 413, the signature digest marker
+<a href=#791 id=791 data-nosnippet>791</a>/// keeps the HMAC family's 401, everything else is a generic body
+<a href=#792 id=792 data-nosnippet>792</a>/// failure. Same marker types (and the same walking rationale) as
+<a href=#793 id=793 data-nosnippet>793</a>/// `proxy::request_limit_exceeded` / `proxy::signature_body_mismatch`.
+<a href=#794 id=794 data-nosnippet>794</a></span><span class="kw">fn </span>classify_body_error(e: Box&lt;<span class="kw">dyn </span>std::error::Error + Send + Sync&gt;) -&gt; RequestBodyTransformError {
+<a href=#795 id=795 data-nosnippet>795</a>    <span class="kw">use </span><span class="kw">crate</span>::dataplane::hardening::{LimitedBodyError, SignatureBodyError};
+<a href=#796 id=796 data-nosnippet>796</a>    <span class="kw">let </span><span class="kw-2">mut </span>src: <span class="prelude-ty">Option</span>&lt;<span class="kw-2">&amp;</span>(<span class="kw">dyn </span>std::error::Error + <span class="lifetime">'static</span>)&gt; = <span class="prelude-val">Some</span>(e.as_ref());
+<a href=#797 id=797 data-nosnippet>797</a>    <span class="kw">while let </span><span class="prelude-val">Some</span>(s) = src {
+<a href=#798 id=798 data-nosnippet>798</a>        <span class="kw">if let </span><span class="prelude-val">Some</span>(limit) = s.downcast_ref::&lt;LimitedBodyError&gt;() {
+<a href=#799 id=799 data-nosnippet>799</a>            <span class="kw">match </span>limit {
+<a href=#800 id=800 data-nosnippet>800</a>                LimitedBodyError::OverLimit { .. } =&gt; <span class="kw">return </span>RequestBodyTransformError::RouteLimit,
+<a href=#801 id=801 data-nosnippet>801</a>                LimitedBodyError::Inner(inner) =&gt; {
+<a href=#802 id=802 data-nosnippet>802</a>                    <span class="kw">if </span>inner
+<a href=#803 id=803 data-nosnippet>803</a>                        .downcast_ref::&lt;SignatureBodyError&gt;()
+<a href=#804 id=804 data-nosnippet>804</a>                        .is_some_and(|se| <span class="macro">matches!</span>(se, SignatureBodyError::DigestMismatch))
+<a href=#805 id=805 data-nosnippet>805</a>                    {
+<a href=#806 id=806 data-nosnippet>806</a>                        <span class="kw">return </span>RequestBodyTransformError::SignatureMismatch;
+<a href=#807 id=807 data-nosnippet>807</a>                    }
+<a href=#808 id=808 data-nosnippet>808</a>                }
+<a href=#809 id=809 data-nosnippet>809</a>            }
+<a href=#810 id=810 data-nosnippet>810</a>        }
+<a href=#811 id=811 data-nosnippet>811</a>        <span class="kw">if </span>s.downcast_ref::&lt;SignatureBodyError&gt;()
+<a href=#812 id=812 data-nosnippet>812</a>            .is_some_and(|se| <span class="macro">matches!</span>(se, SignatureBodyError::DigestMismatch))
+<a href=#813 id=813 data-nosnippet>813</a>        {
+<a href=#814 id=814 data-nosnippet>814</a>            <span class="kw">return </span>RequestBodyTransformError::SignatureMismatch;
+<a href=#815 id=815 data-nosnippet>815</a>        }
+<a href=#816 id=816 data-nosnippet>816</a>        src = s.source();
+<a href=#817 id=817 data-nosnippet>817</a>    }
+<a href=#818 id=818 data-nosnippet>818</a>    RequestBodyTransformError::Body(e.to_string())
+<a href=#819 id=819 data-nosnippet>819</a>}
+<a href=#820 id=820 data-nosnippet>820</a>
+<a href=#821 id=821 data-nosnippet>821</a><span class="doccomment">/// Parse, apply ops, serialize (shared by both body transforms). The
+<a href=#822 id=822 data-nosnippet>822</a>/// request side reuses the error enum; the response side maps the same
+<a href=#823 id=823 data-nosnippet>823</a>/// failure set to its 502 family.
+<a href=#824 id=824 data-nosnippet>824</a></span><span class="kw">fn </span>run_json_transform(
+<a href=#825 id=825 data-nosnippet>825</a>    bytes: <span class="kw-2">&amp;</span>Bytes,
+<a href=#826 id=826 data-nosnippet>826</a>    compiled: <span class="kw-2">&amp;</span>CompiledJsonTransform,
+<a href=#827 id=827 data-nosnippet>827</a>) -&gt; <span class="prelude-ty">Result</span>&lt;Bytes, RequestBodyTransformError&gt; {
+<a href=#828 id=828 data-nosnippet>828</a>    <span class="kw">let </span><span class="kw-2">mut </span>doc: serde_json::Value =
+<a href=#829 id=829 data-nosnippet>829</a>        serde_json::from_slice(bytes).map_err(|<span class="kw">_</span>| RequestBodyTransformError::InvalidJson)<span class="question-mark">?</span>;
+<a href=#830 id=830 data-nosnippet>830</a>    compiled.apply(<span class="kw-2">&amp;mut </span>doc).map_err(|e| <span class="kw">match </span>e {
+<a href=#831 id=831 data-nosnippet>831</a>        t::JsonTransformError::Unresolved { path } =&gt; {
+<a href=#832 id=832 data-nosnippet>832</a>            RequestBodyTransformError::Unresolved { path }
+<a href=#833 id=833 data-nosnippet>833</a>        }
+<a href=#834 id=834 data-nosnippet>834</a>        t::JsonTransformError::RemoveRoot =&gt; RequestBodyTransformError::Unresolved {
+<a href=#835 id=835 data-nosnippet>835</a>            path: String::new(),
+<a href=#836 id=836 data-nosnippet>836</a>        },
+<a href=#837 id=837 data-nosnippet>837</a>    })<span class="question-mark">?</span>;
+<a href=#838 id=838 data-nosnippet>838</a>    serde_json::to_vec(<span class="kw-2">&amp;</span>doc)
+<a href=#839 id=839 data-nosnippet>839</a>        .map(Bytes::from)
+<a href=#840 id=840 data-nosnippet>840</a>        .map_err(|<span class="kw">_</span>| RequestBodyTransformError::InvalidJson)
+<a href=#841 id=841 data-nosnippet>841</a>}
+</code></pre></div></section></main></body></html>

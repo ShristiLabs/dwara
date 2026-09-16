@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SCHEMA_V11"],"fn":["drop_expired_partitions","list_partitions","maybe_rotate","refresh_raw_all_view"]};

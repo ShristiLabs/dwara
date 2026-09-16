@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["aggregation","ai","analytics","cel","config","dataplane","error","events","extensions","k8s_gateway","lifecycle","mcp","mesh","observability","openapi","plugins","resilience","security","snapshot","state","supervision","synthetic","wasm"]};

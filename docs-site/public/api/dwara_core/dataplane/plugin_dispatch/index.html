@@ -1,0 +1,177 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Request-path plugin dispatch (DW-157, epic #274)."><title>dwara_core::dataplane::plugin_dispatch - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module plugin_dispatch</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module plugin_<wbr>dispatch</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#fast-path-discipline" title="Fast path discipline">Fast path discipline</a></li><li><a href="#body-policy" title="Body policy">Body policy</a></li><li><a href="#failure-semantics" title="Failure semantics">Failure semantics</a></li><li><a href="#header-conventions" title="Header conventions">Header conventions</a></li><li><a href="#http-callouts-pause-and-resume-dw-167" title="HTTP callouts: pause and resume (DW-167)">HTTP callouts: pause and resume (DW-167)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>plugin_<wbr>dispatch</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/plugin_dispatch.rs.html#1-1457">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Request-path plugin dispatch (DW-157, epic #274).</p>
+<p>This module is the wiring between the config’s <code>plugins</code>/route
+<code>plugins</code> lists and the live request path. For every routed request
+whose route references plugins, it:</p>
+<ol>
+<li>builds the per-request <a href="struct.RequestPlugins.html" title="struct dwara_core::dataplane::plugin_dispatch::RequestPlugins"><code>RequestPlugins</code></a> — a fail-closed health
+gate over the generation’s <a href="../../wasm/lifecycle/struct.PluginLifecycle.html" title="struct dwara_core::wasm::lifecycle::PluginLifecycle"><code>PluginLifecycle</code></a> state, one
+per-request WASM instantiation through the lifecycle’s runner
+(<code>wasm::runner::PluginRunner</code>), and the unified <a href="../../plugins/chain/struct.PluginChain.html" title="struct dwara_core::plugins::chain::PluginChain"><code>PluginChain</code></a>
+(native filters + WASM entries in config order, dispatched
+through one <a href="../../wasm/adapter/struct.WasmChainAdapter.html" title="struct dwara_core::wasm::adapter::WasmChainAdapter"><code>WasmChainAdapter</code></a>);</li>
+<li>drives the chain at the four documented phase points
+(<code>request_headers</code> after route resolution before authn;
+<code>request_body</code> after authz/rate-limit before the action;
+<code>response_headers</code> after the response arrives before masking;
+<code>response_body</code> after masking before the operator transforms and
+compression);</li>
+<li>runs <code>on_done</code> cleanup on EVERY exit path via <code>Drop</code>.</li>
+</ol>
+<h3 id="fast-path-discipline"><a class="doc-anchor" href="#fast-path-discipline">§</a>Fast path discipline</h3>
+<p>A route with an empty <code>plugins</code> list builds nothing:
+<a href="struct.RequestPlugins.html#method.build" title="associated function dwara_core::dataplane::plugin_dispatch::RequestPlugins::build"><code>RequestPlugins::build</code></a> returns <code>Ok(None)</code> before any allocation,
+and <code>handle_routed</code> skips every phase call — the no-plugin request
+path is byte-identical to the pre-DW-157 path.</p>
+<h3 id="body-policy"><a class="doc-anchor" href="#body-policy">§</a>Body policy</h3>
+<p>Header phases always run. Body phases require a buffered body: a
+route whose chain declares <code>request_body</code> (or <code>response_body</code>) has
+that body buffered up to the route’s body cap
+(<a href="fn.plugin_body_cap.html" title="fn dwara_core::dataplane::plugin_dispatch::plugin_body_cap"><code>plugin_body_cap</code></a> — <code>routes[].limits.max_body_bytes</code>, default
+<a href="constant.PLUGIN_BODY_CAP_DEFAULT.html" title="constant dwara_core::dataplane::plugin_dispatch::PLUGIN_BODY_CAP_DEFAULT"><code>PLUGIN_BODY_CAP_DEFAULT</code></a>); an over-cap body answers 500
+<code>plugin_body_too_large</code> (fail-closed: a plugin that declared a body
+phase must see the body or the request does not proceed). Bodies on
+routes without body-phase plugins stay streamed — zero buffering,
+zero cost. The response side rides the same buffering masking
+already establishes when masking ran; otherwise it buffers the same
+way. One documented exception: a STREAMING response body
+(<code>text/event-stream</code>, or a body with no declared length — chunked
+or open-ended) or a CONTENT-ENCODED response body skips the
+<code>response_body</code> phase (logged once, <code>plugin_response_body_skipped</code>):
+buffering an endless stream would stall the route, an encoded body
+is opaque bytes to the plugin, and the gateway never decompresses on
+this path (its own compression runs later, after the phase).</p>
+<h3 id="failure-semantics"><a class="doc-anchor" href="#failure-semantics">§</a>Failure semantics</h3>
+<p>Everything fails closed, on the AFFECTED route only:</p>
+<ul>
+<li>a Crashed/Disabled/not-loaded plugin, a native name missing from
+the registry, a native factory that errors while the chain is
+built, or a failed per-request instantiation answers 500
+<code>plugin_unavailable</code>;</li>
+<li>a WASM trap (fuel/epoch/memory) or native filter error answers
+500 <code>plugin_failed</code>;</li>
+<li>an over-cap body answers 500 <code>plugin_body_too_large</code>;</li>
+<li>a plugin’s <code>send_http_response</code> is honored verbatim (status,
+headers, body) and the upstream is never dialed.</li>
+</ul>
+<p>Every failure increments <code>dwara_plugin_failures_total{name,reason}</code>
+and logs one server-side event naming the plugin; a plugin answering
+the request (short-circuit OR failure) sets the access log’s
+<code>plugin_short_circuit</code> flag.</p>
+<h3 id="header-conventions"><a class="doc-anchor" href="#header-conventions">§</a>Header conventions</h3>
+<p>The proxy-wasm convention exposes HTTP framing as pseudo-headers.
+Matching the host/runner tests (tests/wasm_host.rs), the request
+header map carries <code>:method</code> and <code>:path</code> (path INCLUDING the query
+string) ahead of the real headers (<code>host</code> included verbatim); the
+response map carries <code>:status</code>. The write-back of ORDINARY headers
+applies ONLY the names the chain changed (<code>apply_header_changes</code>):
+headers no plugin touched keep their original bytes, non-UTF-8
+(obs-text) values included. Pseudo-headers never enter the ordinary
+map — the three target pseudo-headers a chain may rewrite are
+captured separately ([<code>pseudo_header_rewrite</code>]) and applied when
+the forwarded request is built:</p>
+<ul>
+<li><code>:path</code> — the FINAL upstream target, origin-form (<code>/...</code>),
+query string included (a written path without a query forwards
+without one). It composes with the route’s own rewrite: the
+route rewrite applies first, the plugin’s <code>:path</code> is the final
+say, and routes are never re-matched. Only the upstream sees the
+rewritten target — route matching, authn/authz, the cache key,
+anomaly scoring, and the access log all evaluated the ORIGINAL
+target and keep it.</li>
+<li><code>:method</code> — a valid method token; replaces the forwarded method.</li>
+<li><code>:authority</code> — overrides the forwarded <code>Host</code> header only (see
+<a href="struct.PluginForwardHost.html" title="struct dwara_core::dataplane::plugin_dispatch::PluginForwardHost"><code>PluginForwardHost</code></a>); the dialed endpoint stays the balancer’s
+pick.</li>
+</ul>
+<p>Only CHANGED values apply: writing back the value the map carried
+has zero effect, and REMOVING a pseudo-header is ignored (the
+request keeps its real method/path). An invalid changed value
+(empty, non-<code>/</code>-prefixed, or unparseable <code>:path</code>; a non-token
+<code>:method</code>; an unparseable <code>:authority</code>) fails closed: 500
+<code>plugin_failed</code>, metric reason <code>invalid_rewrite</code>, upstream never
+dialed.</p>
+<p><code>:status</code> writes on the response map stay IGNORED (pipeline-owned)
+— a deliberate asymmetry with the request side, documented on
+<a href="struct.RequestPlugins.html#method.response_headers_phase" title="method dwara_core::dataplane::plugin_dispatch::RequestPlugins::response_headers_phase"><code>RequestPlugins::response_headers_phase</code></a>.</p>
+<h3 id="http-callouts-pause-and-resume-dw-167"><a class="doc-anchor" href="#http-callouts-pause-and-resume-dw-167">§</a>HTTP callouts: pause and resume (DW-167)</h3>
+<p>A plugin phase callback may dispatch HTTP callouts
+(<code>proxy_http_call</code>) and return Pause. The phase method here — the
+ASYNC boundary — then drives the exchange, keeping the wasm runner
+synchronous:</p>
+<ol>
+<li>the chain reports <a href="../../plugins/chain/enum.ChainOutcome.html#variant.CalloutPending" title="variant dwara_core::plugins::chain::ChainOutcome::CalloutPending"><code>ChainOutcome::CalloutPending</code></a> and stops at
+the paused entry;</li>
+<li><a href="struct.RequestPlugins.html#method.resolve_callouts" title="method dwara_core::dataplane::plugin_dispatch::RequestPlugins::resolve_callouts"><code>RequestPlugins::resolve_callouts</code></a> performs each pending
+exchange on <code>spawn_blocking</code> around the synchronous callout
+client (<code>wasm::callout</code>), records
+<code>dwara_plugin_callouts_total{name,outcome}</code> (ok, timeout,
+error), and delivers the response to the instance with a
+synchronous re-entry (<code>proxy_on_http_call_response</code>); the plugin
+may dispatch again (bounded rounds) or decide the request. A
+mid-delivery re-dispatch never abandons the rest of the drained
+queue: the un-performed remainder is re-enqueued ahead of the
+new dispatches (dispatch order preserved), so every dispatched
+callout is eventually performed or the loop guard trips;</li>
+<li>on Continue the chain resumes from the entry AFTER the paused
+one with the plugin’s post-callout payload.</li>
+</ol>
+<p>Guardrails (hard caps, no config surface): the plugin’s timeout
+clamped to [1ms, 5s]; at most [<code>wasm::callout::MAX_CALLOUT_ROUNDS</code>]
+callout rounds per phase per request (exceeding fails closed, 500
+<code>plugin_failed</code>, metric reason <code>callout_loop</code>); callout response
+bodies capped at 4 MiB; redirects refused; the gateway SSRF egress
+filter applied at connect time against the resolved IPs.</p>
+<p><strong>Callout failure is a plugin failure</strong> (a deliberate deviation
+from Envoy, which delivers an empty response callback on callout
+failure): a timed-out or refused callout answers 500
+<code>plugin_failed</code> (metric reason <code>callout_failed</code>) — the plugin
+cannot make a fail-open decision without receiving its decision
+input, and dwara’s plugin posture is fail-closed end to end. Any
+COMPLETED status is delivered as data (non-2xx included); recipes
+wanting fail-open semantics scope them explicitly (short timeouts
+plus a non-callout fallback, or an extension trait instead of a
+plugin).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.PluginForwardHost.html" title="struct dwara_core::dataplane::plugin_dispatch::PluginForwardHost">Plugin<wbr>Forward<wbr>Host</a></dt><dd>The <code>Host</code> override a plugin’s <code>:authority</code> write produced. Rides
+the request extensions from the forward build to the upstream
+dispatch (<code>upstream::UpstreamHandle</code> owns the forwarded <code>Host</code>):
+the header the plugin named replaces the picked endpoint’s
+authority there, and ONLY there — the dial target and the URI
+authority stay the balancer’s pick (a plugin shapes the <code>Host</code>
+header, never which origin the gateway dials).</dd><dt><a class="struct" href="struct.PluginStatusEntry.html" title="struct dwara_core::dataplane::plugin_dispatch::PluginStatusEntry">Plugin<wbr>Status<wbr>Entry</a></dt><dd>One plugin’s status entry (DW-158): what the admin endpoint, the
+CLI, and the per-state gauge are all built from.</dd><dt><a class="struct" href="struct.PluginTargetRewrite.html" title="struct dwara_core::dataplane::plugin_dispatch::PluginTargetRewrite">Plugin<wbr>Target<wbr>Rewrite</a></dt><dd>A chain’s rewrite of the forwarded request target, captured at the
+<code>request_headers</code> phase ([<code>pseudo_header_rewrite</code>]) and applied
+when the upstream request is built: the phase runs early (before
+authn) but the rewrite shapes the UPSTREAM request only, so it
+rides the request extensions from the phase to the forward build
+(<code>proxy::proxy_request</code> removes it there — after the route’s own
+rewrite and the query transforms, with no route re-match; see the
+module’s “Header conventions” section). <code>Default</code> is the no-rewrite
+case (no pseudo-header changed); <code>is_noop</code> lets the caller skip
+the extension entirely on that fast path.</dd><dt><a class="struct" href="struct.RequestPlugins.html" title="struct dwara_core::dataplane::plugin_dispatch::RequestPlugins">Request<wbr>Plugins</a></dt><dd>The per-request plugin execution state (DW-157): the unified chain
+plus the fail-closed helpers that drive it. Constructed by
+<a href="struct.RequestPlugins.html#method.build" title="associated function dwara_core::dataplane::plugin_dispatch::RequestPlugins::build"><code>RequestPlugins::build</code></a> only on routes that reference plugins;
+<code>Drop</code> runs the <code>on_done</code> cleanup callback on every exit path
+(early short-circuits, failures, and the natural tail alike).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.PluginStatusState.html" title="enum dwara_core::dataplane::plugin_dispatch::PluginStatusState">Plugin<wbr>Status<wbr>State</a></dt><dd>A plugin’s observable lifecycle state for the status surface (<code>GET /plugins</code>, <code>dwara-cli status</code>, <code>dwara_plugin_total{state}</code>). The
+three lifecycle states come from <a href="../../wasm/lifecycle/enum.PluginHealth.html" title="enum dwara_core::wasm::lifecycle::PluginHealth"><code>PluginHealth</code></a>; the two extra
+states cover plugins that are declared in the config but unusable
+BEFORE the lifecycle can judge them (the same conditions the
+request-path gate fails closed on, so the status surface never
+shows a plugin as serving when its routes answer 500).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.PLUGIN_BODY_CAP_DEFAULT.html" title="constant dwara_core::dataplane::plugin_dispatch::PLUGIN_BODY_CAP_DEFAULT">PLUGIN_<wbr>BODY_<wbr>CAP_<wbr>DEFAULT</a></dt><dd>The default body cap for plugin body phases on routes without an
+explicit <code>limits.max_body_bytes</code> (DW-157): 1 MiB, the same bound the
+nano-service body cap uses. Buffering must be opt-in (the plugin
+declaring the phase) and size-capped (always) — this is the cap when
+the route configures none.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.plugin_body_cap.html" title="fn dwara_core::dataplane::plugin_dispatch::plugin_body_cap">plugin_<wbr>body_<wbr>cap</a></dt><dd>The cap for plugin body phases (DW-157): the route’s
+<code>limits.max_body_bytes</code> when configured, else
+<a href="constant.PLUGIN_BODY_CAP_DEFAULT.html" title="constant dwara_core::dataplane::plugin_dispatch::PLUGIN_BODY_CAP_DEFAULT"><code>PLUGIN_BODY_CAP_DEFAULT</code></a>. The same bound governs the request and
+response sides (it is the only per-route body cap in the config
+surface). It applies even when the limits block is <code>dry_run</code> — it is
+a buffering bound for the plugin phase, not the 413 policy.</dd><dt><a class="fn" href="fn.plugin_statuses.html" title="fn dwara_core::dataplane::plugin_dispatch::plugin_statuses">plugin_<wbr>statuses</a></dt><dd>Enumerate the generation’s declared plugins as status entries
+(DW-158), in config order. Health and digest come from the live
+<a href="../../wasm/lifecycle/struct.PluginLifecycle.html" title="struct dwara_core::wasm::lifecycle::PluginLifecycle"><code>PluginLifecycle</code></a> (WASM local and registry-resolved alike,
+DW-165) or the <a href="../../plugins/registry/struct.NativeRegistry.html" title="struct dwara_core::plugins::registry::NativeRegistry"><code>NativeRegistry</code></a> (native names). The dataplane
+serves this through <code>DataPlane::plugin_statuses</code> (the admin <code>GET /plugins</code> handler) and folds it into <code>dwara_plugin_total{state}</code>
+at publish time — the same enumeration, so the endpoint, the CLI,
+and the metric can never disagree.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.PluginExit.html" title="type dwara_core::dataplane::plugin_dispatch::PluginExit">Plugin<wbr>Exit</a></dt><dd>The fail-closed exit a plugin phase hands its caller: the response
+the proxy returns immediately (a plugin’s local response or one of
+the 500 envelopes). Boxed — <code>Response&lt;ProxyBody&gt;</code> is large and the
+clippy <code>result_large_err</code> gate holds the hot-path <code>Result</code>s small.</dd></dl></section></div></main></body></html>

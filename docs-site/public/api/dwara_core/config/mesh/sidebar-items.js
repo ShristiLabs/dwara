@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MeshMode"],"struct":["MeshConfig","MeshSidecarConfig","MeshSpiffeConfig"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEMPLATES"],"fn":["find","names","render_files"],"struct":["Template"]};

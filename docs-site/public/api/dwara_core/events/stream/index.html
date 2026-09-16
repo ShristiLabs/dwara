@@ -1,0 +1,132 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Real-time access-record stream (DW-121, feature analysis section 5 “Platform”): the record plumbing that mirrors the notice plumbing of DW-044. Where the event bus carries a handful of discrete operational events per minute (breaker transitions, ejections, config publishes), this pipeline carries ONE record per completed request — the raw firehose an operator points at their own warehouse or SIEM when the embedded analytics store (DW-043) is not the system of record. It complements, never replaces: the two are configured independently (a deployment can run either, both, or neither) and share nothing at runtime — different channels, different tasks, different failure domains."><title>dwara_core::events::stream - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module stream</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module stream</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#placement" title="Placement">Placement</a></li><li><a href="#wire-format-stable-shape" title="Wire format (stable shape)">Wire format (stable shape)</a></li><li><a href="#batching-one-delivery-per-flushed-batch" title="Batching: one delivery per flushed batch">Batching: one delivery per flushed batch</a></li><li><a href="#emission-contract-never-backpressure-the-dataplane" title="Emission contract: never backpressure the dataplane">Emission contract: never backpressure the dataplane</a></li><li><a href="#the-sink-seam" title="The sink seam">The sink seam</a></li><li><a href="#lifecycle" title="Lifecycle">Lifecycle</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>events</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">events</a></div><h1>Module <span>stream</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/events/stream.rs.html#1-810">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Real-time access-record stream (DW-121, feature analysis section 5
+“Platform”): the record plumbing that mirrors the notice plumbing of
+DW-044. Where the event bus carries a handful of discrete
+operational events per minute (breaker transitions, ejections,
+config publishes), this pipeline carries ONE record per completed
+request — the raw firehose an operator points at their own
+warehouse or SIEM when the embedded analytics store (DW-043) is not
+the system of record. It complements, never replaces: the two are
+configured independently (a deployment can run either, both, or
+neither) and share nothing at runtime — different channels, different
+tasks, different failure domains.</p>
+<h2 id="placement"><a class="doc-anchor" href="#placement">§</a>Placement</h2>
+<p>The stream lives in the events domain beside the webhook deliverer
+because it IS an outbound delivery pipeline: the sink reuses the
+DW-044 delivery engine (<code>webhook::deliver_with_retry</code> — one total
+timeout per delivery, exponential backoff, the transient status
+set) and consumes the access record type from <code>observability</code>, both
+of which the events domain may import. The analytics domain cannot
+(its dependency set is config/observability/extensions), and the
+firehose needs nothing from the SQLite store — moving it there
+would force a dependency-graph change to share an engine that
+already lives one module over.</p>
+<h2 id="wire-format-stable-shape"><a class="doc-anchor" href="#wire-format-stable-shape">§</a>Wire format (stable shape)</h2>
+<p>One NDJSON body per flushed batch — one JSON object per line, one
+line per record, <code>application/x-ndjson</code>:</p>
+<div class="example-wrap"><pre class="language-json"><code>{&quot;id&quot;:&quot;rec-18f3c2a1b9d0-00000a&quot;,&quot;gateway&quot;:&quot;dwara-8213-18f3c2910b07&quot;,
+ &quot;timestamp&quot;:&quot;2026-08-30T09:00:00.123Z&quot;,&quot;request_id&quot;:&quot;req-...&quot;,
+ &quot;listener&quot;:&quot;edge&quot;,&quot;route&quot;:&quot;billing&quot;,&quot;consumer&quot;:&quot;acme&quot;,
+ &quot;upstream&quot;:&quot;billing-v1&quot;,&quot;endpoint&quot;:&quot;10.0.0.4:8443&quot;,&quot;method&quot;:&quot;GET&quot;,
+ &quot;path&quot;:&quot;/v1/invoices&quot;,&quot;status&quot;:200,&quot;duration_ms&quot;:4.2,&quot;attempts&quot;:1,
+ &quot;rate_limited&quot;:false,&quot;broken&quot;:false,&quot;shed&quot;:false,
+ &quot;dimensions&quot;:{&quot;plan&quot;:&quot;gold&quot;}}</code></pre></div>
+<p>The field list is the access record’s redacted-by-construction set:
+<code>path</code> never carries a query string, there are no headers, no
+credentials, and <code>dimensions</code> carries only config-declared
+header-sourced tags (DW-043’s grammar, capped at 16 x 128 bytes).
+<code>id</code> is process-unique and monotonic (<code>rec-&lt;hex unix ms&gt;-&lt;hex seq&gt;</code>)
+and <code>gateway</code> is the process instance label — together they give a
+receiver per-instance ordering even across restarts. A record whose
+serialized line exceeds <a href="constant.MAX_RECORD_BYTES.html" title="constant dwara_core::events::stream::MAX_RECORD_BYTES"><code>MAX_RECORD_BYTES</code></a> (only possible via
+absurd path/dimension lengths — the same bound class as a webhook
+envelope) is dropped and counted, never truncated: a receiver
+should never see a malformed line.</p>
+<h2 id="batching-one-delivery-per-flushed-batch"><a class="doc-anchor" href="#batching-one-delivery-per-flushed-batch">§</a>Batching: one delivery per flushed batch</h2>
+<p>The flusher accumulates records and flushes on the first of:
+<code>batch_max</code> records queued, the batch byte cap <a href="constant.MAX_BATCH_BYTES.html" title="constant dwara_core::events::stream::MAX_BATCH_BYTES"><code>MAX_BATCH_BYTES</code></a>
+reached, or <code>flush_ms</code> elapsed since the batch’s first record (all
+three read live from the current generation). ONE delivery — with
+its whole retry cycle — is made per batch, not per record: a
+warehouse ingest endpoint wants throughput-shaped traffic, and
+per-record delivery would multiply the sink’s load by the batch
+factor for zero information gain. Deliveries are made STRICTLY IN
+ORDER, inline in the flusher task: a record firehose’s arrival
+order is a real receiver expectation (unlike alert events, which
+the deliverer dispatches as independent tasks). The cost of that
+ordering is deliberate and bounded: one slow batch holds the queue
+back by at most its <code>timeout_ms</code> budget, after which it fails and
+the queue moves on — and a queue that outgrows its <code>buffer</code> bound
+drops at OFFER time (counted), never blocks the request path.</p>
+<h2 id="emission-contract-never-backpressure-the-dataplane"><a class="doc-anchor" href="#emission-contract-never-backpressure-the-dataplane">§</a>Emission contract: never backpressure the dataplane</h2>
+<p><a href="struct.AccessRecordStream.html#method.offer" title="method dwara_core::events::stream::AccessRecordStream::offer"><code>AccessRecordStream::offer</code></a> is an enabled-flag check plus a
+bounded-channel <code>try_send</code>. When the queue is full (or the flusher
+is stalled behind a slow batch) the record is DROPPED and the drop
+counted (<a href="struct.AccessRecordStream.html#method.dropped" title="method dwara_core::events::stream::AccessRecordStream::dropped"><code>AccessRecordStream::dropped</code></a>, surfaced as the
+<code>dwara_access_records_dropped_total</code> gauge at scrape time). There
+is no blocking wait and no unbounded buffer: a dead sink degrades
+the stream’s completeness counters, never the gateway’s latency.
+When the current generation has no compiled sink the flag is off
+and <code>offer</code> returns before allocating anything — an unconfigured
+stream costs one relaxed atomic load per request.</p>
+<h2 id="the-sink-seam"><a class="doc-anchor" href="#the-sink-seam">§</a>The sink seam</h2>
+<p><a href="trait.RecordSink.html" title="trait dwara_core::events::stream::RecordSink"><code>RecordSink</code></a> is deliberately small: one method, one batch, one
+boolean answer. <code>webhook</code> is the one shipped implementation; a
+Kafka producer is the documented second slot, deferred by the
+lean-deps rule (the same decision that keeps Parquet out of DW-156
+backlog territory: a sink that drags a client library must earn its
+dependency weight). Sinks are compiled per config generation (a
+<code>kafka</code> variant would compile its client the same way) and pushed
+to the flusher over a watch channel — a reload retargets the stream
+with no restart, mid-batch boundaries aside.</p>
+<h2 id="lifecycle"><a class="doc-anchor" href="#lifecycle">§</a>Lifecycle</h2>
+<p>The channel and its capacity are constructed once per process (the
+capacity is a boot-time property; dwara-bin always constructs the
+stream so a live reload can arm it) and the flusher is one
+background task stopped by the shutdown watch, which drains what is
+already queued into one final flush attempt before returning. The
+gateway is not a durable queue: a record offered but not yet
+delivered at process death is lost with only its counters as the
+witness.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.AccessRecordStream.html" title="struct dwara_core::events::stream::AccessRecordStream">Access<wbr>Record<wbr>Stream</a></dt><dd>The bounded record queue plus its counters and enabled flag. Share
+via <code>Arc</code>; the dataplane holds it behind an <code>ArcSwapOption</code> set
+once at boot.</dd><dt><a class="struct" href="struct.KafkaRecordSink.html" title="struct dwara_core::events::stream::KafkaRecordSink">Kafka<wbr>Record<wbr>Sink</a></dt><dd>The Kafka batch sink (SCALE-08, #187,
+<code>analytics_stream.sink.kafka</code>): produces each flushed batch as
+NDJSON messages to a Kafka topic via a Kafka REST Proxy. The REST
+Proxy endpoint receives the batch as an HTTP POST with the
+<code>Content-Type: application/vnd.kafka.binary.v2+json</code> media type;
+each NDJSON line becomes a Kafka message value (base64 encoded
+per the REST Proxy spec). Reuses the DW-044 webhook delivery
+engine’s retry/budget shape — one delivery (with its retries) per
+batch.</dd><dt><a class="struct" href="struct.StreamRecord.html" title="struct dwara_core::events::stream::StreamRecord">Stream<wbr>Record</a></dt><dd>One completed request as it crosses the stream channel: the access
+record’s owned copy plus the identity the flusher stamps into the
+envelope. Constructed on the request-completion path (the same
+allocation class as the analytics store’s raw-record copy).</dd><dt><a class="struct" href="struct.StreamTargets.html" title="struct dwara_core::events::stream::StreamTargets">Stream<wbr>Targets</a></dt><dd>The per-generation compiled stream state (DW-121): pushed to the
+flusher over a watch channel by the dataplane’s refresh. An empty
+<code>sinks</code> list is the disabled state — the offer path checks a flag
+the refresh derives from exactly this, so an unconfigured stream
+never queues a record.</dd><dt><a class="struct" href="struct.WebhookRecordSink.html" title="struct dwara_core::events::stream::WebhookRecordSink">Webhook<wbr>Record<wbr>Sink</a></dt><dd>The webhook batch sink (DW-121, <code>analytics_stream.sink.webhook</code>):
+one POST per flushed batch, body the NDJSON lines, media type
+<code>application/x-ndjson</code>, delivered through the shared DW-044 engine
+(one total timeout per batch, exponential backoff, the transient
+status set — see <code>events::webhook</code> for the contract).</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.MAX_BATCH_BYTES.html" title="constant dwara_core::events::stream::MAX_BATCH_BYTES">MAX_<wbr>BATCH_<wbr>BYTES</a></dt><dd>Hard cap on one flushed batch (bytes), the byte half of the flush
+trigger (with <code>batch_max</code> records, whichever comes first). Batches
+are delivered inline and in order, so this is also the flusher’s
+per-delivery memory bound.</dd><dt><a class="constant" href="constant.MAX_RECORD_BYTES.html" title="constant dwara_core::events::stream::MAX_RECORD_BYTES">MAX_<wbr>RECORD_<wbr>BYTES</a></dt><dd>Hard cap on one serialized record line (bytes). The field list is
+bounded (path length and 16x128-byte dimensions are the only
+growth axes), so this only binds absurd shapes; an over-cap line is
+dropped and counted, never sent truncated.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.RecordSink.html" title="trait dwara_core::events::stream::RecordSink">Record<wbr>Sink</a></dt><dd>One flushed batch’s delivery destination (DW-121). Deliberately
+small — one method, one batch, one answer — because the pipeline’s
+guarantees (ordering, bounded memory, drop-and-count) live in the
+FLUSHER, not in the sink: an implementation only decides where a
+batch goes and whether the receiver took it.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.compile_stream_targets.html" title="fn dwara_core::events::stream::compile_stream_targets">compile_<wbr>stream_<wbr>targets</a></dt><dd>Compile one generation’s stream state from the config block. A sink
+whose compilation fails is skipped with a LOUD error (fail closed —
+never delivered with placeholder bytes, never fatal to the
+generation); if that leaves no sinks, the stream is disabled and
+records drop at offer time with the counters as the witness.</dd><dt><a class="fn" href="fn.refresh_stream_gauges.html" title="fn dwara_core::events::stream::refresh_stream_gauges">refresh_<wbr>stream_<wbr>gauges</a></dt><dd>Refresh the stream’s observation gauges at scrape time (the event
+bus’s model: the offer path bumps plain atomics, and only the
+scrape couples them to the registry).</dd><dt><a class="fn" href="fn.run_stream_flusher.html" title="fn dwara_core::events::stream::run_stream_flusher">run_<wbr>stream_<wbr>flusher</a></dt><dd>The flusher loop (DW-121): drain the stream channel, assemble
+ordered batches, and deliver each batch — inline, in order, one
+retry cycle per batch — to the current generation’s sinks. Stops on
+shutdown after draining what is already queued into one final flush
+attempt (the gateway is not a durable queue; an offer undelivered
+at process death is lost with its counters as the witness).</dd></dl></section></div></main></body></html>

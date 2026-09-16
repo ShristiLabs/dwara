@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Plugin publish tooling (DW-164, #282)."><title>dwara_cli::plugin_publish - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="dwara_cli" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module plugin_publish</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../dwara_cli/index.html">dwara_<wbr>cli</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module plugin_<wbr>publish</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#manifest-shape-and-tolerance" title="Manifest shape and tolerance">Manifest shape and tolerance</a></li><li><a href="#lean-deps-pattern" title="Lean-deps pattern">Lean-deps pattern</a></li><li><a href="#done-when" title="Done-when">Done-when</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate dwara_<wbr>cli</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">dwara_cli</a></div><h1>Module <span>plugin_<wbr>publish</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/dwara_cli/plugin_publish.rs.html#1-730">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Plugin publish tooling (DW-164, #282).</p>
+<p>The author-side half of the plugin registry: <code>dwara plugin keygen</code>,
+<code>plugin sign</code>, and <code>plugin publish</code>. The reader-side (<code>plugin search</code> / <code>plugin install</code>) lives in <a href="../plugin_registry/index.html" title="mod dwara_cli::plugin_registry"><code>crate::plugin_registry</code></a>.</p>
+<ul>
+<li><code>keygen</code> generates an Ed25519 keypair. The public key (32 bytes,
+hex) goes into registry entries as <code>public_key</code>; the private key
+never leaves the author’s machine. <code>--out-dir</code> writes
+<code>plugin.pub</code> (world-readable) and <code>plugin.key</code> (owner-only,
+0600), refusing to overwrite existing files.</li>
+<li><code>sign</code> produces a detached Ed25519 signature (64 bytes, hex) over
+the artifact bytes — the exact bytes whose SHA-256 is the
+manifest <code>digest</code>, so digest and signature bind to the same
+artifact content.</li>
+<li><code>publish</code> reads the built <code>.wasm</code> from disk, computes its
+SHA-256, optionally signs it, and emits a registry manifest entry
+(<code>{name, version, digest, url}</code> plus <code>signature</code>/<code>public_key</code>
+when signed) ready to paste into the registry’s <code>manifest.json</code>.
+With <code>--pr</code> it opens the pull request itself.</li>
+</ul>
+<h3 id="manifest-shape-and-tolerance"><a class="doc-anchor" href="#manifest-shape-and-tolerance">§</a>Manifest shape and tolerance</h3>
+<p>The registry manifest is a JSON array of entries; the install
+reader parses it as <code>Vec&lt;serde_json::Value&gt;</code>, so extra fields are
+tolerated by construction. The typed <a href="struct.ManifestEntry.html" title="struct dwara_cli::plugin_publish::ManifestEntry"><code>ManifestEntry</code></a> here
+deliberately does NOT use <code>deny_unknown_fields</code>: this is an
+external interchange format, not gateway config — strict-serde’s
+job is to catch operator typos in <code>dwara.yaml</code>, while a reader
+that rejects unknown registry fields would break on every future
+manifest addition. The merge path (<a href="fn.merge_manifest.html" title="fn dwara_cli::plugin_publish::merge_manifest"><code>merge_manifest</code></a>) therefore
+operates on raw JSON values, preserving unknown fields of entries
+it does not touch.</p>
+<h3 id="lean-deps-pattern"><a class="doc-anchor" href="#lean-deps-pattern">§</a>Lean-deps pattern</h3>
+<p>Like <code>plugin install</code> (external <code>curl</code>), the <code>--pr</code> flow shells out
+to the GitHub CLI (<code>gh</code>) instead of embedding a GitHub API client:
+<code>gh api</code> drives the git data endpoints (blob, tree, commit, ref)
+and <code>gh pr create</code> opens the PR. The flow is best-effort: it tries
+a branch on the target repository first and falls back to a fork
+(for authors without write access); on any failure the printed
+manifest entry is still valid for a manual PR.</p>
+<h3 id="done-when"><a class="doc-anchor" href="#done-when">§</a>Done-when</h3>
+<p>An author can go from a built <code>.wasm</code> to an open registry PR with
+one command, with a digest verified against the artifact on disk.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.GeneratedKeypair.html" title="struct dwara_cli::plugin_publish::GeneratedKeypair">Generated<wbr>Keypair</a></dt><dd>A freshly generated Ed25519 keypair, hex-encoded.</dd><dt><a class="struct" href="struct.ManifestEntry.html" title="struct dwara_cli::plugin_publish::ManifestEntry">Manifest<wbr>Entry</a></dt><dd>One registry manifest entry. See the module docs for the tolerance
+rationale (no <code>deny_unknown_fields</code>).</dd><dt><a class="struct" href="struct.WrittenKeypair.html" title="struct dwara_cli::plugin_publish::WrittenKeypair">Written<wbr>Keypair</a></dt><dd>Where <code>keygen --out-dir</code> wrote the keypair.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_REGISTRY_REPO.html" title="constant dwara_cli::plugin_publish::DEFAULT_REGISTRY_REPO">DEFAULT_<wbr>REGISTRY_<wbr>REPO</a></dt><dd>The default repository hosting the registry manifest (the dwara
+community plugin registry).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.branch_name.html" title="fn dwara_cli::plugin_publish::branch_name">branch_<wbr>name</a></dt><dd>The branch name for a publish PR: <code>plugin/&lt;name&gt;-&lt;version&gt;</code> with
+characters git refs reject replaced by <code>-</code>.</dd><dt><a class="fn" href="fn.build_entry.html" title="fn dwara_cli::plugin_publish::build_entry">build_<wbr>entry</a></dt><dd>Build a manifest entry from the artifact bytes read from disk.</dd><dt><a class="fn" href="fn.entry_json.html" title="fn dwara_cli::plugin_publish::entry_json">entry_<wbr>json</a></dt><dd>Serialize an entry as the ready-to-paste JSON object (pretty, one
+field per line, keys in serde_json’s default alphabetical order —
+matching the registry manifest’s formatting).</dd><dt><a class="fn" href="fn.keygen.html" title="fn dwara_cli::plugin_publish::keygen">keygen</a></dt><dd><code>plugin keygen</code>: generate a fresh Ed25519 keypair. <code>OsRng</code> cannot
+fail (the OS entropy source is infallible), so neither can this.</dd><dt><a class="fn" href="fn.load_signing_key.html" title="fn dwara_cli::plugin_publish::load_signing_key">load_<wbr>signing_<wbr>key</a></dt><dd>Load a signing key from a path to a hex key file (as written by
+<code>keygen --out-dir</code>) or from a literal hex string on the command
+line. This keeps <code>--key</code> scriptable either way.</dd><dt><a class="fn" href="fn.merge_manifest.html" title="fn dwara_cli::plugin_publish::merge_manifest">merge_<wbr>manifest</a></dt><dd>Merge an entry into a registry manifest (a JSON array).</dd><dt><a class="fn" href="fn.open_registry_pr.html" title="fn dwara_cli::plugin_publish::open_registry_pr">open_<wbr>registry_<wbr>pr</a></dt><dd>Open the registry PR for an entry, best-effort via the <code>gh</code> CLI.</dd><dt><a class="fn" href="fn.public_key_hex.html" title="fn dwara_cli::plugin_publish::public_key_hex">public_<wbr>key_<wbr>hex</a></dt><dd>The hex public key of a signing key (what goes into the manifest’s
+<code>public_key</code> field).</dd><dt><a class="fn" href="fn.sign_artifact.html" title="fn dwara_cli::plugin_publish::sign_artifact">sign_<wbr>artifact</a></dt><dd><code>plugin sign</code>: Ed25519 signature over the artifact bytes, hex.
+Deterministic for a given key and artifact.</dd><dt><a class="fn" href="fn.verify_artifact.html" title="fn dwara_cli::plugin_publish::verify_artifact">verify_<wbr>artifact</a></dt><dd>Verify a hex signature against the artifact bytes with a hex
+public key — the same check the gateway-side verification performs
+on load. Ok(()) when the signature matches.</dd><dt><a class="fn" href="fn.write_keypair.html" title="fn dwara_cli::plugin_publish::write_keypair">write_<wbr>keypair</a></dt><dd><code>plugin keygen --out-dir</code>: write the keypair to <code>&lt;dir&gt;/plugin.pub</code>
+and <code>&lt;dir&gt;/plugin.key</code>. The private key is owner-only (0600 on
+Unix). Existing files are never overwritten — a silent overwrite
+could strand artifacts signed with the old key.</dd></dl></section></div></main></body></html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Pooled upstream clients (DW-008, feature analysis 4.1)."><title>dwara_core::dataplane::upstream - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module upstream</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module upstream</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#constants" title="Constants">Constants</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>upstream</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/upstream.rs.html#1-2480">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Pooled upstream clients (DW-008, feature analysis 4.1).</p>
+<p>One hyper-util legacy client (a connection pool) per configured
+upstream, keyed by upstream name inside an <a href="struct.UpstreamRegistry.html" title="struct dwara_core::dataplane::upstream::UpstreamRegistry"><code>UpstreamRegistry</code></a>. Each
+pool’s connector is tuned per upstream:</p>
+<ul>
+<li><strong>Connect timeout</strong>: <code>timeouts.connect_ms</code> (default 5 s) wraps the
+whole dial: resolution plus TCP connect plus, for TLS upstreams,
+the TLS handshake.</li>
+<li><strong>Happy-eyeballs dial</strong> (DW-030, RFC 8305): an endpoint address
+that resolves to multiple addresses — the dual-stack hostname
+case — is dialed with interleaved address-family attempts
+(<code>timeouts.happy_eyeballs_ms</code>, default 250 ms, <code>0</code> disables):
+the resolver’s first address defines the preferred family
+(RFC 8305 leaves the preference to the resolver’s order — the
+system’s RFC 6724 sort), the first attempt starts immediately,
+each subsequent attempt starts one delay after the previous
+START (or immediately when an attempt fails with nothing else in
+flight), and the first success wins, cancelling the losers.
+Exactly ONE outcome — the overall dial’s — reaches the breaker
+and passive-health accounting: the losing arms of one dial are
+dial-internal retries, never endpoint failures. The dial (and
+the [<code>happy_race</code>] primitive beneath it) is ours, not
+hyper-util’s implicit default: the RFC 8305 shape is now
+documented, configurable, and observable in tests. DNS resolution
+on the pooled dial path runs through the shared async hickory
+<code>DnsCache</code> (PERF-05/#170)
+with TTL and negative caching, replacing the blocking-pool
+<code>getaddrinfo</code> of <code>tokio::net::lookup_host</code>; IP-literal and
+<code>/etc/hosts</code> endpoints skip the network. The active health probes
+keep the system resolver (a background, infrequent path).</li>
+<li><strong>Read timeout (per-attempt)</strong>: <code>timeouts.read_ms</code> wraps each pooled
+request/response-header exchange (DW-014) — from the moment the
+request is handed to the pool (including any connection-cap queue
+wait and the dial) until the response HEADERS resolve. It is
+therefore also the per-attempt total bound: pool wait + connect +
+write request + read headers, all inside one <code>read_ms</code> deadline.
+A request whose headers do not arrive in time fails with
+<a href="enum.UpstreamError.html#variant.ReadTimeout" title="variant dwara_core::dataplane::upstream::UpstreamError::ReadTimeout"><code>UpstreamError::ReadTimeout</code></a> (classified 504 by the proxy, and a
+retryable transport-class failure when retries are enabled). The
+response BODY is not covered by <code>read_ms</code>.</li>
+<li><strong>Write timeout (body idle)</strong>: <code>timeouts.write_ms</code> bounds the
+response body stream as an INACTIVITY timeout (DW-014): the body
+wrapper <a href="struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody"><code>UpstreamBody</code></a> errors with <a href="enum.UpstreamBodyError.html#variant.WriteTimeout" title="variant dwara_core::dataplane::upstream::UpstreamBodyError::WriteTimeout"><code>UpstreamBodyError::WriteTimeout</code></a>
+when the gap between two body frames exceeds <code>write_ms</code>. It is not a
+total streaming budget — a body that keeps trickling frames never
+trips it. The wrapper also reports a mid-stream abort (transport
+error or idle timeout after headers resolved) as a passive-health
+FAILURE for the picked endpoint, closing the DW-012 gap where
+mid-body deaths were invisible to ejection. Requires a body wrapper:
+the handle’s response type is <code>Response&lt;UpstreamBody&gt;</code>, not
+<code>Response&lt;Incoming&gt;</code> (documented; the wrapper is a thin frame
+passthrough when both knobs are unset).</li>
+<li><strong>Connection cap</strong>: <code>connection_cap</code> (default 256) bounds concurrent
+outbound connections to the upstream — active AND pooled-idle — via a
+semaphore permit acquired before dialing and stored inside the
+connection’s IO wrapper, so it is released exactly when the
+connection closes (permit drop). Excess connection attempts queue on
+the semaphore; they are never failed, only delayed. Because the
+permit wait has no deadline of its own, requests can queue
+indefinitely while the cap is saturated; request-level timeouts
+(DW-014) will bound that wait. The effective cap is clamped to a
+minimum of 1: validated configs always pass a cap &gt;= 1, but direct
+construction with cap == 0 would build a zero-permit semaphore whose
+dials hang silently — misuse degrades to serial connects instead.
+Documented choice:
+the cap counts connections, not in-flight requests — HTTP/1.1
+multiplexes several requests over one connection only sequentially,
+and h2 pools share one connection per origin anyway.</li>
+<li><strong>Pending cap</strong> (DW-015): <code>max_pending</code> (default 256) bounds how many
+requests may WAIT for a connection-cap slot. Over that, the connector
+fails fast with <a href="enum.UpstreamError.html#variant.Saturated" title="variant dwara_core::dataplane::upstream::UpstreamError::Saturated"><code>UpstreamError::Saturated</code></a> (classified 503 “upstream
+saturated” by the proxy) instead of queueing; a pending slot is held
+from the dial attempt until the connection-cap permit is acquired,
+then released (the request is connecting, no longer pending). The
+default bounds memory under high concurrency (#270); operators who
+need deeper queueing can set <code>max_pending</code> explicitly.</li>
+<li><strong>TLS</strong>: <code>https</code> upstreams negotiate TLS with ALPN <code>http/1.1</code>;
+<code>http2</code> upstreams negotiate TLS with ALPN <code>h2</code> and lock the client to
+HTTP/2; <code>http1</code> upstreams dial plaintext. Server certificates are
+verified against the Mozilla webpki root set by default (chosen over
+system roots for determinism in tests; system roots are a follow-up).
+Private-CA upstreams are configured per upstream via
+<code>trusted_ca_file</code> (#121): the PEM bundle REPLACES the public roots
+for that upstream, and its active https health probes verify against
+the same roots (see the handle’s <a href="struct.UpstreamHandle.html#method.tls_roots" title="method dwara_core::dataplane::upstream::UpstreamHandle::tls_roots"><code>UpstreamHandle::tls_roots</code></a>).
+Programmatic callers can still add extra roots on top of the public
+set via <a href="struct.UpstreamRegistry.html#method.with_root_certificates" title="associated function dwara_core::dataplane::upstream::UpstreamRegistry::with_root_certificates"><code>UpstreamRegistry::with_root_certificates</code></a>.</li>
+</ul>
+<p>Load balancing (DW-011): every dispatch picks its endpoint through the
+upstream’s <a href="../balance/struct.UpstreamLb.html" title="struct dwara_core::dataplane::balance::UpstreamLb"><code>crate::dataplane::balance::UpstreamLb</code></a> (smooth weighted round-robin,
+least-connections, random-2, or ketama ip-hash; slow-start ramps; hot
+endpoint-set swaps that carry per-address state). Config lifecycle:
+build a registry from a published snapshot; reloads rebuild it from the
+new snapshot while carrying balancer state (see
+<a href="struct.UpstreamRegistry.html#method.from_snapshot_with_previous" title="associated function dwara_core::dataplane::upstream::UpstreamRegistry::from_snapshot_with_previous"><code>UpstreamRegistry::from_snapshot_with_previous</code></a>), mirroring how
+<code>TlsTermination</code> is reloaded.</p>
+<p>Retries (DW-014) are driven from the proxy (which owns the request
+body replay decision); the handle exposes the resolved
+<a href="../../resilience/retries/struct.RetryParams.html" title="struct dwara_core::resilience::retries::RetryParams"><code>crate::resilience::retries::RetryParams</code></a> and the per-upstream
+<a href="../../resilience/retries/struct.RetryBudget.html" title="struct dwara_core::resilience::retries::RetryBudget"><code>crate::resilience::retries::RetryBudget</code></a> for that loop, and every <code>send</code> call is
+one ATTEMPT (fresh load-balancer pick, fresh per-attempt deadlines).</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody">Upstream<wbr>Body</a></dt><dd>The error is terminal for the stream: frames already forwarded to the
+client end abruptly (HTTP/1.1 truncation semantics); it is never
+retried (an attempt is final once its headers resolved).</dd><dt><a class="struct" href="struct.UpstreamHandle.html" title="struct dwara_core::dataplane::upstream::UpstreamHandle">Upstream<wbr>Handle</a></dt><dd>A send-capable handle to one configured upstream: a dedicated pooled
+hyper client plus observability. Cheap to share via <code>Arc</code> from the
+<a href="struct.UpstreamRegistry.html" title="struct dwara_core::dataplane::upstream::UpstreamRegistry"><code>UpstreamRegistry</code></a>.</dd><dt><a class="struct" href="struct.UpstreamRegistry.html" title="struct dwara_core::dataplane::upstream::UpstreamRegistry">Upstream<wbr>Registry</a></dt><dd>Registry of per-upstream pooled clients, built from one published
+snapshot. Rebuild (and drop the old registry) on snapshot swap; in-flight
+requests keep their old pools until their handles are dropped.</dd><dt><a class="struct" href="struct.UpstreamStats.html" title="struct dwara_core::dataplane::upstream::UpstreamStats">Upstream<wbr>Stats</a></dt><dd>Live connection counters for one upstream; observability for pooling
+behavior (used by tests and later by the admin surface).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.UpstreamBodyError.html" title="enum dwara_core::dataplane::upstream::UpstreamBodyError">Upstream<wbr>Body<wbr>Error</a></dt><dd>Error surfaced by a streamed upstream response body
+(<a href="struct.UpstreamBody.html" title="struct dwara_core::dataplane::upstream::UpstreamBody"><code>UpstreamBody</code></a>, DW-014).</dd><dt><a class="enum" href="enum.UpstreamError.html" title="enum dwara_core::dataplane::upstream::UpstreamError">Upstream<wbr>Error</a></dt><dd>Error sending a request to an upstream.</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.DEFAULT_CONNECTION_CAP.html" title="constant dwara_core::dataplane::upstream::DEFAULT_CONNECTION_CAP">DEFAULT_<wbr>CONNECTION_<wbr>CAP</a></dt><dd>Default connection cap when <code>connection_cap</code> is absent.</dd><dt><a class="constant" href="constant.DEFAULT_CONNECT_TIMEOUT_MS.html" title="constant dwara_core::dataplane::upstream::DEFAULT_CONNECT_TIMEOUT_MS">DEFAULT_<wbr>CONNECT_<wbr>TIMEOUT_<wbr>MS</a></dt><dd>Default connect timeout when <code>timeouts.connect_ms</code> is absent.</dd><dt><a class="constant" href="constant.DEFAULT_HAPPY_EYEBALLS_MS.html" title="constant dwara_core::dataplane::upstream::DEFAULT_HAPPY_EYEBALLS_MS">DEFAULT_<wbr>HAPPY_<wbr>EYEBALLS_<wbr>MS</a></dt><dd>Default happy-eyeballs inter-connection delay when
+<code>timeouts.happy_eyeballs_ms</code> is absent (the RFC 8305 recommended
+value; DW-030).</dd><dt><a class="constant" href="constant.DEFAULT_MAX_PENDING.html" title="constant dwara_core::dataplane::upstream::DEFAULT_MAX_PENDING">DEFAULT_<wbr>MAX_<wbr>PENDING</a></dt><dd>Default pending-request cap when <code>max_pending</code> is absent (#270).</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.effective_cap.html" title="fn dwara_core::dataplane::upstream::effective_cap">effective_<wbr>cap</a></dt><dd>Public for testing the connection-cap clamping contract.</dd><dt><a class="fn" href="fn.happy_dial.html" title="fn dwara_core::dataplane::upstream::happy_dial">happy_<wbr>dial</a></dt><dd>Resolve one endpoint authority and dial it with the RFC 8305 racing
+(DW-030). IP-literal authorities skip DNS entirely (the resolver’s
+short-circuit, the same path <code>getaddrinfo</code> takes); a multi-address
+resolution races per <code>delay</code>. One dial, one outcome: the caller’s
+health/breaker accounting sees exactly this Result, never the losing
+arms’ failures. Shared by the pooled connector and the active health
+probes (one dialing discipline per upstream).</dd><dt><a class="fn" href="fn.happy_dial_via.html" title="fn dwara_core::dataplane::upstream::happy_dial_via">happy_<wbr>dial_<wbr>via</a></dt><dd>The cached variant of <a href="fn.happy_dial.html" title="fn dwara_core::dataplane::upstream::happy_dial"><code>happy_dial</code></a> for the pooled connector (PERF-05,
+#170). Resolution runs through the shared <a href="../discovery/struct.DnsCache.html" title="struct dwara_core::dataplane::discovery::DnsCache"><code>DnsCache</code></a> (async hickory
+with TTL + negative caching) instead of the blocking-pool
+<code>getaddrinfo</code> of <code>tokio::net::lookup_host</code>; the RFC 8305 racing and
+NODELAY behavior are identical. IP-literal hosts skip DNS via the
+cache’s short-circuit. The active health probes keep using
+<a href="fn.happy_dial.html" title="fn dwara_core::dataplane::upstream::happy_dial"><code>happy_dial</code></a> (system resolver) — they are a background, infrequent
+path and do not share the pooled connector’s cache.</dd><dt><a class="fn" href="fn.refresh_observation_gauges.html" title="fn dwara_core::dataplane::upstream::refresh_observation_gauges">refresh_<wbr>observation_<wbr>gauges</a></dt><dd>Refresh the state-derived observation gauges (breaker state, endpoint
+health, fail-open picks) from <code>registry</code> into <code>obs</code> (DW-021).</dd></dl></section></div></main></body></html>

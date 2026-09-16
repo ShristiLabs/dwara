@@ -1,0 +1,52 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="PROXY protocol acceptance, v1 and v2 (DW-030, feature analysis 4.20)."><title>dwara_core::dataplane::proxy_proto - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-77263533.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="dwara_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.94.0 (4a4ef493e 2026-03-02)" data-channel="1.94.0" data-search-js="search-9e2438ea.js" data-stringdex-js="stringdex-b897f86f.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-7bab91a1.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-ffcac47a.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module proxy_proto</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../dwara_core/index.html">dwara_<wbr>core</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module proxy_<wbr>proto</a></h2><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In dwara_<wbr>core::<wbr>dataplane</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">dwara_core</a>::<wbr><a href="../index.html">dataplane</a></div><h1>Module <span>proxy_<wbr>proto</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/dwara_core/dataplane/proxy_proto.rs.html#1-277">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>PROXY protocol acceptance, v1 and v2 (DW-030, feature analysis 4.20).</p>
+<p>A listener configured with <code>proxy_protocol: true</code> expects a PROXY
+protocol header (HAProxy specification; v1 text or v2 binary) as the
+FIRST bytes of every connection — BEFORE the TLS handshake when the
+listener terminates TLS, because the L4 load balancer in front wraps
+the whole stream. The header’s source address then REPLACES the
+accepted socket peer for everything downstream that consumes the
+peer address: the authz IP ACL’s effective-client-IP base,
+rate-limit keying, and the <code>X-Forwarded-For</code> / <code>X-Real-IP</code> values
+stamped on the forwarded request (the one <code>peer</code> argument of
+<a href="../proxy/fn.handle.html" title="fn dwara_core::dataplane::proxy::handle"><code>crate::dataplane::proxy::handle</code></a>).</p>
+<p>Security posture (frozen):</p>
+<ul>
+<li><strong>Opt-in per listener.</strong> A listener without the flag never
+interprets first bytes as a PROXY line; there is no sniffing. The
+spoofing boundary is exactly the config: an address claim is
+honored only on listeners explicitly declared to sit behind a
+PROXY-protocol-speaking LB (the same trust model as
+<code>gateway.trusted_proxies</code> for XFF).</li>
+<li><strong>Fail closed.</strong> A malformed header (bad signature, bad lengths,
+Unix address family, datagram protocol on this stream listener,
+trailing garbage) is answered with a <code>400</code> JSON error envelope and
+the connection is closed — the bytes are NEVER handed to HTTP
+parsing (a desynced half-header must not become half a request
+line). A connection that stalls mid-header or drops is closed
+without a response (nothing parseable to answer, same as a TLS
+handshake timeout).</li>
+<li><strong>Bounded.</strong> The whole header must arrive within the caller’s
+deadline (the DW-023 slowloris header timeout — the same attack,
+one layer earlier) and within the protocol’s own size ceiling
+(107 bytes for v1, 16 + 65535 for v2). A trickle that never
+completes is cut by the deadline, not buffered forever.</li>
+<li><strong>Spec fallbacks honored.</strong> A v2 <code>LOCAL</code> command (the LB’s own
+health check, not a proxied client) and a v1 <code>UNKNOWN</code> line keep
+the REAL peer address — the specification’s fallback for
+connections whose origin the LB declines to assert.</li>
+</ul>
+<p>Parsing is delegated to the <code>ppp</code> crate (v2 TLV/bounds safety);
+this module owns the async framing read, the deadline, the caps,
+and the fail-closed policy. Passthrough listeners cannot combine
+with PROXY acceptance (validation rejects it): a passthrough
+listener splices raw bytes and never runs the HTTP pipeline that
+would consume the address.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ProxyHeader.html" title="struct dwara_core::dataplane::proxy_proto::ProxyHeader">Proxy<wbr>Header</a></dt><dd>What the listener learned from one accepted connection’s header.</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ProxyProtoError.html" title="enum dwara_core::dataplane::proxy_proto::ProxyProtoError">Proxy<wbr>Proto<wbr>Error</a></dt><dd>Why a connection was not admitted with a PROXY-protocol-derived
+address. <code>Malformed</code> is answerable (the gateway was given bytes that
+claimed to be a header and were not); the IO variants are silent
+closes.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.read_client_addr.html" title="fn dwara_core::dataplane::proxy_proto::read_client_addr">read_<wbr>client_<wbr>addr</a></dt><dd>Read one PROXY protocol header (v1 or v2) from the stream and decide
+the connection’s EFFECTIVE client address.</dd><dt><a class="fn" href="fn.reject_malformed.html" title="fn dwara_core::dataplane::proxy_proto::reject_malformed">reject_<wbr>malformed</a></dt><dd>Answer a malformed-header connection with the <code>400</code> error envelope
+and close it (the fail-closed half of the policy: never fall through
+to HTTP parsing). The envelope is the gateway’s uniform error shape,
+with a freshly generated correlation ID (no request exists yet to
+inherit one from).</dd></dl></section></div></main></body></html>

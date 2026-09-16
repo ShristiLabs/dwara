@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LoadError","PluginHealth","ValidationError"],"struct":["LoadedPlugin","PluginLifecycle"]};

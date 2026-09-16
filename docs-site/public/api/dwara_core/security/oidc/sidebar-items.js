@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OidcError"],"fn":["pkce_code_challenge","pkce_code_verifier"],"struct":["DiscoveryDocument","IntrospectionResponse","OidcClient","OidcIntrospectionCache","TokenSet"]};
