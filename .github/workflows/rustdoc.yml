@@ -1,0 +1,100 @@
+name: rustdoc
+
+# Publishes the workspace rustdoc under the docs-site at /api/
+# (https://shristilabs.github.io/dwara/api/).
+#
+# Mechanism: `cargo doc --no-deps --workspace` (public items only, no
+# --document-private-items) is copied into docs-site/public/api/ --
+# VitePress serves public/ verbatim, so the output lands in dist at the
+# site base /dwara/api/ -- the generated tree is committed to main, and
+# this workflow then builds and deploys the docs-site the same way
+# docs-site.yml does. docs-site.yml picks the generated tree up on its
+# own subsequent runs (it is committed under docs-site/), so there is
+# exactly one Pages site and no artifact fighting.
+#
+# Why this workflow deploys too (instead of only committing): pushes
+# made with the default GITHUB_TOKEN do not trigger other workflows,
+# so the generated-files commit would never start a docs-site.yml run.
+# Both workflows build the same committed main, so their deployments
+# converge.
+#
+# The generated commit only touches docs-site/public/api/** and this
+# workflow's path filters exclude it, so the push does not re-trigger
+# itself.
+#
+# rustdoc warnings: the workspace currently carries 21 pre-existing
+# rustdoc warnings (unclosed HTML tags in doc comments, links from
+# public docs to private items, unresolved intra-doc links). Do NOT add
+# RUSTDOCFLAGS with -D warnings (e.g. -Dwarnings) until those are
+# cleaned up -- this job must not fail on them. The verification gate
+# for zero-warning `cargo doc` tracks that cleanup separately.
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/rustdoc.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rustdoc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+      - name: Build rustdoc (public items, warnings not fatal)
+        run: cargo doc --no-deps --workspace
+      - name: Stage generated docs under docs-site/public/api
+        run: |
+          rm -rf docs-site/public/api
+          mkdir -p docs-site/public
+          cp -a target/doc docs-site/public/api
+          rm -f docs-site/public/api/.lock
+      - name: Commit generated rustdoc when it changed
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A docs-site/public/api
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "docs: publish generated rustdoc under docs-site/public/api"
+            git pull --rebase origin main
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # pinned: v7 @ 82076278
+        if: steps.commit.outputs.changed == 'true'
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Build docs-site with /api/
+        if: steps.commit.outputs.changed == 'true'
+        working-directory: docs-site
+        run: |
+          npm ci
+          npm run docs:build
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # pinned: v6 @ 45bfe019
+        if: steps.commit.outputs.changed == 'true'
+      - uses: actions/upload-pages-artifact@fc324d3571044276b827a68afc52ff2a11cc49c9 # pinned: v5 @ fc324d35
+        if: steps.commit.outputs.changed == 'true'
+        with:
+          path: docs-site/.vitepress/dist
+      - uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # pinned: v5 @ cd2ce8fc
+        if: steps.commit.outputs.changed == 'true'
