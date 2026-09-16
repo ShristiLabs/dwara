@@ -56,8 +56,28 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # pinned: v5 @ fbc6f399
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # pinned: stable @ 4360b525
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # pinned: v2 @ 6323deb1
+      # Workspace resolution needs the private licensing-core dep in
+      # every tier (cargo resolves optional deps even when the ent
+      # feature is off) -- same composite action ci.yml uses.
+      - name: Configure private licensing repo access
+        uses: ./.github/actions/configure-licensing-repo
+        with:
+          token: ${{ secrets.LICENSING_TOKEN }}
       - name: Build rustdoc (public items, warnings not fatal)
         run: cargo doc --no-deps --workspace
+      # The composite action above installs a global insteadOf rewrite
+      # that embeds the read-only licensing PAT into every
+      # https://github.com/ URL. Strip it (without echoing the token)
+      # so the commit/push below authenticates to this repo with the
+      # credentials actions/checkout persisted (GITHUB_TOKEN).
+      - name: Drop licensing git rewrite before pushing
+        run: |
+          git config --global --get-regexp '^url\..*\.insteadof$' | while read -r key _; do
+            case "$key" in
+              *x-access-token*) git config --global --unset-all "$key" || true ;;
+            esac
+          done
+          true
       - name: Stage generated docs under docs-site/public/api
         run: |
           rm -rf docs-site/public/api
