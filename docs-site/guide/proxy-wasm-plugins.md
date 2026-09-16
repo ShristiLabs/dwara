@@ -73,6 +73,31 @@ and a route naming the same plugin twice.
 
 Plugins hook the request lifecycle at defined phases:
 
+```mermaid
+flowchart TD
+    RR[Route resolution] --> PH1[Plugin phase\nrequest_headers]
+    PH1 --> AN[Authentication]
+    AN --> AZ[Authorization\nrate limit, quotas,\nadmission, cache lookup]
+    AZ -->|cache hit| CMP[Decoration tail\nplugin body and response\nphases skipped:\nstored bytes are post-plugin]
+    AZ -->|cache miss| PH2[Plugin phase\nrequest_body\nbuffered to limits.max_body_bytes]
+    PH2 --> ACT[Route action]
+    ACT --> UP[Upstream]
+    UP --> PH3[Plugin phase\nresponse_headers]
+    PH3 --> MK[Masking]
+    MK --> PH4[Plugin phase\nresponse_body\nskipped for SSE and\ncontent-encoded bodies]
+    PH4 --> CMP2[Compression\nthen decoration tail]
+    CMP --> CL[Client]
+    CMP2 --> CL
+    PH1 -. send_http_response .-> CL
+    PH2 -. send_http_response .-> CL
+```
+
+A short-circuit (`send_http_response`) answers the client directly —
+the upstream is never dialed. Routes without plugins skip every phase
+node: the chain is not built at all (allocation-free fast path). See
+[Architecture: request pipeline](../architecture/request-pipeline)
+for the full pipeline these hook points sit in.
+
 | Phase | Runs | Notes |
 |---|---|---|
 | `request_headers` | after route resolution, before authn | Authn sees plugin-modified headers. The map carries `:method` and `:path` (path including the query string). |

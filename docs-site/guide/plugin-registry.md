@@ -84,11 +84,26 @@ is verified digest-only (suitable for trusted registries).
 At every publish (startup and reload), each `source:` plugin runs
 through the same pipeline before the WASM load step:
 
-```text
-scheme check -> digest format check -> cache lookup
-    hit  -> verify cached digest -> verify signature -> load
-    miss -> HTTPS GET -> verify downloaded digest -> verify signature
-            -> cache atomically -> load
+```mermaid
+flowchart TD
+    S[source block\nurl, digest,\nsignature?, public_key?] --> SC{Scheme https-only\nand 64-hex digest?}
+    SC -->|no| FC[Plugin Crashed at publish\nplugin_source_failed]
+    SC -->|yes| CL{Cache lookup\ncache_dir digest.wasm}
+    CL -->|hit| VD{Cached bytes hash\nto the digest?}
+    VD -->|mismatch - tampered cache| FC
+    VD -->|ok| VS{Signature verifies?\npinned keys require one}
+    CL -->|miss| BL{60 s publish budget\nhas time left?}
+    BL -->|no| FC
+    BL -->|yes| GET[One HTTPS GET\nno redirects, 64 MiB cap\nSSRF-checked]
+    GET --> DD{Downloaded bytes hash\nto the digest?}
+    DD -->|no| FC
+    DD -->|yes| VS2{Signature verifies?\npinned keys require one}
+    VS -->|no| FC
+    VS2 -->|no| FC
+    VS -->|yes| CW[Atomic cache write\ntmp file + rename]
+    VS2 -->|yes| CW
+    CW --> LD[Load as a local wasm plugin]
+    FC --> RT[Referencing routes\n500 plugin_unavailable\nother routes unaffected]
 ```
 
 Properties operators can rely on:
@@ -206,7 +221,7 @@ A JSON array at the registry root; one object per plugin version:
 | `url` | no | string | Absolute artifact URL. Defaults to `<base>/<name>.wasm` when absent. |
 | `signature` | no | string | Ed25519 signature over the artifact bytes, hex (128 chars). Copy into the plugin's `source.signature` when pinning. |
 | `public_key` | no | string | Ed25519 public key, hex (64 chars). Copy into `source.public_key`, or pin fleet-wide via `plugin_registry.public_keys`. |
-| `compat` | no | string | Gateway version constraint. Advisory in this version: the CLI surfaces it; the gateway does not yet enforce it at load. |
+| `compat` | no | string | Gateway version constraint, e.g. `">=0.9 <1.0"`. Advisory only: neither the CLI nor the gateway reads it today. |
 
 The gateway itself never reads `manifest.json` -- operators (or CI)
 copy `digest`/`signature`/`public_key` from the manifest into their
@@ -294,6 +309,34 @@ environment variable or the `--registry` flag. The default is the
 community registry at `https://shristilabs.github.io/dwara-plugins`
 (the `shristilabs/dwara-plugins` repo served as a static site;
 `registry.dwara.dev` will CNAME there).
+
+## CLI: authoring and publishing plugins
+
+The same `dwara plugin` command covers the producer side — key
+generation, signing, and manifest entries:
+
+```sh
+# Generate an Ed25519 keypair (prints hex keys, or writes
+# plugin.pub / plugin.key with --out-dir DIR):
+dwara plugin keygen --out-dir .
+
+# Sign a built artifact (prints the hex signature for
+# source.signature / the manifest "signature" field):
+dwara plugin sign my_plugin.wasm --key plugin.key
+
+# Compute the digest, optionally sign, and print the registry
+# manifest entry; with --pr, open the registry PR via gh:
+dwara plugin publish my_plugin.wasm --name my-plugin --version 1.0.0 \
+  --key plugin.key --pr
+```
+
+The signature envelope is the same on both sides: the Ed25519
+signature is over the raw artifact bytes exactly as downloaded and
+exactly as loaded (see below). The full subcommand reference,
+including `plugin new` scaffolding, is on the
+[CLI](./cli#plugin) page; the registry repository's
+[Author CI](https://github.com/shristilabs/dwara-plugins#author-ci)
+notes describe automating the publish step on tags.
 
 ## Requirements
 

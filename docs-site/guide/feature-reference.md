@@ -158,6 +158,6 @@ status note saying exactly what is wired today.
 
 | Status | Capabilities |
 |---|---|
-| Wired end to end | OTLP export, console diagnostics, Kubernetes Gateway API, proxy-wasm host, native filter chain, CEL expressions, Cedar policies, OpenAPI validation, API aggregation, HTTP/3, gRPC-Web, protocol translation, semantic cache, nano-services, post-quantum TLS |
-| Config-accepted, runtime partially wired | L4 TCP/UDP proxying, GraphQL awareness, API lifecycle, A2A protocol, certificate pinning, SOAP translation |
-| Config-accepted, runtime stubbed | MCP gateway, service mesh, Extism PDK, signed URL auth, ACME automation |
+| Wired end to end | OTLP export, console diagnostics, Kubernetes Gateway API, proxy-wasm plugins (host + dispatch), native filter chain, HTTP/3 ingress and upstream, L4 TCP/UDP proxying, GraphQL awareness, certificate pinning, AI MCP gateway, A2A providers, semantic cache, nano-services, post-quantum TLS |
+| Compiled in, config wiring not landed | CEL expressions, Cedar policies, OPA authorization, OpenAPI response validation, API aggregation, gRPC-Web framing/transcoding, protocol translation (REST↔GraphQL, SOAP), signed-URL auth, custom filter-chain ordering |
+| Config-accepted, runtime stubbed | API lifecycle, service mesh (Enterprise), ACME automation |

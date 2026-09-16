@@ -112,33 +112,14 @@ that use them.
 ## The registry `compat` field
 
 The plugin registry manifest (see
-[Plugin registry](./plugin-registry)) will carry a `compat` object on
-each entry expressing the range of gateways an artifact is known to
-work with, so installers can refuse a gateway/plugin pairing before
-anything loads:
-
-```json
-{
-  "name": "rate-limiter",
-  "version": "1.2.0",
-  "digest": "a1b2c3d4...",
-  "compat": {
-    "abi": "proxy-wasm/http-filter@1",
-    "dwara": ">=0.4.0 <0.7.0"
-  }
-}
-```
-
-- `abi` names the ABI surface and level (today always
-  `proxy-wasm/http-filter@1` — the hostcall matrix on this contract).
-- `dwara` is a semver range of gateway versions the artifact was tested
-  against.
-
-The field is a manifest concept today: `dwara plugin search` /
-`plugin install` print what the registry provides, and the gateway
-does not yet reject an entry whose range excludes it. When the
-registry schema lands, the range will be enforced at install time and
-surfaced through the admin API — this page defines the vocabulary.
+[Plugin registry](./plugin-registry)) carries an optional `compat`
+string on each entry — a gateway version range the artifact is known
+to work with, e.g. `">=0.9 <1.0"`. It is advisory today: `dwara
+plugin search` / `plugin install` do not read it, and the gateway
+does not reject an entry whose range excludes it. Authors should set
+it to the gateway versions the artifact was tested against so it is
+ready when enforcement lands; until then, the hostcall matrix above
+is the actual compatibility contract.
 
 ## Summary
 

@@ -99,13 +99,13 @@ Plugins hook into the request lifecycle at defined phases:
 | Phase | Description |
 |---|---|
 | `request_headers` | After route resolution, before authn. |
-| `request_body` | After authn/authz/rate-limit, before upstream. |
-| `response_headers` | After upstream response headers arrive, before masking. |
+| `request_body` | After authn/authz/rate-limit, before the route action. |
+| `response_headers` | After the response arrives (any action), before masking. |
 | `response_body` | After masking, before compression. |
 
 A plugin can hook multiple phases. A native filter can short-circuit
 with a local response at any phase, exactly as a WASM plugin can via
-`proxy_send_http_response`.
+the local-response hostcall (`send_http_response` in the Rust SDK).
 
 ## Writing a native filter
 
@@ -184,7 +184,7 @@ dataplane-visible difference in attachment semantics.
 ## Runnable demo
 
 Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test
-script: `test-01-native-plugins.sh`). The default demo image builds
-without the `plugins` cargo feature, so the script documents the
-native-filter config shape and verifies the proxy path; the README
-covers prerequisites, custom builds, and teardown.
+script: `test-01-native-plugins.sh`). Because the stock gateway binary
+registers no native filters, the script documents the native-filter
+config shape and verifies the proxy path; the README covers
+prerequisites, custom embedding builds, and teardown.

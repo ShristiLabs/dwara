@@ -1,10 +1,12 @@
 # Extension traits
 
-Dwara defines five swappable subsystem seams as traits. The default
-OSS build ships a local implementation for each; the enterprise edition
-adds Redis- and Vault-backed implementations of the same traits. You
-can also write your own implementation and wire it in -- the gateway
-calls the trait, not the concrete backend.
+Dwara defines five swappable subsystem seams as traits — all five are
+live library seams in every build, with no cargo feature or license
+involved. The default OSS build ships a local implementation for
+each; the enterprise edition adds Redis- and Vault-backed
+implementations of the same traits. You can also write your own
+implementation and wire it in -- the gateway calls the trait, not the
+concrete backend.
 
 The traits are the extraction boundary for promoting a subsystem to
 its own crate later (see [Code organization](../architecture/overview)):

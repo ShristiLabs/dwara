@@ -15,6 +15,13 @@ and policies are the live dry-run mechanism). See
 [Editions: scaffolded surfaces](./editions#scaffolded-surfaces).
 :::
 
+The eight `filter_chain` stages are not the plugin phases. Plugins
+hook four points around these stages (`request_headers` after route
+resolution and before authn, `request_body` before the route action,
+`response_headers` and `response_body` around masking) and are
+unaffected by `filter_chain` configuration. See
+[Proxy-Wasm plugins](./proxy-wasm-plugins#phase-contract).
+
 ## Default phase order
 
 The gateway executes these phases in order for every request:

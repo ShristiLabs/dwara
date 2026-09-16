@@ -131,8 +131,10 @@ live path. (From a source checkout: `DWARA_CONFIG=dwara.yaml cargo run
 ## How the gateway calls your plugin
 
 The host implements the proxy-wasm HTTP filter subset and the standard
-module lifecycle. For every request on a route referencing your
-plugin, the gateway:
+module lifecycle. The four phase hook points and where they sit in
+the request pipeline are diagrammed in
+[Proxy-Wasm plugins](./proxy-wasm-plugins#phase-contract). For every
+request on a route referencing your plugin, the gateway:
 
 1. instantiates a fresh module instance (fuel and memory limits from
    the plugin's `limits` block);

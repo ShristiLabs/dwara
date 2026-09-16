@@ -35,7 +35,8 @@ flowchart TD
     WAF -->|denied| WAFX[403]
     WAF -->|ok| GQL{GraphQL checks?\ndepth / complexity /\npersisted query}
     GQL -->|denied| GQLX[400]
-    GQL -->|ok or n/a| AN[Anomaly scoring]
+    GQL -->|ok or n/a| PLGH[Plugin request_headers\nroutes with plugins only\nfail-closed 500 on trap]
+    PLGH --> AN[Anomaly scoring]
     AN --> RL[Route limits\nheader count / bytes\nbody cap]
     RL -->|over limit| EL[413 / 431]
     RL --> PF{CORS preflight?}
@@ -53,14 +54,15 @@ flowchart TD
     H -->|over cap| S[503 shed]
     H -->|permit acquired| CA[Response cache lookup]
     CA -->|hit| CAC[Return cached response\nskip upstream]
-    CA -->|miss| RV[Request body validation\nJSON Schema]
+    CA -->|miss| PLGB[Plugin request_body\nbuffered to limits.max_body_bytes\nover-cap 500 plugin_body_too_large]
+    PLGB --> RV[Request body validation\nJSON Schema]
     RV -->|invalid| RVX[400]
     RV -->|ok| DA{Route action?}
     DA -->|proxy| PXY[Phase 2: proxy]
     DA -->|redirect| RED[3xx with built Location]
     DA -->|respond| RES[Fixed status / body / headers]
     DA -->|ai| AI[AI adapter translation\n+ provider forward]
-    DA -->|nano-service| NS[WASM handler\ncompiled into the OSS build]
+    DA -->|nano-service| NS[nano_service action\nWASM handler in-gateway\nno upstream]
 ```
 
 ## Phase 2: proxy and response
@@ -105,8 +107,10 @@ flowchart TD
     RT -->|no| ADP[Adaptive / canary\noutcome recording]
     ADP --> FPR[Finish proxy response\nupgrade tunnel\npermit release]
     FPR --> RT2[Response decoration tail]
-    RT2 --> MK[1. Response field masking\nfail-closed redaction]
-    MK --> RBT2[2. Response body transforms]
+    RT2 --> PLRH[Plugin response_headers\nskipped on a cache hit]
+    PLRH --> MK[1. Response field masking\nfail-closed redaction]
+    MK --> PLRB[Plugin response_body\nskipped for SSE / encoded\nand on a cache hit]
+    PLRB --> RBT2[2. Response body transforms]
     RBT2 --> RHT2[3. Response header transforms]
     RHT2 --> RCS[4. Response cache store\nif miss or bypass]
     RCS --> CMP[5. Response compression\nnegotiated]
@@ -160,6 +164,19 @@ flowchart TD
   compression, then versioning/deprecation headers, then CORS, then
   security headers, then rate-limit headers. Each stage sees the
   output of the previous one.
+- **Plugin phases hook four fixed points**: `request_headers` right
+  after route resolution (before authn), `request_body` after the
+  cache lookup misses and before request validation, then
+  `response_headers` and `response_body` in the decoration tail
+  around masking. Plugins fail closed on their referencing routes
+  only (500 `plugin_unavailable` / `plugin_failed` /
+  `plugin_body_too_large`); a plugin short-circuit
+  (`proxy_send_local_response`) answers the client without dialing
+  the upstream; a route without plugins builds no plugin machinery at
+  all (the allocation-free fast path); and a cache hit skips the body
+  and response phases because the stored bytes are already
+  post-plugin. See
+  [Proxy-Wasm plugins](../guide/proxy-wasm-plugins).
 
 ## See also
 

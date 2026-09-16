@@ -9,9 +9,12 @@ plugin filters](./native-plugins).
 The plugin runtime is live: plugins load, run on the request path,
 hot-swap on reload, and are health-tracked in every build — there are
 no `wasm`/`plugins` cargo features. Health is observable through the
-admin API's plugin status surface (`GET /plugins`), the
-`dwara_plugin_failures_total{name,reason}` /
-`dwara_plugin_total{state}` metrics, and the load-failure log lines.
+admin API's plugin status surface (`GET /plugins`, also under
+`/v1/plugins`), the plugins section of `dwara-cli status`, the
+`dwara_plugin_failures_total{name,reason}` counter, the
+`dwara_plugin_total{state}` gauge (states `healthy`, `crashed`,
+`disabled`, `not_loaded`, `not_registered` — a closed five-value set),
+and the load-failure log lines.
 :::
 
 ## When to use this
@@ -73,13 +76,39 @@ plugin table and runner are built first, then swapped in.
 
 ## Health tracking
 
-The runtime tracks per-plugin health:
+The runtime tracks per-plugin health. Three states live in the
+lifecycle manager; the status surface reports five:
 
-| State | Description |
-| --- | --- |
-| `Healthy` | Loaded and serving normally. |
-| `Crashed { error, crash_count }` | The plugin cannot serve: its `.wasm` could not be read or compiled at publish time. `crash_count` grows across reloads of the same broken file. Routes referencing a crashed plugin fail closed with `500`. |
-| `Disabled { reason }` | The plugin was disabled through the lifecycle API. |
+| State | Where | Description |
+| --- | --- | --- |
+| `Healthy` | lifecycle | Loaded and serving normally. |
+| `Crashed { error, crash_count }` | lifecycle | The plugin cannot serve: its `.wasm` could not be read or compiled at publish time. `crash_count` grows across reloads of the same broken file. Routes referencing a crashed plugin fail closed with `500`. |
+| `Disabled { reason }` | lifecycle | The plugin was disabled through the lifecycle API. |
+| `not_loaded` | status surface | A declared plugin absent from the loaded set (for example after a failed runtime rebuild keeps the previous plugin table). |
+| `not_registered` | status surface | A `native:` filter name with no registered factory — the embedder seam was not wired for that name. |
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> Healthy: publish loads, compiles, ABI-validates
+    [*] --> NotLoaded: declared but absent from the runtime
+    [*] --> NotRegistered: native name with no factory
+    Healthy --> Crashed: publish-time failure, crash_count grows
+    Crashed --> Healthy: fixed bytes reload, checksum changes
+    Healthy --> Disabled: lifecycle disable
+    Disabled --> Healthy: re-enabled and reloaded
+    note right of Crashed
+        Every non-Healthy state fails closed:
+        referencing routes answer
+        500 plugin_unavailable from the
+        first request of the new generation
+    end note
+    note left of Healthy
+        A runtime trap answers 500
+        plugin_failed but does not
+        flip the stored state
+    end note
+```
 
 Transitions:
 
@@ -104,8 +133,11 @@ means shipping new bytes (a checksum change) and reloading. Watch
 
 Health state lives in the lifecycle manager and is served through the
 admin API's plugin status surface: `GET /plugins` returns one entry
-per declared plugin with its state, checksum, and the routes
-referencing it (see [Admin API](./admin-api)).
+per declared plugin with its kind and source, digest, state (with
+error and crash count), limits, phases, and the routes referencing it
+(see [Admin API](./admin-api)). The same enumeration feeds
+`dwara-cli status` and the `dwara_plugin_total{state}` gauge, so the
+three surfaces cannot disagree.
 
 ## Failure isolation
 

@@ -2,28 +2,35 @@
 
 Dwara can run a route handler inside the gateway process itself, as a
 [WebAssembly](https://webassembly.org/) (a portable, sandboxed bytecode
-format) module, instead of proxying to an upstream. A nano-service is a small
-`.wasm` module that receives the request, produces a response, and returns --
-no upstream hop, no separate process, no network call. The module runs in the
-gateway's WASM runtime, sandboxed, with the request handed to it and the
-response read back.
+format) module, instead of proxying to an upstream. A nano-service is a
+small `.wasm` module that receives the request, produces a response, and
+returns — no upstream hop, no separate process, no network call. The
+module runs in the gateway's Wasmtime runtime, sandboxed, with the
+request handed to it and the response read back.
+
+::: info Status
+Live in every build: the `nano_service` route action and its runtime
+compile unconditionally — there is no cargo feature to enable. It is a
+route action, not a plugin: nano-services do not hook the plugin filter
+phases (see [Proxy-Wasm plugins](./proxy-wasm-plugins)); they own the
+whole response for their route.
+:::
 
 ## When to use this
 
-Use a nano-service when a route's logic is small enough that standing up an
-upstream service is overkill -- a request validator that returns `400` on a
-bad shape, a feature-flag check that returns a canned response, a
-request-shaped echo for smoke testing, an edge-side composition that fans out
-to two other routes and merges the results. Because the module runs in
-process, latency is the cost of the WASM call alone, with no network hop. For
-logic that needs a database, a large dependency tree, or a long-running
-process, keep a real upstream -- the sandbox is not a substitute for a
-service.
+Use a nano-service when a route's logic is small enough that standing
+up an upstream service is overkill — a request validator that returns
+`400` on a bad shape, a feature-flag check that returns a canned
+response, a request-shaped echo for smoke testing. Because the module
+runs in process, latency is the cost of the WASM call alone, with no
+network hop. For logic that needs a database, a large dependency tree,
+or a long-running process, keep a real upstream — the sandbox is not a
+substitute for a service.
 
 ## Configuration
 
-Add a route with `action.type: nano_service` and point it at the `.wasm`
-module. The module is loaded at config publish and reloaded on config change.
+Add a route with `action.type: nano_service` and point it at the
+`.wasm` module:
 
 ```yaml
 routes:
@@ -33,78 +40,107 @@ routes:
     action:
       type: nano_service
       module: /etc/dwara/modules/feature-flag.wasm
-      config:
-        flag: new-ui
-        enabled: true
-        rollout_pct: 25
+      memory_limit: 1048576
+      execution_timeout_ms: 100
 ```
 
-The `config` map is passed to the module as its initialization payload -- a
-free-form JSON object the module reads at load time. Use it for per-route
-parameters the module needs (flag names, allowlists, canned response bodies)
-so the same `.wasm` can drive many routes with different config.
+| Field | Default | Description |
+|---|---|---|
+| `module` | (required) | Path to the `.wasm` module. Must exist and be readable at config publish time. |
+| `memory_limit` | `1048576` (1 MiB) | Maximum linear memory the module may allocate, in bytes. Max 64 MiB. |
+| `execution_timeout_ms` | `100` | Maximum wall-clock time for one `handle` call. Max 5000. |
+
+The module is compiled when the gateway builds the route handler for a
+config generation; a broken module is reported there, and the route
+answers `502` (`nano_service_unavailable`) rather than serving from a
+half-loaded handler.
 
 ## Writing a module
 
-A nano-service module implements the gateway's handler ABI: an `init` entry
-point that receives the `config` JSON, and a `handle` entry point that
-receives the request (method, path, headers, body) and returns a response
-(status, headers, body). The ABI is small and stable -- a module compiled
-against it keeps working across gateway versions.
+A nano-service module implements a small dedicated handler ABI — it is
+not the proxy-wasm ABI. The module exports:
 
-The module can be written in any language that compiles to WASI
-([WebAssembly System Interface](https://wasi.dev/) -- the standard WASI
-subset for sandboxed modules): Rust (with `wasm32-wasi` target), Go with
-TinyGo, AssemblyScript, or C. A typical Rust module looks like:
+| Export | Purpose |
+|---|---|
+| `memory` | The linear memory the host and module share. |
+| `alloc(size) -> ptr` | Allocate `size` bytes in linear memory; the host uses it to place the serialized request. |
+| `handle(req_ptr, req_len) -> i32` | Handle the request serialized at `[req_ptr, req_ptr+req_len)`. Returns `0` on success, non-zero on error (the route answers `502`). |
+
+The host provides four imports under the module name `dwara`:
+
+| Import | Purpose |
+|---|---|
+| `dwara.response_status(status)` | Set the HTTP response status (defaults to 200). |
+| `dwara.response_header(k_ptr, k_len, v_ptr, v_len)` | Add a response header. |
+| `dwara.response_body(ptr, len)` | Set the response body. |
+| `dwara.log(ptr, len)` | Emit a debug log line. |
+
+The request is serialized into linear memory as a length-prefixed
+binary blob (all lengths `u32` big-endian): `method`, `path`,
+`headers` (count, then key/value pairs), `body`. The module parses it,
+builds the response through the host imports, and returns `0` from
+`handle`. A minimal Rust sketch (no helper crate is required; compile
+with `--target wasm32-unknown-unknown`):
 
 ```rust
-// your module's lib.rs -- compile with: cargo build --target wasm32-wasi --release
-use dwara_nano::{init, handle, Request, Response};
-
-#[init]
-fn init(config: Config) {
-    // read config.flag, config.enabled, config.rollout_pct
+#[link(wasm_import_module = "dwara")]
+extern "C" {
+    fn response_status(status: i32);
+    fn response_body(ptr: i32, len: i32);
 }
 
-#[handle]
-fn handle(req: Request) -> Response {
-    if enabled && rollout(req) {
-        Response::ok().json(&flag_json())
-    } else {
-        Response::new(404).body("not enrolled")
+#[no_mangle]
+pub extern "C" fn alloc(size: i32) -> i32 {
+    // bump allocator over the module's static heap
+    // ...
+}
+
+#[no_mangle]
+pub extern "C" fn handle(req_ptr: i32, req_len: i32) -> i32 {
+    // parse the serialized request at req_ptr..req_ptr+req_len
+    let body = b"{\"flag\":true}";
+    unsafe {
+        response_status(200);
+        response_body(body.as_ptr() as i32, body.len() as i32);
     }
+    0
 }
 ```
 
-The module's `handle` runs synchronously per request, on the gateway's
-worker pool. The sandbox caps memory and CPU: a module that exceeds its
-memory budget or runs past its deadline is terminated and the request
-returns `503` -- the gateway never lets a nano-service hang a worker.
+Any language that can export plain WASM functions and skip runtime
+preludes works (`#![no_std]` Rust, C, AssemblyScript). A module
+importing WASI functions does not instantiate — the host provides only
+the four `dwara` imports.
 
-## Sandboxing
+## Sandboxing and failure semantics
 
-A nano-service module runs with no host capabilities by default: no network,
-no filesystem, no environment. The sandbox is the security boundary -- a
-module cannot reach the gateway's config, secrets, or other routes. If a
-module needs a host capability (a clock, a shared KV cache), it must be
-granted explicitly in the route config via a `capabilities` block; the
-gateway denies any call the module did not declare. This is the same
-[proxy-wasm](./proxy-wasm-plugins) capability model, scoped to the
-nano-service route action.
+A nano-service module has no host capabilities beyond the four imports
+above: no network, no filesystem, no environment, no access to the
+gateway's config, secrets, or other routes. The sandbox is the
+security boundary. Every failure mode fails closed:
+
+| Condition | Client sees |
+|---|---|
+| Module missing or broken at handler construction | 502 `nano_service_unavailable` |
+| `handle` returns non-zero, traps, or exhausts its fuel budget | 502 `nano_service_error` |
+| `handle` exceeds `execution_timeout_ms` | 504 `nano_service_timeout` |
+| Request body over 1 MiB (the module receives the body whole) | 413 `nano_service_body_too_large` |
+
+The `handle` call runs on a blocking-pool thread under a timeout, so a
+busy-looping module is interrupted rather than left hanging a worker.
 
 ## Observability
 
 Nano-service execution surfaces in [`/metrics`](./observability) as
-`dwara_nano_service_total{route,outcome}` with outcomes `ok`,
-`module_error`, and `sandbox_killed`, and `dwara_nano_service_duration_seconds`
-for the in-process call latency. A module that returns an invalid response
-(missing status, oversized body) is logged as `module_error` and the client
-receives `502` -- the gateway treats a broken module like a broken upstream.
+`dwara_nano_service_requests_total{route,outcome}` with outcomes
+`success`, `error`, and `timeout`, and
+`dwara_nano_service_duration_seconds{route}` for the in-process call
+latency.
 
 ## Runnable demo
 
 Run the demo stack: [`demos/08-extensibility/`](https://github.com/shristilabs/dwara/tree/main/demos/08-extensibility) in the repository (test
-script: `test-04-nano-services.sh`; nano-services are compiled into
-every build — no cargo feature is required). The script documents
-the route action and verifies the composed echo + static services;
-the README covers prerequisites, custom builds, and teardown.
+script: `test-04-nano-services.sh`). The script documents the
+`nano_service` action and verifies the composition pattern using echo
+and static upstream services as a stand-in; the README covers
+prerequisites and teardown.

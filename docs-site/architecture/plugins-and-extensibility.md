@@ -1,210 +1,182 @@
 # Plugins and extensibility architecture
 
-How Dwara's three plugin runtimes compose into a single dispatch
-chain. For configuration and the per-runtime guides, see
-[Proxy-Wasm plugins](../guide/proxy-wasm-plugins) and
-[Native plugins](../guide/native-plugins). This page covers the
-runtime architecture: the shared phase model, the dispatch chain, and
-the lifecycle of a plugin instance.
+Where Dwara accepts extension, and what is live on the request path
+versus scaffolded. Everything on this page ships in the default OSS
+build — the plugin runtime, the native filter chain, nano-services,
+and the extension traits compile unconditionally; there are no cargo
+features to enable. For task-oriented configuration, see the
+[Extensibility and plugins](../guide/extensibility-overview) guide
+section.
 
-Dwara unifies three plugin runtimes behind one dispatch model:
+Two plugin paths run on the live request path, selected per plugin
+entry in config and dispatched by one unified chain:
 
-1. **Native filters** — Rust types implementing the `NativeFilter`
-   trait, compiled into the gateway binary.
-2. **Proxy-Wasm modules** — Wasm modules compiled against the
-   Proxy-Wasm ABI, run in a Wasmtime engine with fuel, memory, and
-   epoch preemption.
-3. **Extism PDK modules** — Wasm modules compiled against the Extism
-   PDK. The trait and adapter are defined, but the runtime is stubbed
-   in this revision; see the status note below.
+1. **Proxy-Wasm plugins** — portable `.wasm` modules run in a
+   Wasmtime sandbox (fuel and memory caps) against the proxy-wasm
+   HTTP filter ABI. Community Kong and Envoy filters run unmodified.
+2. **Native plugin filters** — Rust filters compiled into the gateway
+   binary and registered by an embedding binary. No built-in native
+   filters ship with the stock gateway; registration is an embedder
+   seam (`DataPlane::native_plugin_registry()`).
 
-All three share the same phase order, the same attachment semantics,
-and the same per-request execution model. A route attaches a list of
-plugins by name; at request time Dwara builds a chain that runs each
-plugin's configured phases in deterministic order.
+An Extism PDK runtime was scaffolded as a third path once but was
+removed before it was ever wired in; Proxy-Wasm and native filters
+are the supported plugin paths.
+
+## The extensibility seams
+
+```mermaid
+flowchart TB
+    subgraph PUB ["Config publish: validate, compile, publish"]
+        REG[Registry sources\nsource.url + digest\n+ Ed25519 signature\nresolved and verified] --> DEF[Plugin entries\nwasm / native + phases + limits]
+        SECRETS[SecretSource\nresolves references\nat compile time]
+    end
+
+    subgraph REQ [Request path]
+        RR[Route resolution]
+        subgraph CHAIN [Unified plugin chain - per route]
+            PH1[request_headers phase\nbefore authn] --> AZ[Authn, authz,\nrate limit, admission]
+            AZ --> PH2[request_body phase\nbuffered to route cap]
+            PH2 --> ACT[Route action]
+            ACT --> PH3[response_headers phase\nbefore masking]
+            PH3 --> PH4[response_body phase\nafter masking]
+        end
+        RR --> PH1
+        ACT --> NS[nano_service action\nWASM handler\nno upstream]
+        ACT --> UP[proxy action\nupstream call]
+        UP --> PH3
+    end
+
+    subgraph SYS [Subsystem seams - five extension traits]
+        RL[RateLimiter\nrate-limit decisions]
+        CS[ConfigSource\nconfig generations]
+        CA[CacheStore\nresponse cache]
+        AN[AnalyticsSink\nrequest records]
+    end
+
+    subgraph SCAF ["Scaffolded: compiled, not dispatched"]
+        CEL[CEL conditions]
+        CEDAR[Cedar / OPA authz blocks]
+        AGG[API aggregation]
+        TR[Route + grpc_web translation]
+    end
+
+    DEF -. loads .-> PH1
+    RL -. consulted at .-> AZ
+    CA -. consulted at .-> AZ
+    REQ -. request records feed .-> AN
+    CS -. feeds .-> PUB
+```
+
+Dashed nodes and edges mark what is scaffolded: CEL condition blocks,
+Cedar and OPA authorization blocks, API aggregation, and route plus
+gRPC-Web translation compile and validate in every build but are not
+dispatched on the live request path yet.
 
 ## The shared phase model
 
-Every plugin runtime maps to the same four phases, run in this order:
+Both plugin paths hook the same four phases, in pipeline order:
 
-```mermaid
-sequenceDiagram
-    participant Req as Request path
-    participant Chain as PluginChain
-    participant P as Plugin instance
-    Req->>Chain: request_headers
-    Chain->>P: on_request_headers(headers)
-    P-->>Chain: Continue / LocalResponse / Error
-    Req->>Chain: request_body
-    Chain->>P: on_request_body(body)
-    P-->>Chain: Continue / LocalResponse / Error
-    Note over Req,P: Upstream call happens here
-    Req->>Chain: response_headers
-    Chain->>P: on_response_headers(headers)
-    P-->>Chain: Continue / LocalResponse / Error
-    Req->>Chain: response_body
-    Chain->>P: on_response_body(body)
-    P-->>Chain: Continue / LocalResponse / Error
-    Chain->>P: on_done (cleanup)
-```
+| Phase | Runs | Notes |
+|---|---|---|
+| `request_headers` | after route resolution, before authn | Authn sees plugin-modified headers. |
+| `request_body` | after authz and rate limiting, before the route action | Buffered up to the route's `limits.max_body_bytes` (default 1 MiB); over-cap answers 500 `plugin_body_too_large`. A cache hit skips the phase. |
+| `response_headers` | after the response arrives (any action), before masking | A cache hit skips the phase (stored bytes are post-plugin). |
+| `response_body` | after masking, before compression | Skipped and logged for streaming and content-encoded bodies. A cache hit skips the phase. |
 
-A plugin may implement any subset of the four phases. The chain only
-calls a plugin for a phase it declared in its config.
+A route references plugins by name from its `plugins` list; the chain
+runs the entries in list order, phase by phase. Duplicate names in a
+route's list are a config validation error. A route with no plugins
+builds nothing — the request path is allocation-free and
+byte-identical to a no-plugin gateway (the fast path).
+
+See [Request pipeline](./request-pipeline) for the four hook points in
+the full pipeline, and [Proxy-Wasm plugins](../guide/proxy-wasm-plugins)
+for the phase contract in depth.
 
 ### Outcome semantics
 
-Each phase call returns one of:
+A phase callback either continues the request or answers it:
 
-| Outcome | Meaning |
-|---|---|
-| `Continue` | Proceed to the next plugin / next phase. |
-| `LocalResponse` | Short-circuit: synthesize a response, skip remaining plugins and the upstream call. |
-| `Error` | Treat as a plugin failure; recorded against plugin health. The request continues unless the plugin is configured `fail_closed`. |
+- **Continue** — proceed to the next plugin or the next pipeline
+  stage.
+- **Local response** — the plugin decides the request locally
+  (`proxy_send_local_response` for proxy-wasm, `LocalResponse` for a
+  native filter). The gateway returns the plugin's status, headers,
+  and body verbatim and never dials the upstream.
 
-The chain short-circuits on `LocalResponse` or `Error` within a phase.
-A `LocalResponse` from `request_headers` or `request_body` skips the
-upstream call entirely.
+There is no open-fallback mode: a plugin that cannot run, traps, or
+exceeds a limit fails closed on the referencing route with a 500
+(`plugin_unavailable` / `plugin_failed` / `plugin_body_too_large`).
+Every failure increments `dwara_plugin_failures_total{name,reason}`.
+Other routes are unaffected.
 
-## The dispatch chain
-
-`PluginChain` is built per request from the route's plugin list:
-
-```mermaid
-flowchart TD
-    A[Route resolves\nwith plugin list] --> B[PluginChain::new]
-    B --> C[For each phase in\nrequest_headers, request_body,\nresponse_headers, response_body]
-    C --> D[For each plugin in declaration order]
-    D --> E{Plugin config}
-    E -->|native| F[ChainEntry::Native\nregistry.create]
-    E -->|wasm| G[ChainEntry::Wasm\nWasmDispatch adapter]
-    E -->|extism| H[ChainEntry::Extism\nExtismDispatch adapter]
-    F --> I[Append to phase list]
-    G --> I
-    H --> I
-    I --> J{More plugins?}
-    J -->|yes| D
-    J -->|no| K{More phases?}
-    K -->|yes| C
-    K -->|no| L[Chain ready\nfor this request]
-```
-
-The chain is a flat per-phase list. Within a phase, plugins run in
-declaration order. Phase order is fixed and deterministic — a plugin
-cannot run its `response_headers` before another plugin's
-`request_body`.
-
-## The three runtimes
-
-### Native filters
-
-A native filter is a Rust type implementing `NativeFilter`:
-
-```rust
-pub trait NativeFilter: Send + Sync {
-    fn on_request_headers(&mut self, headers: Vec<(String, String)>) -> FilterOutcome { ... }
-    fn on_request_body(&mut self, body: Vec<u8>) -> FilterOutcome { ... }
-    fn on_response_headers(&mut self, headers: Vec<(String, String)>) -> FilterOutcome { ... }
-    fn on_response_body(&mut self, body: Vec<u8>) -> FilterOutcome { ... }
-}
-```
-
-The `NativeRegistry` constructs filter instances from config. Native
-filters have no isolation boundary — they run in the gateway process
-with full performance and full access to the request. They are the
-right choice for built-in filters shipped with Dwara and for
-enterprise extensions compiled into the binary.
-
-### Proxy-Wasm modules
-
-A Proxy-Wasm module is a Wasm module compiled against the Proxy-Wasm
-ABI. Dwara runs it in a Wasmtime engine with:
-
-- **Fuel** — a per-call instruction budget; a module that exceeds it
-  is preempted.
-- **Memory** — a per-instance memory cap.
-- **Epoch** — a cooperative preemption deadline.
-
-The `WasmChainAdapter` implements `WasmDispatch` by driving the
-Wasmtime instance through the four phases and translating
-`wasm::runner::PhaseOutcome` to `plugins::ChainOutcome`. A
-`LocalResponse` from the module becomes a `plugins::LocalResponse`
-that short-circuits the chain.
-
-See [Proxy-Wasm plugins](../guide/proxy-wasm-plugins) for module
-authoring and [Plugin SDK](../guide/plugin-sdk) for the host API.
-
-### Extism PDK modules
-
-The `ExtismDispatch` trait mirrors `WasmDispatch`. The
-`ExtismChainAdapter` drives `ExtismInstance`s that implement
-`NativeFilter`-style phase methods.
-
-**Status:** The Extism runtime is stubbed in this revision. The
-`extism` crate is not a dependency; `ExtismInstance` phase methods are
-no-ops returning `FilterOutcome::Continue`. The trait, adapter, and
-config schema are in place for a future dependency addition subject
-to license review. The Extism PDK scaffold was removed from the
-codebase before it was ever wired in (issue #259); Extism may be
-re-introduced in a future milestone.
-
-## Plugin lifecycle
-
-A plugin instance goes through these stages:
+## Plugin lifecycle and health
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Loaded: config parsed
-    Loaded --> Compiled: validate + compile\n(Wasm: module compiled)
-    Compiled --> HotSwap: new config generation\natomic swap
-    HotSwap --> Compiled
-    Compiled --> Instantiated: per-request\nnew instance
-    Instantiated --> Executing: phase call
-    Executing --> Instantiated: phase done
-    Executing --> Failed: Error outcome\nor preemption
-    Instantiated --> Done: request complete\non_done cleanup
-    Done --> [*]
-    Failed --> [*]: recorded against\nplugin health
+    direction LR
+    [*] --> Healthy: publish loads and compiles the .wasm
+    Healthy --> Crashed: publish-time failure, crash_count grows
+    Crashed --> Healthy: fixed bytes reload, checksum changes
+    Healthy --> Disabled: lifecycle disable
+    Disabled --> Healthy: re-enabled and reloaded
+    Crashed --> Crashed: still-broken file re-published
+    note right of Crashed
+        Referencing routes answer
+        500 plugin_unavailable
+        from the first request
+    end note
+    note left of Healthy
+        Runtime traps answer 500
+        plugin_failed but do not
+        flip the stored state
+    end note
 ```
 
-| Stage | What happens |
-|---|---|
-| **Load** | Plugin config is parsed and validated at config compile time. |
-| **Compile** | Native filters are constructed; Wasm modules are compiled to Wasmtime. |
-| **Hot-swap** | On config reload, a new compiled instance atomically replaces the old via `ArcSwap`. In-flight requests finish on the old instance. |
-| **Instantiate** | A new per-request instance is created (Wasm: new Wasmtime instance; native: fresh filter state). |
-| **Execute** | Phase methods are called in chain order. |
-| **on_done** | After the response is sent, the instance is cleaned up (Wasm: instance dropped; native: filter dropped). |
+The status surface additionally reports two dispatch-time states for
+declared plugins that never reached the runtime: `not_loaded` (a
+declared plugin absent from the loaded set) and `not_registered` (a
+native filter name with no registered factory). Both fail closed the
+same way. All five states surface in `dwara_plugin_total{state}`
+(healthy / crashed / disabled / not_loaded / not_registered), in the
+admin API's `GET /plugins`, and in the CLI status section.
 
-### Failure isolation
+Hot swap is checksum-keyed: a reload that leaves a plugin's `.wasm`
+bytes and config unchanged reuses the loaded module; changed bytes
+replace it and reset health to Healthy. A plugin definition change
+also bumps the response-cache epoch of every route referencing the
+plugin, so cached pre-change responses are never replayed against the
+new plugin. Registry `source:` plugins re-resolve and re-verify their
+digest (and signature, when configured) at every publish, cache hit
+included — see [Plugin registry](../guide/plugin-registry).
 
-A plugin failure does not crash the gateway:
+## Nano-services and extension traits
 
-- A Wasm preemption (fuel/memory/epoch) terminates the instance, not
-  the request. The outcome is recorded as `Error` and the request
-  continues unless the plugin is `fail_closed`.
-- A native filter panic is caught at the chain boundary; the outcome
-  is `Error`.
-- Plugin health is tracked: repeated failures can disable a plugin
-  for a route without affecting other routes.
-
-## Status note
-
-The plugin chain (`PluginChain`, `WasmDispatch`, `ExtismDispatch`)
-and the per-runtime adapters are fully defined and compile under
-their capabilities. In this revision the main dataplane request path
-does not invoke the chain directly; the chain is reached through
-compiled into the OSS build construction. The phase model, outcome semantics, and
-lifecycle described here are the contract the chain implements and
-the contract future wiring will satisfy.
+- **Nano-services** are not filters: a route action with `type:
+  nano_service` whose WASM module generates the whole response with
+  no upstream. They use a small dedicated ABI (not proxy-wasm) and
+  run in the same Wasmtime sandbox family. See
+  [Nano-services](../guide/nano-services).
+- **Extension traits** replace whole subsystems rather than shape
+  individual requests: RateLimiter, ConfigSource, CacheStore,
+  AnalyticsSink, SecretSource. The default build ships a local
+  implementation of each; the enterprise edition adds Redis- and
+  Vault-backed implementations of the same traits. See
+  [Extension traits](../guide/extension-traits) and
+  [Config, state, and extensions](./config-and-state).
 
 ## See also
 
-- [Proxy-Wasm plugins](../guide/proxy-wasm-plugins) — module authoring
-  and configuration.
-- [Native plugins](../guide/native-plugins) — built-in and compiled-in
-  filters.
-- [Plugin lifecycle](../guide/plugin-lifecycle) — load, compile,
-  hot-swap, health.
-- [Plugin SDK](../guide/plugin-sdk) — the host API surface.
-- [Config, state, and extensions](./config-and-state) — how plugin
-  config is compiled and hot-swapped.
+- [Proxy-Wasm plugins](../guide/proxy-wasm-plugins) — configuration
+  and the phase contract.
+- [Native plugins](../guide/native-plugins) — the compiled-in filter
+  path and the registration seam.
+- [Plugin lifecycle](../guide/plugin-lifecycle) — load, hot-swap,
+  health states, failure isolation.
+- [Plugin SDK](../guide/plugin-sdk) — the developer workflow and the
+  hostcall support matrix.
+- [Plugin registry](../guide/plugin-registry) — verified remote
+  sources, the cache layout, and the registry spec.
+- [Request pipeline](./request-pipeline) — where the four phases sit
+  in the full request path.

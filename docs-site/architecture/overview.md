@@ -50,7 +50,7 @@ flowchart LR
 |---|---|---|
 | `dwara` | The gateway binary | Listeners, dataplane, snapshot, admin listener in one process |
 | Listeners | Connection acceptors | TLS terminate (per-SNI certificates), SNI passthrough splice, or L4 TCP/UDP splice; PROXY protocol v1/v2 optional |
-| Dataplane | The proxy engine | Route resolution, policy chain, streaming proxy — buffers nothing by default |
+| Dataplane | The proxy engine | Route resolution, policy chain, plugin phases, streaming proxy — buffers nothing by default |
 | Snapshot | Immutable config state | Routes, upstream pools, TLS material, and auth state swap atomically behind an `ArcSwap` |
 | Admin listener | mTLS-only management surface | Optional; `GET`/`PATCH /config`, `/health`, `/stats` |
 | SQLite state store | Durable identity state | Optional; stored consumers, credentials, quota counters |
@@ -99,12 +99,14 @@ the admin API, or the controller's stream.
 
 ### Compile-time capabilities
 
-Both editions compile every dataplane capability into the default build
-(default OFF) so the base binary stays small. These are OSS — no
-license involved. See the
-[feature reference](../guide/feature-reference) for the complete list
-of all 29 flags with build commands, dependency chains, and maturity
-status.
+Every dataplane capability — the proxy-wasm plugin host, the native
+filter chain, nano-services, CEL expressions, protocol translation,
+the AI gateway — compiles into the default OSS build; there are no
+optional capabilities to enable. The only compile-time switch beyond
+that is the `ent` cargo feature, which adds the enterprise modules
+(and requires a license to activate them). See the
+[feature reference](../guide/feature-reference) for the complete
+edition-by-edition list with build commands and maturity status.
 
 ## Architecture in detail
 
@@ -137,9 +139,10 @@ each area in depth:
   translation model, alias resolution, and the policy-scoped
   governance, guardrails, and budgets.
 - **[Plugins and extensibility](./plugins-and-extensibility)** — the
-  shared phase model, the dispatch chain, and the lifecycle of a
-  plugin instance across the three runtimes (native, Proxy-Wasm,
-  Extism).
+  two live plugin paths (Proxy-Wasm modules and native filters) on
+  one dispatch chain, the plugin lifecycle and health states,
+  nano-services, the five extension traits, and what is still
+  scaffolded.
 - **[Observability](./observability)** — the request ID, access log,
   metric families, trace spans, and how they correlate across the
   request path.
@@ -157,5 +160,5 @@ each area in depth:
 - [Operations](../guide/operations) — reload, shutdown, health,
   hardening.
 - [Observability](../guide/observability) — logs, metrics, tracing.
-- [Feature reference](../guide/feature-reference) — all 29 feature
-  flags with build commands and maturity status.
+- [Feature reference](../guide/feature-reference) — what each edition
+  includes, with build commands and maturity status.
