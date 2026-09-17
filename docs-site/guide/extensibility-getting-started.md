@@ -32,6 +32,65 @@ features to enable. (A fifth surface — config-file native filters
 loadable into the stock binary — does not exist today: native filter
 registration is an embedder seam.)
 
+## Where each option sits in the request pipeline
+
+Filter-type extensions (proxy-wasm and native) attach at four phase
+points around the built-in stages; a nano-service replaces the route
+action itself; extension traits and registry sources sit outside the
+request path entirely:
+
+```mermaid
+flowchart LR
+    CL[Client] --> LN[Listener]
+    LN --> RR[Route resolution]
+    RR --> PH1["Plugin phase: request_headers<br/>proxy-wasm + native filters"]
+    PH1 --> AZ[Authn, authz,<br/>rate limit, admission]
+    AZ --> PH2["Plugin phase: request_body<br/>buffered to limits.max_body_bytes"]
+    PH2 --> ACT{Route action}
+    ACT -->|proxy| UP[Upstream]
+    ACT -->|nano_service| NS[WASM handler<br/>no upstream]
+    UP --> PH3["Plugin phase: response_headers"]
+    NS --> PH3
+    PH3 --> MK[Masking]
+    MK --> PH4["Plugin phase: response_body<br/>skipped for SSE and<br/>content-encoded bodies"]
+    PH4 --> CP[Compression]
+    CP --> CL2[Client]
+    PH1 -. send_http_response .-> CL2
+    PH2 -. send_http_response .-> CL2
+```
+
+Two things the diagram does not draw, both deliberate:
+
+- **Fast path**: a route with no plugins skips every phase node —
+  the chain is not built at all. Plugin work is opt-in per route, so
+  unplugged traffic never pays for the machinery.
+- **Fail closed**: a plugin that cannot load or run makes its
+  referencing routes answer `500 plugin_unavailable` /
+  `plugin_failed` — a broken extension fails loudly, never silently
+  disappears.
+
+The compact map of every surface to its position:
+
+| Surface | Where it lives |
+|---|---|
+| Proxy-wasm, `request_headers` phase | After route resolution, before authn — authn sees plugin-modified headers; `:path`/`:method`/`:authority` writes apply to the forwarded request |
+| Proxy-wasm, `request_body` phase | After authn/authz/rate-limit, before the route action — body buffered to the route's `limits.max_body_bytes` (default 1 MiB) |
+| Proxy-wasm, `response_headers` phase | After the response arrives (any action), before masking |
+| Proxy-wasm, `response_body` phase | After masking, before compression — buffered; skipped and logged for streaming (`text/event-stream`) and content-encoded bodies |
+| Native plugin filters | The same four phase points — one unified chain with proxy-wasm, same order, at native speed |
+| Nano-services | The route action itself — the module generates the whole response, no upstream |
+| Extension trait: `RateLimiter` | Behind the rate-limit stage — consulted for rate-limit decisions |
+| Extension trait: `ConfigSource` | Publish time — supplies config generations, never per request |
+| Extension trait: `CacheStore` | Behind the response-cache lookup and decoration tail |
+| Extension trait: `AnalyticsSink` | Fire-and-forget after request completion — never on the request path |
+| Extension trait: `SecretSource` | Compile time — resolves secret references before anything serves |
+| Plugin registry sources | Publish time — `source.url` + digest (+ signature) resolved and verified on every publish |
+
+See [Proxy-Wasm plugins](./proxy-wasm-plugins) for the phase
+contract in detail and [Architecture: plugins and
+extensibility](../architecture/plugins-and-extensibility) for the
+seam map across the whole system.
+
 ## Picking an option
 
 ```mermaid
@@ -149,6 +208,8 @@ else keeps serving.
 
 ## Where to go next
 
+- [Use cases and recipes](./use-cases/) — seven complete, runnable
+  recipes mapping real problems to these surfaces
 - [Plugin SDK](./plugin-sdk) — the full API: hostcall support matrix,
   phases, limits, short-circuiting, troubleshooting
 - [Plugin testing](./plugin-testing) — unit, integration, and

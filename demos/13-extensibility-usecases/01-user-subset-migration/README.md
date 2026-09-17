@@ -1,8 +1,8 @@
 # Demo 01: user-subset migration to a new API version
 
-The flagship recipe from
-[Extension use cases and recipes](../../../docs-site/guide/extensibility-use-cases.md),
-use case 1, Option A (entitlement-snapshot plugin) -- run live.
+The flagship recipe from the docs-site guide
+[user-subset migration to a new API version](../../../docs-site/guide/use-cases/user-subset-migration.md),
+Option A (entitlement-snapshot plugin) -- run live.
 
 An API ships `/v1/user`; enhancements land as `/v2/user`. Only users
 on the entitlement allow-list (owned by a separate microservice)

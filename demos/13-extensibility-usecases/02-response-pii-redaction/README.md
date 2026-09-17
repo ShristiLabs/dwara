@@ -1,7 +1,7 @@
 # Demo 02: response PII redaction at the edge
 
 The
-[response-PII-redaction recipe](../../../docs-site/guide/extensibility-use-cases.md):
+[response-PII-redaction recipe](../../../docs-site/guide/use-cases/response-pii-redaction.md):
 an upstream leaks card numbers into JSON bodies; compliance wants them
 masked before clients see them. The demo builds the SHIPPED
 [`response-body-redact`](../../../../plugins/examples/response-body-redact)

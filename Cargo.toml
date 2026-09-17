@@ -22,7 +22,7 @@ members = [
 # workspace members (a wasm cdylib has no host artifact and pulling
 # them in would put the proxy-wasm examples on every `cargo
 # build --workspace`). Built/tested by plugins/examples/run-all.sh.
-# Extension use-case demos (docs-site/guide/extensibility-use-cases):
+# Extension use-case demos (docs-site/guide/use-cases/):
 # 01/05 build SDK-style plugin cdylibs, 04 a no_std nano-service
 # module, and 06 an embedding binary with a dwara-core path dep.
 # Demo artifacts built by their test scripts, never by `cargo

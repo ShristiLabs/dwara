@@ -1,7 +1,7 @@
 # Demo 06: embedding dwara-core with a custom AnalyticsSink
 
 The
-[your-own-backends recipe](../../../docs-site/guide/extensibility-use-cases.md):
+[custom-backends recipe](../../../docs-site/guide/use-cases/custom-backends-traits.md):
 when decisions or state must live in YOUR infrastructure, you embed
 dwara-core in a binary you own and register extension-trait
 implementations at startup. `AnalyticsSink` is the easiest seam, so

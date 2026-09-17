@@ -1,7 +1,7 @@
 # Demo 07: Per-request external decisions (entitlement with a TTL cache)
 
 Recipe 7 from the docs-site guide
-[Extension use cases and recipes](../../docs-site/guide/extensibility-use-cases.md):
+[per-request external decisions](../../../docs-site/guide/use-cases/per-request-external-decisions.md):
 the verdict genuinely must be computed per request by an external
 service — entitlement checks, experiment bucketing, fraud scores. A
 proxy-wasm plugin asks the decision service over `proxy_http_call`,

@@ -32,6 +32,9 @@ flowchart LR
 
 ## In this section
 
+- [Use cases and recipes](./use-cases/) - seven complete recipes
+  mapping real problems to the right surface, each with a runnable
+  demo.
 - [Proxy-Wasm plugins](./proxy-wasm-plugins) - the proxy-wasm host:
   community Kong and Envoy filters run unmodified inside Dwara.
 - [Native plugin filters](./native-plugins) - a Rust filter trait

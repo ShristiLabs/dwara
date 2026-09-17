@@ -357,9 +357,47 @@ export default withMermaid(
               link: "/guide/extensibility-overview",
               collapsed: true,
               items: [
-                { text: "Getting started", link: "/guide/extensibility-getting-started" },
-                { text: "Use cases and recipes", link: "/guide/extensibility-use-cases" },
                 { text: "Overview", link: "/guide/extensibility-overview" },
+                {
+                  text: "Getting started",
+                  link: "/guide/extensibility-getting-started",
+                },
+                {
+                  text: "Use cases and recipes",
+                  link: "/guide/use-cases/",
+                  collapsed: true,
+                  items: [
+                    { text: "Overview", link: "/guide/use-cases/" },
+                    {
+                      text: "User-subset API migration",
+                      link: "/guide/use-cases/user-subset-migration",
+                    },
+                    {
+                      text: "Response PII redaction",
+                      link: "/guide/use-cases/response-pii-redaction",
+                    },
+                    {
+                      text: "Custom request authentication",
+                      link: "/guide/use-cases/custom-request-auth",
+                    },
+                    {
+                      text: "Zero-upstream feature flags",
+                      link: "/guide/use-cases/zero-upstream-feature-flags",
+                    },
+                    {
+                      text: "Tenant-aware routing",
+                      link: "/guide/use-cases/tenant-aware-routing",
+                    },
+                    {
+                      text: "Custom backends (extension traits)",
+                      link: "/guide/use-cases/custom-backends-traits",
+                    },
+                    {
+                      text: "Per-request external decisions",
+                      link: "/guide/use-cases/per-request-external-decisions",
+                    },
+                  ],
+                },
                 {
                   text: "Proxy-Wasm plugins",
                   link: "/guide/proxy-wasm-plugins",

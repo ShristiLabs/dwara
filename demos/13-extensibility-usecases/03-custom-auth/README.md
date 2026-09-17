@@ -1,7 +1,7 @@
 # Demo 03: custom request authentication
 
 The
-[custom-auth recipe](../../../docs-site/guide/extensibility-use-cases.md):
+[custom-auth recipe](../../../docs-site/guide/use-cases/custom-request-auth.md):
 a proprietary token scheme (not JWT, not API keys) must be verified
 per request. The demo builds the SHIPPED
 [`static-auth`](../../../../plugins/examples/static-auth)

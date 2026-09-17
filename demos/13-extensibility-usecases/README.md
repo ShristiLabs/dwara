@@ -1,7 +1,7 @@
 # Category 13: Extension use cases (runnable recipes)
 
 One runnable demo per recipe from the docs-site guide
-[Extension use cases and recipes](../../docs-site/guide/extensibility-use-cases.md).
+[Extension use cases and recipes](../../docs-site/guide/use-cases/index.md).
 Where the other demo categories exercise shipped features end to end,
 this category proves the RECIPES -- the documented combinations that
 map a real problem to the right extension surface -- exactly as the

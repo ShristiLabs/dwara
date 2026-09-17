@@ -1,7 +1,7 @@
 # Demo 05: tenant-aware routing and tagging
 
 The
-[tenant-aware-routing recipe](../../../docs-site/guide/extensibility-use-cases.md):
+[tenant-aware-routing recipe](../../../docs-site/guide/use-cases/tenant-aware-routing.md):
 route/tag requests by tenant beyond what static match criteria
 express. Tenant identity arrives in a custom header grammar
 (`x-org-domain: acme.com` -> tenant `acme`, the first DNS label); a

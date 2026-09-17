@@ -1,7 +1,7 @@
 # Demo 04: zero-upstream endpoints (feature flags)
 
 The
-[zero-upstream-endpoints recipe](../../../docs-site/guide/extensibility-use-cases.md):
+[zero-upstream-feature-flags recipe](../../../docs-site/guide/use-cases/zero-upstream-feature-flags.md):
 a feature-flag endpoint whose logic is too dynamic for a `respond`
 action and far too small for a service. The route's action IS a WASM
 module; no upstream hop.
