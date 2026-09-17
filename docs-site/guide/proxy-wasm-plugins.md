@@ -9,9 +9,9 @@ express.
 Plugins run in a sandboxed WebAssembly runtime (wasmtime) with
 configurable resource limits (fuel, memory), fail closed when they
 cannot run, and load in every build -- there is no feature flag to
-enable. Writing plugins is covered by the
-[Plugin SDK](./plugin-sdk); this page is the configuration and
-operations reference.
+enable. This page is the configuration and operations reference.
+Full signatures: [Hostcall API reference](./proxy-wasm-hostcalls).
+Building guide: [Plugin SDK](./plugin-sdk).
 
 ## When to use this
 

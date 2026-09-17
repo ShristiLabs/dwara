@@ -222,5 +222,8 @@ else keeps serving.
   semver guidance
 - [Native plugin filters](./native-plugins) / [Nano-services](./nano-services)
   / [Extension traits](./extension-traits) — the other surfaces
-- [Extension API reference](../reference/extension-api) — full
-  signatures for every extension surface
+- Signature references, one per surface:
+  [Hostcall API reference](./proxy-wasm-hostcalls),
+  [Native filter API](./native-filter-api),
+  [Nano-service ABI](./nano-service-abi),
+  [Extension trait API](./extension-trait-api)

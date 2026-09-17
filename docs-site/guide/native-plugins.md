@@ -9,7 +9,9 @@ dataplane-visible difference in attachment semantics:
   [Proxy-Wasm plugins](./proxy-wasm-plugins)).
 - **Native plugin filters** -- Rust filters compiled into the gateway
   binary at build time and linked in directly. The
-  convenience/performance path.
+  convenience/performance path. Full signatures:
+  [Native filter API](./native-filter-api). Building guide:
+  [Building a native filter](./building-native-filter).
 
 A native filter and a WASM plugin attach identically from config's
 point of view: both are entries in the top-level `plugins` list,
@@ -110,7 +112,10 @@ the local-response hostcall (`send_http_response` in the Rust SDK).
 ## Writing a native filter
 
 A native filter is a Rust type implementing the `NativeFilter` trait.
-Each method receives the current headers/body by value and returns a
+The complete walkthrough -- embedding crate setup, a worked filter,
+registration wiring, rollout -- is
+[Building a native filter](./building-native-filter). In brief: each
+method receives the current headers/body by value and returns a
 `FilterOutcome`:
 
 ```rust
@@ -182,7 +187,7 @@ Both share the same phase slot on a route, selected by config, with no
 dataplane-visible difference in attachment semantics.
 
 Full signatures (`NativeFilter`, `FilterOutcome`, the registry):
-[Extension API reference](../reference/extension-api).
+[Native filter API](./native-filter-api).
 
 ## Runnable demo
 

@@ -16,6 +16,10 @@ phases (see [Proxy-Wasm plugins](./proxy-wasm-plugins)); they own the
 whole response for their route.
 :::
 
+Full ABI signatures and the request wire format:
+[Nano-service ABI](./nano-service-abi). Building guide:
+[Building a nano-service](./building-nano-service).
+
 ## When to use this
 
 Use a nano-service when a route's logic is small enough that standing
@@ -58,7 +62,10 @@ half-loaded handler.
 ## Writing a module
 
 A nano-service module implements a small dedicated handler ABI — it is
-not the proxy-wasm ABI. The module exports:
+not the proxy-wasm ABI. The complete from-scratch walkthrough (a full
+`no_std` module, its `Cargo.toml`, the build, and the config wiring)
+is [Building a nano-service](./building-nano-service). The module
+exports:
 
 | Export | Purpose |
 |---|---|

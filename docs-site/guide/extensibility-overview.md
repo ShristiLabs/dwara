@@ -36,13 +36,19 @@ flowchart LR
   mapping real problems to the right surface, each with a runnable
   demo.
 - [Proxy-Wasm plugins](./proxy-wasm-plugins) - the proxy-wasm host:
-  community Kong and Envoy filters run unmodified inside Dwara.
+  community Kong and Envoy filters run unmodified inside Dwara. Its
+  group also carries the [Plugin SDK](./plugin-sdk) building guide
+  and the [Hostcall API reference](./proxy-wasm-hostcalls).
 - [Native plugin filters](./native-plugins) - a Rust filter trait
   compiled into the binary, running alongside proxy-wasm in the same
-  dispatch chain.
+  dispatch chain. Its group also carries
+  [Building a native filter](./building-native-filter) and the
+  [Native filter API](./native-filter-api).
 - [Nano-services (WASM handlers)](./nano-services) - a route action
   that runs a WASM module to generate the response directly, no
-  upstream needed.
+  upstream needed. Its group also carries
+  [Building a nano-service](./building-nano-service) and the
+  [Nano-service ABI](./nano-service-abi).
 - [Plugin lifecycle](./plugin-lifecycle) - how plugins are loaded,
   configured, hot-swapped, and health-tracked across config
   generations.
@@ -52,14 +58,14 @@ flowchart LR
 - [Plugin compatibility](./plugin-compat) - the compatibility
   contract between gateway and plugin builds: ABI level, wasm
   targets, breaking-change policy.
-- [Plugin SDK](./plugin-sdk) - the developer workflow for writing
-  proxy-wasm plugins: scaffold, build, the hostcall support matrix.
 - [Plugin testing](./plugin-testing) - unit, integration, and replay
   regression testing for plugins.
 - [Extension traits](./extension-traits) - the five swappable seams
   (RateLimiter, ConfigSource, CacheStore, AnalyticsSink, SecretSource)
   that let you replace entire subsystems with a custom or enterprise
-  backend.
+  backend. Its group also carries
+  [Building an extension](./building-extension) and the
+  [Extension trait API](./extension-trait-api).
 
 Related, outside this section: [Filter-chain
 ordering](./filter-chain-ordering) documents the eight pipeline stages

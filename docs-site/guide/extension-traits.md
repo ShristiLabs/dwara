@@ -13,6 +13,9 @@ its own crate later (see [Code organization](../architecture/overview)):
 each is self-contained behind its trait, so a backend swap is a
 config change, not a code change.
 
+Full signatures: [Extension trait API](./extension-trait-api).
+Building guide: [Building an extension](./building-extension).
+
 ## The five traits
 
 | Trait | What it owns | Default impl | Enterprise impl |
@@ -58,6 +61,8 @@ category's test scripts cover the config-driven plugin families.
   - the internal design of the extension boundaries.
 - [Plugins](./extensibility-overview) - the per-route filter chain,
   which is a separate extensibility layer from the extension traits.
-- [Extension API reference](../reference/extension-api) - full
-  signatures: every trait method, its parameter and return types, and
-  the shared error type.
+- [Extension trait API](./extension-trait-api) - full signatures:
+  every trait method, its parameter and return types, and the shared
+  error type.
+- [Building an extension](./building-extension) - the complete
+  how-to: embed dwara-core, implement a seam, register, roll out.

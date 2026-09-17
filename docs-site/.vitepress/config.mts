@@ -401,14 +401,47 @@ export default withMermaid(
                 {
                   text: "Proxy-Wasm plugins",
                   link: "/guide/proxy-wasm-plugins",
+                  collapsed: true,
+                  items: [
+                    { text: "Overview", link: "/guide/proxy-wasm-plugins" },
+                    { text: "Plugin SDK", link: "/guide/plugin-sdk" },
+                    {
+                      text: "Hostcall API reference",
+                      link: "/guide/proxy-wasm-hostcalls",
+                    },
+                  ],
                 },
                 {
                   text: "Native plugin filters",
                   link: "/guide/native-plugins",
+                  collapsed: true,
+                  items: [
+                    { text: "Overview", link: "/guide/native-plugins" },
+                    {
+                      text: "Building a native filter",
+                      link: "/guide/building-native-filter",
+                    },
+                    {
+                      text: "Native filter API",
+                      link: "/guide/native-filter-api",
+                    },
+                  ],
                 },
                 {
-                  text: "Nano-services (WASM handlers)",
+                  text: "Nano-services",
                   link: "/guide/nano-services",
+                  collapsed: true,
+                  items: [
+                    { text: "Overview", link: "/guide/nano-services" },
+                    {
+                      text: "Building a nano-service",
+                      link: "/guide/building-nano-service",
+                    },
+                    {
+                      text: "Nano-service ABI",
+                      link: "/guide/nano-service-abi",
+                    },
+                  ],
                 },
                 {
                   text: "Plugin lifecycle",
@@ -423,16 +456,24 @@ export default withMermaid(
                   link: "/guide/plugin-compat",
                 },
                 {
-                  text: "Plugin SDK",
-                  link: "/guide/plugin-sdk",
-                },
-                {
                   text: "Plugin testing",
                   link: "/guide/plugin-testing",
                 },
                 {
                   text: "Extension traits",
                   link: "/guide/extension-traits",
+                  collapsed: true,
+                  items: [
+                    { text: "Overview", link: "/guide/extension-traits" },
+                    {
+                      text: "Building an extension",
+                      link: "/guide/building-extension",
+                    },
+                    {
+                      text: "Extension trait API",
+                      link: "/guide/extension-trait-api",
+                    },
+                  ],
                 },
               ],
             },
